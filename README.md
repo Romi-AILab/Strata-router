@@ -410,8 +410,14 @@ python router.py --set-key remote --config router.json   # the borrower key
 
 It lands in `router.keys.json` next to the config (created `0600`; on Windows
 the file's NTFS inheritance is stripped so only your account can read it --
-verify with `icacls router.keys.json`), and `router.json` itself stays safe to
-show, edit or paste into an issue. Delete the file to wipe the keys.
+verify with `icacls router.keys.json`; and since v1.2.14 its CONTENT is DPAPI
+ciphertext: one blob that opens only for your Windows account on this machine,
+so a stray grep, an agent scan or a copied file sees base64 noise, never a
+key. An existing plaintext file migrates itself on the next boot -- same
+entries, encrypted. A blob moved to another account or machine deliberately
+refuses to open: keys were never meant to travel), and `router.json` itself
+stays safe to show, edit or paste into an issue. Delete the file to wipe the
+keys.
 Alternative ports: name an environment variable per backend
 (`"backend_api_key_env": "STRATA_KEY_REMOTE"` -- export it in a private window;
 `setx` echoes the key into the command line and stores it in the registry, so
@@ -423,6 +429,22 @@ box's configured key is injected EVEN WHEN the caller sent its own auth --
 shim credentials belong to the shim; the boxes get the box's key. Keys
 never appear in argv, in any log line, or in `/__router/stats` (which reports
 only `has_api_key`).
+
+**Facts a monitor must not guess (v1.2.14).** The top-level block carries
+`status_interval` (the interval actually in use -- the courtesy blind-window
+base, so a dashboard never hardcodes a wrong one), and `started_at` /
+`uptime_s` (a restart is a fact now, not an inference from counter rollback).
+Per box, presence-gated extras ride along WHEN the box publishes them (never
+fabricated zeros): `reported.decode_tok_s` -- the box's own measured generation
+speed (Strata's `predicted_per_second` for the last finished request, the
+`/metrics` instant rate where that is the shape), `reported.box_uptime_s`,
+`reported.gpu_util_pct` -- plus `stats.bytes_out` (cumulative forwarded
+response bytes: the raw material for a fleet tok/s estimate at bytes/4, the
+same "chars/4" yardstick Strata's own UI labels *estimated*) and the
+`recent_ttfb_avg_s` / `_p95_s` / `_n` window over the last 30 finished
+requests (true per-request sampling -- none of the bias a monitor's own
+polling of `last_ttfb` carries). All of it is read-side only: the placement
+ledger and the accounting identity are untouched.
 
 **Startup refuses a half-configured file.** A `REPLACE-WITH-` placeholder (box
 keys, global key, or `control_token`), a key

@@ -45,7 +45,9 @@ The four hard rules this file implements (they ARE the design):
    box holds its own key, the peer's spec holds the borrower key they issued
    you); the global field and STRATA_BACKEND_API_KEY remain the fallback.
    The standard input port is `--set-key <id>`: a hidden prompt writes the key
-   into `router.keys.json` (0600 / NTFS-inheritance stripped) so the config
+   into `router.keys.json` (0600 / NTFS-inheritance stripped; since 1.2.14
+   DPAPI ciphertext on Windows -- a stray scan sees base64 noise, and the
+   blob never opens for another user or machine) so the config
    file itself stays keyless; `backend_api_key_env` reads one backend's key
    from a named environment variable instead. Order: inline field > keys file
    > env var > keys file `global` > global field > STRATA_BACKEND_API_KEY.
@@ -81,6 +83,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import hashlib
 import hmac
@@ -102,7 +105,8 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "1.2.13"
+VERSION = "1.2.14"
+ROUTER_STARTED = int(time.time())   # process start epoch (stats started_at/uptime_s)
 LOG = logging.getLogger("strata-router")
 
 # How often the per-request watchdog peeks at the caller's socket (mirrors
@@ -116,6 +120,7 @@ CLIENT_WATCH_S = 0.5
 # plus status lag, short enough that real foreign load is never hidden for
 # long (it re-confirms itself on the next sample after the grace).
 GHOST_GRACE_S = 12.0
+RECENT_TTFB_WINDOW = 30    # per-box rolling window of finished-request ttfb (v1.2.14)
 
 # Paths accepted for generation (POST). Router path == backend path unless a
 # per-backend path_prefix is set (some builds serve only /anthropic/v1/messages).
@@ -238,8 +243,12 @@ class Backend:
             "requests": 0, "streams": 0, "connect_errors": 0, "http_4xx": 0, "http_5xx": 0,
             "stream_errors": 0, "aborted_by_client": 0, "ttfb_sum": 0.0, "ttfb_n": 0,
             "dur_sum": 0.0, "last_error": None, "last_status": None, "last_ttfb": None,
-            "migrations_from": 0,
+            "migrations_from": 0, "bytes_out": 0,
         }
+        # rolling ttfb of the last finished requests (v1.2.14): per-FINISHED-request
+        # sampling, so none of the self-polling bias a monitor's own sampling has.
+        # Bounded; appended/trimmed under self.lock at the completion tick.
+        self.recent_ttfb = []
 
     # ---- health state machine (rule 4) -----------------------------------
     def note_connect_failure(self, err, max_fails, backoff):
@@ -437,6 +446,11 @@ class Backend:
                 "reported_age_s": round(time.monotonic() - self.status_ts, 1) if self.ever_reported else None,
                 "score": round(self._score_locked(), 1),
                 "avg_ttfb_s": round(self.stats["ttfb_sum"] / self.stats["ttfb_n"], 2) if self.stats["ttfb_n"] else None,
+                "recent_ttfb_avg_s": (round(sum(self.recent_ttfb) / len(self.recent_ttfb), 2)
+                                      if self.recent_ttfb else None),
+                "recent_ttfb_p95_s": (sorted(self.recent_ttfb)[max(0, int(0.95 * (len(self.recent_ttfb) - 1) + 0.5))]
+                                      if self.recent_ttfb else None),
+                "recent_ttfb_n": len(self.recent_ttfb),
                 "stats": dict(self.stats),
             }
 
@@ -1000,6 +1014,39 @@ def walk_ints(node, path, out, depth=0):
     return out
 
 
+def _pick_box_extras(obj, out):
+    """v1.2.14 presence-gated extras: the box's OWN published numbers ride along
+    when it publishes them (Strata /v1/status carries last_timings/uptime/gpu;
+    /metrics carries the live instant rate). None means the box does not publish
+    it -- never a fabricated zero. Extras must never sink the serving/queued
+    verdict, so every access is guarded and the whole pick is best-effort."""
+    try:
+        if not isinstance(obj, dict):
+            return out
+        lt = obj.get("last_timings")
+        if isinstance(lt, dict):
+            v = lt.get("predicted_per_second")
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                out["decode_tok_s"] = round(float(v), 1)
+        live = obj.get("live")
+        if isinstance(live, dict):            # /metrics shape: instant rate instead
+            v = live.get("tok_s")
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                out.setdefault("decode_tok_s", round(float(v), 1))
+        up = obj.get("uptime_s")
+        if isinstance(up, int) and not isinstance(up, bool) and up >= 0:
+            out["box_uptime_s"] = up
+        mach = obj.get("machine")
+        gpu = mach.get("gpu") if isinstance(mach, dict) else None
+        if isinstance(gpu, dict):
+            u = gpu.get("util_pct")
+            if isinstance(u, (int, float)) and not isinstance(u, bool) and 0 <= u <= 100:
+                out["gpu_util_pct"] = int(round(float(u)))
+    except Exception:
+        pass
+    return out
+
+
 def parse_status(payload):
     try:
         obj = json.loads(payload)
@@ -1018,7 +1065,7 @@ def parse_status(payload):
         # turn -- the honest total. Its concurrency.serving is capacity, and
         # the total already includes waiting, so no queue counter is added.
         out["serving"] = known["activity.in_flight"]
-        return out
+        return _pick_box_extras(obj, out)
     if "live.queued" in known or "live.running" in known:
         # Strata /metrics: live.queued always; live.running only when the
         # engine batches -- solo service keeps its runner in live.state.
@@ -1033,14 +1080,16 @@ def parse_status(payload):
                 # an unmapped live.state with queued=0 is UNKNOWN, not idle:
                 # unknown is never idle (the gate fails closed, rule 3)
                 return None
-        return out
+        return _pick_box_extras(obj, out)
     for key, rx in (("serving", _SERVING_KEYS), ("queued", _QUEUE_KEYS)):
         cands = sorted([(len(p), v) for p, v in leaves
                         if rx.search(p) and not any(_CAP_WORD.search(seg) for seg in p.split("."))])
         if cands:
             # shallowest match wins: deep ones are per-slot detail
             out[key] = cands[0][1]
-    return out if out["serving"] is not None or out["queued"] is not None else None
+    if out["serving"] is None and out["queued"] is None:
+        return None
+    return _pick_box_extras(obj, out)
 
 
 def _parse_prometheus(payload):
@@ -1423,6 +1472,11 @@ class Handler(BaseHTTPRequestHandler):
                 "backends": [b.snapshot() for b in self.pool.backends],
                 "sticky_ttl_s": self.cfg.get("sticky_ttl"),
                 "read_timeout_s": self.cfg.get("read_timeout"),
+                # the interval actually in use (same `or 1.0` resolution as the
+                # poller itself): a monitor must never guess the blind-window base
+                "status_interval": float(self.cfg.get("status_interval") or 1.0),
+                "started_at": ROUTER_STARTED,
+                "uptime_s": int(time.time()) - ROUTER_STARTED,
                 "time": time.time(),
             })
         if path in GET_PATHS or path.endswith("/models") or path.startswith("/v1/"):
@@ -1867,10 +1921,14 @@ class Handler(BaseHTTPRequestHandler):
             with backend.lock:
                 backend.stats["streams"] += 1
                 backend.stats["dur_sum"] += duration
+                backend.stats["bytes_out"] += total
                 if ttfb is not None:
                     backend.stats["ttfb_sum"] += ttfb
                     backend.stats["ttfb_n"] += 1
                     backend.stats["last_ttfb"] = round(ttfb, 2)
+                    backend.recent_ttfb.append(round(ttfb, 2))
+                    if len(backend.recent_ttfb) > RECENT_TTFB_WINDOW:
+                        backend.recent_ttfb.pop(0)
             # A big ttfb while nothing else was running means the request was
             # sitting in the backend FIFO. That is the queue working -- watch it.
             LOG.info(
@@ -2222,20 +2280,144 @@ def build_cfg(argv):
     return cfg
 
 
-def _read_keys_file(path):
-    """JSON object of backend id -> key ("global" for the fallback key). A
-    present-but-broken file is fatal: silently dropping keys turns an
-    authenticated deployment into an anonymous one."""
+# ---- keys at rest: DPAPI ciphertext (v1.2.14) -------------------------------
+# On Windows the keys file stores ONE DPAPI blob (user scope + fixed entropy),
+# so an accidental grep, agent scan or file copy sees base64 noise, not key
+# material. The blob opens only for the same Windows user on the same machine:
+# keys were never meant to travel -- now they cannot travel by accident either.
+# Other platforms keep the plaintext JSON (0600); --set-key stays available.
+_DPAPI_TAG = "dpapi_v1"
+_DPAPI_ENTROPY = b"strata-router-keys-v1"
+
+
+def _dpapi_enabled():
+    return os.name == "nt"
+
+
+def _dpapi_crypt(data, encrypt):
+    import ctypes
+    import ctypes.wintypes
+
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    sig = [ctypes.POINTER(_BLOB), ctypes.c_wchar_p, ctypes.POINTER(_BLOB),
+           ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_BLOB)]
+    crypt32.CryptProtectData.argtypes = sig
+    crypt32.CryptUnprotectData.argtypes = sig
+    crypt32.CryptProtectData.restype = ctypes.c_bool
+    crypt32.CryptUnprotectData.restype = ctypes.c_bool
+
+    def blob(b):
+        buf = ctypes.create_string_buffer(b, len(b))
+        return _BLOB(len(b), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), buf
+
+    src, _keep1 = blob(data)            # keep the buffers alive across the call
+    ent, _keep2 = blob(_DPAPI_ENTROPY)
+    out = _BLOB()
+    fn = crypt32.CryptProtectData if encrypt else crypt32.CryptUnprotectData
+    ok = fn(ctypes.byref(src), None, ctypes.byref(ent), None, None, 0x01, ctypes.byref(out))
+    if not ok:
+        raise OSError("DPAPI %s failed (%d)" % ("protect" if encrypt else "unprotect",
+                                                ctypes.GetLastError()))
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        kernel32.LocalFree(out.pbData)
+
+
+def _wrap_keys(obj):
+    """Plain dict -> the on-disk form (DPAPI envelope on Windows, JSON elsewhere)."""
+    if not _dpapi_enabled():
+        return obj
+    blob = _dpapi_crypt(json.dumps(obj, sort_keys=True).encode("utf-8"), True)
+    return {_DPAPI_TAG: base64.b64encode(blob).decode("ascii")}
+
+
+def _unwrap_keys(data, path):
+    """On-disk form -> (plain dict, was_encrypted). Envelope detection is by
+    SHAPE: exactly one key, and it is the tag. A blob that will not open is
+    fatal (fail-closed like every other half-config), and says WHY: blobs are
+    bound to one Windows user on one machine, so an unopenable blob almost
+    always means this file was copied from somewhere else."""
+    if not (isinstance(data, dict) and list(data) == [_DPAPI_TAG]
+            and isinstance(data[_DPAPI_TAG], str)):
+        return data, False
+    if not _dpapi_enabled():
+        raise SystemExit("keys file %s: DPAPI envelope but this platform has no DPAPI" % path)
+    try:
+        out = json.loads(_dpapi_crypt(base64.b64decode(data[_DPAPI_TAG], validate=True), False)
+                         .decode("utf-8"))
+    except SystemExit:
+        raise
+    except Exception:
+        raise SystemExit("keys file %s: the DPAPI blob does not open -- it was created by another "
+                         "Windows user or on another machine (blobs never travel). "
+                         "Retype the keys with --set-key." % path)
+    if not isinstance(out, dict):
+        raise SystemExit("keys file %s: ciphertext opened to a non-object -- refusing" % path)
+    return out, True
+
+
+def _write_keys_file(path, keys):
+    """Atomic, ACL-hardened write of the keys file, encrypted where the platform
+    allows. Shared by --set-key and the boot-time plaintext migration.
+    Atomic rewrite (L2-3/L3): O_TRUNC on the real path meant a crash or a
+    ctrl-C mid-write left half a file, and every later boot refused to start
+    (fail-closed, but an outage until an operator blind-fixes it). Write a
+    sibling temp, lock its ACL, then os.replace() in one atomic rename."""
+    payload = _wrap_keys(keys)          # before touching the filesystem: a failed
+    #                                    # encryption must leave the file untouched
+    tmp = path + ".new"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+        if os.name != "nt":
+            try:
+                os.chmod(tmp, 0o600)   # O_CREAT mode is ignored on an existing file
+            except OSError:
+                pass
+        note = ""
+        if os.name == "nt":
+            try:
+                me = os.environ.get("USERNAME") or os.getlogin()
+                subprocess.run(["icacls", tmp, "/inheritance:r", "/grant:r", "%s:F" % me],
+                               capture_output=True, timeout=15, check=True)
+                note = "; NTFS inheritance stripped (only %s can read it)" % me
+                note += "; DPAPI ciphertext (opens only for this user on this machine)"
+            except Exception as exc:
+                note = ('; WARNING icacls failed (%s) -- run it yourself on %s: icacls "%s" '
+                        '/inheritance:r /grant:r "%%USERNAME%%:F"' % (exc, path, path))
+        os.replace(tmp, path)          # replace AFTER icacls: no inherited-ACL window on the real path
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)         # never leave a stale .new behind
+        except OSError:
+            pass
+    return note
+
+
+def _read_keys_file2(path):
+    """JSON object of backend id -> key ("global" for the fallback key), plus
+    whether the file was DPAPI ciphertext. A present-but-broken file is fatal:
+    silently dropping keys turns an authenticated deployment into an anonymous
+    one."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
-        return {}
+        return {}, False
     except Exception as exc:
         raise SystemExit("keys file %s: unreadable (%s) -- fix or delete it; refusing to guess keys"
                          % (path, exc.__class__.__name__))
     if not isinstance(data, dict):
         raise SystemExit("keys file %s: must be a JSON object of backend id -> key" % path)
+    data, was_enc = _unwrap_keys(data, path)
     out = {}
     for k, v in data.items():
         if not isinstance(v, str):
@@ -2246,7 +2428,12 @@ def _read_keys_file(path):
                              % (path, str(k), type(v).__name__))
         out[str(k)] = v  # stored RAW: --set-key re-serialises this dict and must
         #                # not silently strip siblings (L2-3/L4); users strip at use
-    return out
+    return out, was_enc
+
+
+def _read_keys_file(path):
+    keys, _enc = _read_keys_file2(path)
+    return keys
 
 
 def _usable_key(value):
@@ -2280,7 +2467,7 @@ def apply_keys(cfg, config_path, creating=False):
     creating=True (--set-key) tolerates a not-yet-existing explicit keys
     file: that command is the one that makes it."""
     path = _keys_path_for(cfg, config_path, must_exist=not creating)
-    keys = _read_keys_file(path) if path else {}
+    keys, was_enc = _read_keys_file2(path) if path else ({}, True)
     if path:
         cfg["_keys_path"] = path
         for k, v in keys.items():
@@ -2299,6 +2486,18 @@ def apply_keys(cfg, config_path, creating=False):
         for k in keys:
             if k not in known:
                 LOG.warning("keys file %s: entry %r matches no backend id (typo?)", path, k)
+        if not was_enc and _dpapi_enabled():
+            # v1.2.14 one-way migration, AFTER validation: same entries, rewritten
+            # as DPAPI ciphertext. Failures only warn -- boot continues on the
+            # validated plaintext (monitoring must never be the reason a serving
+            # change breaks; the operator sees the warning and can --set-key).
+            try:
+                _write_keys_file(path, keys)
+                LOG.info("keys file %s: migrated to DPAPI ciphertext (same entries; opens only for "
+                         "this Windows user on this machine)", path)
+            except Exception as exc:
+                LOG.warning("keys file %s: still plaintext -- migration failed (%s); rerun --set-key "
+                            "to store it encrypted", path, exc.__class__.__name__)
     # optional control-surface gate: inline field first, then the keys-file
     # "control" entry (a secret belongs in the 0600 file, not the config)
     tok = str(cfg.get("control_token") or "").strip()
@@ -2372,37 +2571,11 @@ def set_key(cfg, backend_id, config_path, keys_path):
         print("the key contains control bytes -- nothing stored")
         return 2
     keys[backend_id] = key
-    # Atomic rewrite (L2-3/L3): O_TRUNC on the real path meant a crash or a
-    # ctrl-C mid-write left half a file, and every later boot refused to start
-    # (fail-closed, but an outage until an operator blind-fixes it). Write a
-    # sibling temp, lock its ACL, then os.replace() in one atomic rename.
-    tmp = path + ".new"
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(keys, fh, indent=2, sort_keys=True)
-        if os.name != "nt":
-            try:
-                os.chmod(tmp, 0o600)   # O_CREAT mode is ignored on an existing file
-            except OSError:
-                pass
-        note = ""
-        if os.name == "nt":
-            try:
-                me = os.environ.get("USERNAME") or os.getlogin()
-                subprocess.run(["icacls", tmp, "/inheritance:r", "/grant:r", "%s:F" % me],
-                               capture_output=True, timeout=15, check=True)
-                note = "; NTFS inheritance stripped (only %s can read it)" % me
-            except Exception as exc:
-                note = ('; WARNING icacls failed (%s) -- run it yourself on %s: icacls "%s" '
-                        '/inheritance:r /grant:r "%%USERNAME%%:F"' % (exc, path, path))
-        os.replace(tmp, path)          # replace AFTER icacls: no inherited-ACL window on the real path
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.unlink(tmp)         # never leave a stale .new behind
-        except OSError:
-            pass
+        note = _write_keys_file(path, keys)
+    except Exception as exc:
+        print("cannot store the key (%s) -- nothing written" % exc)
+        return 2
     print("stored key for %r (%d chars) in %s%s -- keep this file out of git, chat and cloud drives"
           % (backend_id, len(key), path, note))
     return 0

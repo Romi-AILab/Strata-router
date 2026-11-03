@@ -1302,13 +1302,16 @@ def main():
                              "local", None, _kpath2)
         finally:
             R.getpass.getpass = _ogp
-        _back2 = json.load(open(_kpath2, encoding="utf-8"))
+        _back2 = R._read_keys_file(_kpath2)          # decrypted view (v1.2.14)
+        _raw2 = open(_kpath2, "rb").read()
+        _sealed2 = (not R._dpapi_enabled()) or (b"new-ka" not in _raw2 and b"padded-peer" not in _raw2)
         check("--set-key rewrites atomically and leaves untouched siblings byte-faithful "
-              "(no silent strip, no stale .new; L2-3/L3+L4)",
+              "(no silent strip, no stale .new; L2-3/L3+L4); on Windows no key bytes survive in the raw file",
               _rc2 == 0 and _back2.get("local") == "new-ka"
               and _back2.get("remote") == "  padded-peer  "
-              and sorted(os.listdir(_kdir2)) == ["router.keys.json"],
-              "rc=%s %s" % (_rc2, _back2))
+              and sorted(os.listdir(_kdir2)) == ["router.keys.json"]
+              and _sealed2,
+              "rc=%s entries=%s sealed=%s" % (_rc2, sorted(_back2), _sealed2))
 
         print("")
         print("5f) 2x2 stress guards -- protocol edges (P1) + scope/lane integrity & metric honesty (P2), v1.2.12")
@@ -1774,6 +1777,19 @@ def main():
                                   extra={"x-api-key": None, "x-strata-pin": "R"})
             check("the borrowed box accepted a DIFFERENT key of its own",
                   st == 200 and h.get("x-strata-backend") == "R", "status=%s box=%s" % (st, h.get("x-strata-backend")))
+            _s14 = stats(ROUTER3_PORT)
+            _bL14 = next(b for b in _s14["backends"] if b["id"] == "L")
+            check("v1.2.14: /stats carries started_at/uptime_s/status_interval facts and they are sane",
+                  isinstance(_s14.get("started_at"), int) and 0 < _s14["started_at"] <= int(time.time()) + 2
+                  and _s14.get("uptime_s", -1) >= 0
+                  and isinstance(_s14.get("status_interval"), (int, float))
+                  and 0 < _s14["status_interval"] <= 3600,
+                  str({k: _s14.get(k) for k in ("started_at", "uptime_s", "status_interval")}))
+            check("v1.2.14: finished requests feed the box's bytes_out counter and the rolling ttfb window",
+                  _bL14["stats"].get("bytes_out", 0) > 0 and _bL14.get("recent_ttfb_n", 0) >= 1
+                  and _bL14.get("recent_ttfb_avg_s") is not None,
+                  "bytes=%s n=%s avg=%s" % (_bL14["stats"].get("bytes_out"),
+                                            _bL14.get("recent_ttfb_n"), _bL14.get("recent_ttfb_avg_s")))
             st, h, _bb, _w = call(ROUTER3_PORT, "/v1/messages", conv("key-client-wins"),
                                   extra={"x-api-key": "wrong-on-purpose", "x-strata-pin": "R"})
             check("a caller's stale shim key is REPLACED by the configured box key (S2: shim bearer must not 401 the boxes)",
@@ -2132,9 +2148,13 @@ def main():
             try:
                 R.getpass.getpass = lambda prompt="": "sekret-ka"
                 rc = R.set_key({"backends": [{"id": "local", "url": "http://127.0.0.1:1"}]}, "local", None, kpath)
-                stored = json.load(open(kpath, encoding="utf-8"))
-                check("--set-key stores the typed key in the keys file, exit 0, key out of the config",
-                      rc == 0 and stored.get("local") == "sekret-ka", "rc=%s %s" % (rc, list(stored)))
+                stored = R._read_keys_file(kpath)    # decrypted view (v1.2.14)
+                _rawk = open(kpath, "rb").read()
+                _sealed = (not R._dpapi_enabled()) or (b"sekret-ka" not in _rawk and b"dpapi_v1" in _rawk)
+                check("--set-key stores the typed key in the keys file, exit 0, key out of the config; "
+                      "on Windows the raw file is DPAPI ciphertext with no key bytes in it",
+                      rc == 0 and stored.get("local") == "sekret-ka" and _sealed,
+                      "rc=%s entries=%s sealed=%s" % (rc, sorted(stored), _sealed))
                 cfgk = {"backends": [{"id": "local", "url": "http://127.0.0.1:1",
                                       "backend_api_key": "REPLACE-WITH-THIS-BOX-KEY"}], "keys_file": kpath}
                 R.apply_keys(cfgk, None)
@@ -2155,7 +2175,7 @@ def main():
                 R.getpass.getpass = lambda prompt="": "bad\nkey"
                 rc_ctl = R.set_key({"backends": [{"id": "local", "url": "http://127.0.0.1:1"}]}, "local", None, kpath)
                 check("--set-key refuses a key with control bytes (nothing stored)",
-                      rc_ctl == 2 and json.load(open(kpath, encoding="utf-8")).get("local") == "sekret-ka",
+                      rc_ctl == 2 and R._read_keys_file(kpath).get("local") == "sekret-ka",
                       "rc=%s" % rc_ctl)
                 with open(kpath, "w", encoding="utf-8") as _kf:
                     json.dump({"poison": "bad\r\nkey"}, _kf)
@@ -2175,6 +2195,48 @@ def main():
                     os.rmdir(kdir)
                 except OSError:
                     pass
+
+            # ---- v1.2.14: DPAPI at rest + presence-gated box extras --------------
+            _k14 = tempfile.mkdtemp(prefix="strata-keys14-")
+            _p14 = os.path.join(_k14, "router.keys.json")
+            with open(_p14, "w", encoding="utf-8") as _f14:
+                json.dump({"local": "plain-k14"}, _f14)
+            _cfg14 = {"backends": [{"id": "local", "url": "http://127.0.0.1:1"}], "keys_file": _p14}
+            R.apply_keys(_cfg14, None)               # boot path: validate, then migrate
+            _raw14 = open(_p14, "rb").read()
+            _mig14 = ((not R._dpapi_enabled())
+                      or (b"dpapi_v1" in _raw14 and b"plain-k14" not in _raw14))
+            check("v1.2.14: a validated PLAINTEXT keys file migrates to DPAPI ciphertext at boot "
+                  "(same resolved key; no key bytes left in the raw file on Windows)",
+                  _cfg14["backends"][0].get("backend_api_key") == "plain-k14" and _mig14,
+                  "resolved=%s migrated=%s" % (bool(_cfg14["backends"][0].get("backend_api_key")), _mig14))
+            if R._dpapi_enabled():
+                _bad14 = os.path.join(_k14, "router.badkeys.json")
+                with open(_bad14, "w", encoding="utf-8") as _f14b:
+                    json.dump({"dpapi_v1": "AAAA"}, _f14b)
+                try:
+                    R._read_keys_file(_bad14)
+                    _b14 = False
+                except SystemExit as _e14:
+                    _b14 = "never travel" in str(_e14)
+                check("v1.2.14: an unopenable DPAPI blob is fatal and names the copied-file "
+                      "failure mode (blobs never travel between users/machines)", _b14)
+            _ex14 = R.parse_status(json.dumps({
+                "activity": {"in_flight": 2, "requests": 5, "last_request_at": 1700000000},
+                "last_timings": {"predicted_per_second": 38.42},
+                "uptime_s": 3601,
+                "machine": {"gpu": {"name": "X", "util_pct": 74.6}}}))
+            check("v1.2.14: Strata /v1/status extras ride along when published (decode tok/s, "
+                  "box uptime, gpu util) -- the serving verdict itself is untouched",
+                  _ex14 == {"serving": 2, "queued": None, "decode_tok_s": 38.4,
+                            "box_uptime_s": 3601, "gpu_util_pct": 75}, str(_ex14))
+            _ex14b = R.parse_status(json.dumps({"live": {"queued": 0, "running": 1, "tok_s": 31.7}}))
+            check("v1.2.14: the /metrics shape contributes its instant live.tok_s when present",
+                  _ex14b == {"serving": 1, "queued": 0, "decode_tok_s": 31.7}, str(_ex14b))
+            _ex14c = R.parse_status(json.dumps({"activity": {"in_flight": 1}}))
+            check("v1.2.14: extras are PRESENCE-gated -- a box that publishes nothing changes "
+                  "nothing (no fabricated zeros, old output shape)",
+                  _ex14c == {"serving": 1, "queued": None}, str(_ex14c))
         finally:
             proc4.terminate()
             try:
