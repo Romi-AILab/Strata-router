@@ -1,0 +1,14 @@
+# the keys file is the secret -- it never goes near a remote
+router.keys.json
+*.keys.json
+
+# machine-local config: real box IPs and deployment details stay on this machine
+# (ship router.remote.example.json instead -- the friend renames it to router.json)
+router.json
+*.log
+pyprocs.txt
+*.pid
+
+__pycache__/
+*.pyc
+.claude/

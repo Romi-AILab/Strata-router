@@ -1,0 +1,23 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8088,
+  "backends": [
+    { "id": "local", "url": "http://127.0.0.1:8081", "path_prefix": "", "probe_model": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
+      "priority": 0, "max_inflight": 1, "require_idle": true, "backend_api_key": "REPLACE-WITH-THIS-BOX-KEY" },
+    { "id": "remote", "url": "http://peer-box.tsnet.invalid:8080", "path_prefix": "", "probe_model": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
+      "priority": 1, "max_inflight": 1, "require_idle": true, "backend_api_key": "REPLACE-WITH-PEER-BORROWER-KEY" }
+  ],
+  "path_prefix": "",
+  "sticky_ttl": 21600,
+  "connect_timeout": 5.0,
+  "read_timeout": 3600.0,
+  "max_connect_failures": 3,
+  "down_backoff": 20.0,
+  "status_interval": 1.0,
+  "status_paths": ["/v1/status", "/metrics"],
+  "max_body_mb": 512,
+  "backend_api_key": "",
+  "expose_affinity": true,
+  "rewrite_model": {},
+  "log_level": "INFO"
+}
