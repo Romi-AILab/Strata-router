@@ -105,7 +105,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "1.2.14"
+VERSION = "1.2.15"
 ROUTER_STARTED = int(time.time())   # process start epoch (stats started_at/uptime_s)
 LOG = logging.getLogger("strata-router")
 
@@ -1162,7 +1162,10 @@ class StatusPoller(threading.Thread):
                 # mark the report stale and try the other status path.
                 with be.lock:
                     be.status_ok = False
-                    be.status_error = sub + ": no answer (" + body + ")"
+                    # upstream body is UNTRUSTED text on its way into /stats --
+                    # clip it (review R1-B/F10): a hostile box must not turn the
+                    # unauthenticated stats feed into its own message board
+                    be.status_error = sub + ": no answer (" + (body[:120] + ("…" if len(body) > 120 else "")) + ")"
                 continue
             # ANY HTTP answer -- even 401 or 500 -- proves the box is alive
             # (rule 4), and clears connect-failure debt from earlier stalls.
@@ -2371,7 +2374,8 @@ def _write_keys_file(path, keys):
     sibling temp, lock its ACL, then os.replace() in one atomic rename."""
     payload = _wrap_keys(keys)          # before touching the filesystem: a failed
     #                                    # encryption must leave the file untouched
-    tmp = path + ".new"
+    tmp = path + ".new.%d" % os.getpid()   # unique: two --set-key runs must not
+    #                                       # write the same temp (review R1-B/F11)
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
