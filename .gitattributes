@@ -1,0 +1,7 @@
+# Line-endings policy (M2-A/P1-4): what the friend gets after a clone is a
+# property of the repo, not of each friend's core.autocrlf setting.
+# !-start.bat's own comment: LF-only breaks cmd parsing -- pin it CRLF at
+# checkout on EVERY clone (autocrlf=true or false, CI, scoop, portable git);
+# sources stay LF everywhere (their blobs already are).
+*.bat text eol=crlf
+*.py  text eol=lf

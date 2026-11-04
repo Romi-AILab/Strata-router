@@ -22,6 +22,12 @@ import threading
 import time
 import unittest
 
+try:                     # M2-A/P1-3:本套輸出大量 CJK(測詞、docstring、失敗 detail),
+    sys.stdout.reconfigure(errors="replace")   # cp950/Big5 控制台上紅測只准變 mojibake,
+    sys.stderr.reconfigure(errors="replace")   # 不准在 verdict 之前炸掉整套
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -1064,6 +1070,8 @@ class TestConsoleFlow(unittest.TestCase):               # 使用者指示:同窗
         finally:
             if old is None:
                 os.environ.pop("STRATA_ROUTER_DIR", None)
+            else:                                # 雙向還原:外部已設的值不得洩漏給後續測
+                os.environ["STRATA_ROUTER_DIR"] = old
         self.assertEqual(B.n_start, 1)                 # 本機目標:自動起
         self.assertEqual(len(B.live_calls), 1)         # 面板照掛,死活由面板誠實回報
 
@@ -1088,13 +1096,27 @@ class TestConsoleFlow(unittest.TestCase):               # 使用者指示:同窗
     def test_ctrl_c_during_start_returns_clean(self):   # R3-P3-5:等上線期間 Ctrl+C 不裸 traceback
         B = self._patch(False, kind="refused")
         self._cfgfile("127.0.0.1")
+        # M2-B/P2-1:run_console 只有在找得到 router.py 時才會碰 do_start --
+        # 自給 fake 佈局,本測在「純 monitor 副本」下也必須綠(比照隣測)。
+        old = os.environ.get("STRATA_ROUTER_DIR")
+        fake = os.path.join(_TMP, "fakerouter3")
+        os.makedirs(fake, exist_ok=True)
+        with open(os.path.join(fake, "router.py"), "w", encoding="utf-8") as fh:
+            fh.write("VERSION = '9.9.9'\n")
+        os.environ["STRATA_ROUTER_DIR"] = fake
 
         def boom(assume_yes=False):
             raise KeyboardInterrupt()
         launch.do_start = boom                          # _undo 已記真原函式,tearDown 會還原
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = launch.run_console()                   # 舊版此處直接拋穿 -> traceback rc=1
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = launch.run_console()               # 舊版此處直接拋穿 -> traceback rc=1
+        finally:
+            if old is None:
+                os.environ.pop("STRATA_ROUTER_DIR", None)
+            else:
+                os.environ["STRATA_ROUTER_DIR"] = old
         self.assertEqual(rc, 0)
         self.assertIn("中斷", buf.getvalue())
         self.assertEqual(B.live_calls, [])

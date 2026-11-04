@@ -1,6 +1,13 @@
 # the keys file is the secret -- it never goes near a remote
 router.keys.json
 *.keys.json
+# --set-key replace-retry per-pid temps (<keys>.json.new.<pid>): a zombie
+# survives a replace that keeps failing or a process that dies mid-write, and
+# it holds the WHOLE keyring -- DPAPI ciphertext on Windows, plaintext on the
+# non-Windows fallback. "*.keys.json" never matched them (the suffix must end
+# the name); the first-layer red line must not let git add one by accident
+# (M2-A/P2-1).
+*.keys.json.new.*
 
 # machine-local config: real box IPs and deployment details stay on this machine
 # (ship router.remote.example.json instead -- the friend renames it to router.json)

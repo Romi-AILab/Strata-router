@@ -19,9 +19,11 @@ router 過載的時刻正是最需要「另一支程序」讀數的時刻,rmon �
 python run_all_tests.py
 ```
 
-先跑**打包紅線閘**(`audit_package.py`:追蹤檔白名單集合等式、機密 grep、
-機器-local 設定必被 ignore),再依序跑 router 的 smoke 與 monitor 的測試,
+先跑**打包紅線閘**(`audit_package.py`:追蹤檔白名單集合等式+盤上存在性、
+機密 grep **worktree/index/HEAD 三道視圖**、機器-local 設定必被 ignore、
+`--selftest` 合成 canary 自證閘仍有牙),再依序跑 router 的 smoke 與 monitor 的測試,
 並對每套測試的**條數下限**把關——紅線測「消失」比紅測更危險,所以少一條就 fail。
+全套對 ANSI 代碼頁(cp950/Big5)fail-safe:紅測只准印成 mojibake,不准在 verdict 前炸掉儀表板。
 
 ## 資安紅線(整個 repo 的結構性約束)
 
@@ -31,6 +33,8 @@ python run_all_tests.py
   `router/router.remote.example.json` 與 `monitor/monitor.json.example`。
 - 金鑰進出的唯一門是 `router/router.py --set-key`(DPAPI 加密落盤)。
 - 朋友鏡像應得的檔案集合 = `audit_package.py` 的白名單,**集合等式**,不多不少。
+- **行尾**:`.gitattributes` 把 `!-start.bat` 鎖定為 checkout 必 CRLF(cmd 的硬要求)、
+  `.py` 必 LF——朋友拿到什麼形態是 repo 的性質,不取決於各人机器的 `core.autocrlf`。
 
 ## 版本與發行列車
 

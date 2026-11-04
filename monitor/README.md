@@ -103,3 +103,5 @@ python rmon.py --replay FILE # 回放拍序列(JSON 單拍或 JSONL),不碰網�
 
 `python tests_rmon.py -v` 全綠;紅線(零 POST、零金鑰讀取、零網頁、3.8 相容)都寫成了一條條測試。
 本包對 `:8088` 與真實機器零假設:測試全部走 temp dir 與記憶體資料,不佔任何 port。
+測試亦**不賴佈局**:把這個資料夾單獨拷到任何地方,`tests_rmon.py` 照全綠
+(M2-B/P2-1 修掉了唯一一條暗賴 monorepo `../router` 存在的測)。

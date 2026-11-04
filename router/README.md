@@ -570,7 +570,7 @@ the identity still closes over every request.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 178 checks; needs loopback
+python smoke_test.py     # 203 checks; needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the

@@ -36,16 +36,24 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:                     # M2-A/P1-3: check() 的紅字 detail 可能含 CJK fixture,
+    sys.stdout.reconfigure(errors="replace")   # cp950/Big5 控制台只能印成 mojibake,
+    sys.stderr.reconfigure(errors="replace")   # 絕不許把 summary 與 verdict 一起吞掉
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROUTER = os.path.join(HERE, "router.py")
 sys.path.insert(0, HERE)
 import router as R  # noqa: E402  -- direct import for startup-validation unit checks
 
 # RED LINE, and it is load-bearing: a router booted WITHOUT --config anchors
-# the keys-file default to the CURRENT DIRECTORY. Smoke runs from
-# D:\strata-router, whose router.keys.json holds the real keys -- every
+# the keys-file default to the CURRENT DIRECTORY. Smoke may be launched from
+# anywhere (repo root, router/, any friend folder) and any of those cwds can
+# be a real deployment whose router.keys.json holds the real keys -- every
 # subprocess boot and every in-process apply_keys(cfg, None) below would
-# silently READ that file. Anchor all of it in a private temp dir instead.
+# silently READ that file. Anchor all of it in a private temp dir first.
+# (Wording per M2-B/P3-3; the chdir itself is untouched and stays load-bearing.)
 os.chdir(tempfile.mkdtemp(prefix="strata-smoke-cwd-"))
 
 ROUTER_PORT, ROUTER2_PORT, ROUTER3_PORT, ROUTER4_PORT, A_PORT, B_PORT, C_PORT, D_PORT = \

@@ -9,18 +9,32 @@ can make: once pushed, it lives in history and in every clone forever. Tests
 catch logic bugs; nothing else catches a secret that was never logic. So the
 gate comes BEFORE the files move, and CI-by-hand runs it after every commit.
 
-Three checks, all green or non-zero exit:
+Checks, all green or non-zero exit:
   1. TRACK WHITELIST -- git-tracked files must EQUAL EXPECTED_TRACKED
      (set equality: a missing file is the friend's broken mirror, an extra
-     file is a secret waiting to happen; neither is "harmless").
-  2. SECRET GREP -- every tracked text file (or, with --gate, every file
-     handed to the command line, e.g. files about to enter the repo) scans
-     clean against the patterns below.
+     file is a secret waiting to happen; neither is "harmless"). Every
+     tracked file must ALSO exist on disk: the equality reads the index,
+     so an on-disk deletion stayed invisible to this gate until commit
+     (M2-A/P3-5; run_all_tests only covered the two suite files).
+  2. SECRET GREP -- every whitelisted file is scanned in THREE views:
+     worktree, git index, and HEAD. "Green before push" must mean the
+     pushable content is clean, not merely the file currently on disk:
+     commit-a-secret-then-edit-it-out used to audit ALL GREEN with the
+     secret still in HEAD (M2-A/P1-2). Non-UTF-8 files are not skipped
+     wholesale -- a notepad "save as UTF-16" once blinded the whole file
+     (M2-A/P2-2).
   3. IGNORE ASSERT -- machine-local config paths must be git-ignored even
      when they exist on this dev machine.
+  4. --selftest -- synthetic canaries prove the patterns still have teeth.
+     A round-1 L2 found this gate blind to exactly the key shape this
+     project exists to proxy (M2-A/P1-1): a gate without teeth is a
+     sticker, so the teeth are now asserted, not assumed.
 
 Run from the repo root:  python audit_package.py
+Prove the teeth:         python audit_package.py --selftest
 Pre-commit gate:         python audit_package.py --gate monitor/rmon.py ...
+(--gate accepts files OR directories, resolved against the CWD; the full
+modes always resolve against this file -- M2-A/P3-2 cwd-semantics note.)
 """
 from __future__ import annotations
 
@@ -34,6 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # The friend's mirror IS this exact set -- the review scope of any change to
 # packaging is "did this line change, and only this line".
 EXPECTED_TRACKED = {
+    ".gitattributes",
     ".gitignore",
     "README.md",
     "audit_package.py",
@@ -52,9 +67,13 @@ EXPECTED_TRACKED = {
 
 # Paths that must NEVER be tracked, and must match .gitignore on a dev box
 # where they DO exist (router.json is created by every real deployment).
+# The zombie probe is a --set-key replace-retry temp (per-pid suffix): it
+# holds the whole keyring when a replace keeps failing, and "*.keys.json"
+# never matched it (M2-A/P2-1).
 MUST_IGNORE = [
     "router/router.json",
     "router/router.keys.json",
+    "router/router.keys.json.new.99999",
     "monitor/monitor.json",
     "router/router.log",
     "router/__pycache__/router.cpython-313.pyc",
@@ -63,24 +82,49 @@ MUST_IGNORE = [
 # Real Tailscale/CGNAT space only (the RFC 6598 range): docs may print the
 # fake 203.0.113.71 (RFC 5737) forever; version strings like 1.2.100.1 must
 # not raise a false alarm on a range no documentation is allowed to carry.
-# (This comment spells no address on purpose -- the gate scans itself too.)
-_TAILSCALE = re.compile(r"100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}")
-# API-key shapes: sk-<20+ alnum>, minus the project's own FAKE sentinels.
-_APIKEY = re.compile(r"sk-(?!FAKE|fake)[A-Za-z0-9]{20,}")
-# Long opaque runs: ciphertext blobs and base64 secrets. Hex commit refs are
-# short (7-8 chars) and URLs break the run with punctuation -- if this ever
-# fires on legitimate prose, FIX THE PROSE, not the pattern, and say why.
-_B64ISH = re.compile(r"[A-Za-z0-9+/]{44,}={0,2}")
+# Three-segment forms count too -- a "redacted" three-octet prefix still
+# pins someone's overlay (M2-A/P2-2). (This comment spells no address on
+# purpose -- the gate scans itself too.)
+_TAILSCALE = re.compile(r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){1,2}\b")
+# API-key shapes: "sk-" + body of >=12 keychars. The body class includes
+# hyphen/underscore: real Anthropic keys are sk-ant-api03-<base64url> and
+# slid straight through an alnum-only class, which is exactly the one key
+# shape this project exists to proxy (M2-A/P1-1). \b keeps prose
+# ("task-based", "risk-analyze") quiet; the project's own FAKE sentinels
+# stay exempted by the lookahead.
+_APIKEY = re.compile(r"\bsk-(?!FAKE|fake|Fake)[A-Za-z0-9_\-]{12,}")
+# Long opaque runs: ciphertext blobs and base64 secrets. Threshold is 32,
+# not 44 -- base64url secrets chopped by hyphens/underscores evaded 44
+# (M2-A/P2-2). If this ever fires on legitimate prose, FIX THE PROSE, not
+# the pattern, and say why in the commit.
+_B64ISH = re.compile(r"[A-Za-z0-9+/]{32,}={0,2}")
+# 40+ hex: sha-shaped tokens. Docs that must cite a commit use 7-8 char
+# short refs (M2-A/P2-2).
+_HEXLONG = re.compile(r"[0-9a-f]{40,}")
+# Tailscale MagicDNS hostnames identify a real machine even with no IP in
+# sight. The shipped example host uses the reserved ".tsnet.invalid" shape
+# instead; a real MagicDNS name must never replace it. (The backslash-
+# escaped pattern source is invisible to its own scan -- keep it that way.)
+_TSNET = re.compile(r"\.ts\.net", re.IGNORECASE)
+# Drive-anchored user-home path: the shape a machine identity takes inside
+# pasted logs and config snippets. (Described, never spelled: any literal
+# form in this file's prose would trip this very scan.)
+_USERSDIR = re.compile(r"[A-Za-z]:[/\\]+Users[/\\]", re.IGNORECASE)
 # This development machine's identity must never ride the mirror. The
 # literals are split so the gate's OWN source cannot trip its own scanner
 # (adjacent string-literal concatenation happens at compile time -- the
-# compiled pattern is whole even though no single source line is).
+# compiled pattern is whole even though no single source line is). Note
+# (M2-A/N4): the same split hides the pattern from external plaintext
+# greps -- deliberate here, but keep it in mind when auditing this tool.
 _USER = re.compile(r"SH_" r"Yun|sheng" r"yun", re.IGNORECASE)
 
 PATTERNS = [
     ("tailscale/CGNAT address", _TAILSCALE),
     ("api-key-shaped token", _APIKEY),
     ("long base64/blob", _B64ISH),
+    ("long hex token", _HEXLONG),
+    ("tailscale magic-dns name", _TSNET),
+    ("user-home path", _USERSDIR),
     ("machine username", _USER),
 ]
 
@@ -102,28 +146,117 @@ def tracked_files():
     return set(x.strip() for x in out.splitlines() if x.strip())
 
 
-def scan_content(name, data):
-    """data: bytes. Returns list of 'pattern@line=N' hits."""
-    hits = []
+def git_blob(spec):
+    """Bytes of `git cat-file blob <spec>`, or None if the object is absent
+    (new file has no HEAD blob; that is not an error)."""
+    r = subprocess.run(["git", "cat-file", "blob", spec], cwd=HERE,
+                       capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def decode_views(data):
+    """bytes -> list of candidate texts. utf-8 if it decodes; else UTF-16
+    when a leading NUL hints at a wide encoding, with latin-1 (never fails,
+    byte-lossless) as the last look. A file is only skipped if nothing can
+    read it at all -- which is nothing (M2-A/P2-2)."""
     try:
-        text = data.decode("utf-8")
+        return [data.decode("utf-8")]
     except UnicodeDecodeError:
-        return hits  # binary: patterns are text shapes; whitelist governs entry
-    for i, line in enumerate(text.splitlines(), 1):
-        for label, pat in PATTERNS:
-            if pat.search(line):
-                hits.append("%s @ %s:%d" % (label, name, i))
+        pass
+    views = []
+    if b"\x00" in data[:2]:
+        for enc in ("utf-16", "utf-16-le", "utf-16-be"):
+            try:
+                views.append(data.decode(enc))
+                break
+            except (UnicodeDecodeError, ValueError, UnicodeError):
+                continue
+    views.append(data.decode("latin-1"))
+    return views
+
+
+def scan_content(name, data):
+    """data: bytes. Returns list of 'pattern@name[view]:line=N' hits."""
+    hits = []
+    for vi, text in enumerate(decode_views(data)):
+        tag = "utf8" if vi == 0 else "alt%d" % vi
+        for i, line in enumerate(text.splitlines(), 1):
+            for label, pat in PATTERNS:
+                if pat.search(line):
+                    hits.append("%s @ %s[%s]:%d" % (label, name, tag, i))
     return hits
 
 
+# ---------------------------------------------------------------- selftest
+# Synthetic canaries (M2-A/P1-1). Every string is assembled at RUNTIME from
+# fragments, so this file's own bytes stay clean, and every value is a
+# SHAPE, never a real secret -- the teeth are what is under test. must_hit
+# lines must fire; must_miss lines must stay silent, and they include the
+# real fake shapes this repo ships. A pattern edit that dulls either edge
+# fails this gate: the audit keeps its own teeth honest.
+
+def _canaries():
+    must_hit = [
+        ("anthropic key", "sk-" + "ant-api03-" + "SyntheticAbCdEf0123456" +
+                          "789abcdefghIJKLmnopqr" + "stuv0123456789WXYZ"),
+        ("openai key", "sk-" + "P" * 48),
+        ("proj key", "sk-" + "proj-Ab12Cd34Ef56Gh78"),
+        ("hyphen/underscore key", "sk-" + "ab_cd-ef_gh-ij_kl-mn"),
+        ("base64 blob", "Qb7" + "x" * 37 + "=="),
+        ("hex token", "d" * 40),
+        ("cgnat four-octet", "100" + "." + "67" + "." + "68" + "." + "71"),
+        ("cgnat three-octet", "100" + "." + "64" + ".0"),
+        ("magic-dns name", "my-box" + ".ts" + ".net"),
+        ("user-home path", "C:" + chr(92) + "Users" + chr(92) + "Someone"),
+    ]
+    must_miss = [
+        ("project FAKE sentinel", "sk-" + "FAKE" + "-REPLACE-ME-1234"),
+        ("project fake shape", "sk-" + "fake-r4sweep"),
+        ("prose risk/task", "risk-analyze the task-based routing"),
+        ("doc example ip", "203.0.113.71"),
+        ("version numbers", "v1.2.100 and 1.2.100.1"),
+        ("reserved example host", "peer-box" + ".tsnet" + ".invalid:8081"),
+        ("zombie keys temp name", "router.keys" + ".json.new.99999"),
+    ]
+    return must_hit, must_miss
+
+
+def run_selftest():
+    print("== selftest: canaries prove the patterns still have teeth ==")
+    must_hit, must_miss = _canaries()
+    for label, s in must_hit:
+        if scan_content(label, s.encode("utf-8")):
+            ok("teeth: %s shape is caught" % label)
+        else:
+            fail("selftest: patterns are BLIND to the %s shape" % label)
+    for label, s in must_miss:
+        hits = scan_content(label, s.encode("utf-8"))
+        if hits:
+            fail("selftest: false positive on %s: %s" % (label, hits))
+        else:
+            ok("quiet: %s stays clean" % label)
+
+
 def main(argv):
-    if argv and argv[0] == "--gate":
+    if argv and argv[0] == "--selftest":
+        run_selftest()
+    elif argv and argv[0] == "--gate":
         # Pre-entry gate: scan files that are ABOUT to enter the repo. This is
         # how monitor files crossed over -- scanned before `git add`, per the
-        # merge verdict's F1 hard gate.
-        paths = argv[1:]
-        if not paths:
+        # merge verdict's F1 hard gate. Accepts files and directories; a
+        # missing path is a FAIL line, not a traceback (M2-A/P3-1).
+        raw = argv[1:]
+        if not raw:
             fail("--gate needs at least one file")
+        paths = []
+        for p in raw:
+            if os.path.isdir(p):
+                for root, _dirs, files in os.walk(p):
+                    paths.extend(os.path.join(root, f) for f in files)
+            elif os.path.isfile(p):
+                paths.append(p)
+            else:
+                fail("gate: no such path: %s" % p)
         for p in paths:
             with open(p, "rb") as fh:
                 hits = scan_content(p, fh.read())
@@ -132,7 +265,7 @@ def main(argv):
             if not hits:
                 ok("gate scan clean: %s" % p)
     else:
-        print("== 1. track whitelist (set equality) ==")
+        print("== 1. track whitelist (set equality + on-disk existence) ==")
         got = tracked_files()
         missing = EXPECTED_TRACKED - got
         extra = got - EXPECTED_TRACKED
@@ -142,19 +275,31 @@ def main(argv):
             fail("tracked set has UNLISTED files: %s" % sorted(extra))
         if not missing and not extra:
             ok("tracked files == whitelist (%d files)" % len(got))
+        for name in sorted(got):
+            if not os.path.isfile(os.path.join(HERE, name)):
+                fail("tracked but MISSING from disk (would silently delete "
+                     "in the next commit): %s" % name)
 
-        print("== 2. secret grep over tracked files ==")
+        print("== 2. secret grep -- worktree + index + HEAD (all pushable views) ==")
         dirty = 0
         for name in sorted(got):
+            views = []
             fp = os.path.join(HERE, name)
-            if not os.path.isfile(fp):
-                continue
-            with open(fp, "rb") as fh:
-                for h in scan_content(name, fh.read()):
+            if os.path.isfile(fp):
+                with open(fp, "rb") as fh:
+                    views.append(("worktree", fh.read()))
+            views.append(("index", git_blob(":" + name)))
+            views.append(("HEAD", git_blob("HEAD:" + name)))
+            if all(d is None for _tag, d in views):
+                fail("no readable content in any view: %s" % name)
+            for tag, data in views:
+                if data is None:
+                    continue    # new file not in HEAD yet -- nothing to scan
+                for h in scan_content("%s [%s]" % (name, tag), data):
                     dirty += 1
                     fail("secret scan: " + h)
         if not dirty:
-            ok("no secret shapes in any tracked file")
+            ok("no secret shapes in any tracked file, in any view")
 
         print("== 3. ignore assertions ==")
         for probe in MUST_IGNORE:

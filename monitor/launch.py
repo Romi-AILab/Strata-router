@@ -54,6 +54,12 @@ def router_py():
     return os.path.join(router_dir(), "router.py")
 
 
+# M2-B/P3-4:同一句「兩條出路」在 status/[S]/[G]/[C] 四處共用 -- 朋友不該在
+# 任何一處看到只提環境變數的死路,另一條(姊妹目錄)同样是正路。
+_NO_ROUTER_HINT = ("先設環境變數 STRATA_ROUTER_DIR,或把 router 放在本目錄的姊妹資料夾"
+                   "(monorepo 的 router/,或獨立的 strata-router/)。")
+
+
 def pidfile():
     return os.path.join(rmon.state_dir(), "router.pid.json")
 
@@ -238,7 +244,7 @@ def status_lines():
     rp = router_py()
     out.append("router 目錄:%s  (%s)" % (router_dir(), "在" if os.path.exists(rp) else "找不到 router.py!"))
     if not os.path.exists(rp):
-        out.append("  要換位置:設環境變數 STRATA_ROUTER_DIR。")
+        out.append("  要換位置:%s" % _NO_ROUTER_HINT)
     out.append("監控目標:%s:%s(%s)" % (cfg["host"], cfg["port"],
                                        "本機" if rmon._is_loopback_host(cfg["host"]) else "遠端"))
     alive, ver, kind = healthz()
@@ -280,8 +286,7 @@ def _ask(prompt):
 
 def do_start(assume_yes=False):
     if not os.path.exists(router_py()):
-        print("找不到 %s -- 先設 STRATA_ROUTER_DIR,或把 router 放在本目錄的姊妹資料夾"
-              "(monorepo 的 router/,或獨立的 strata-router/)。" % router_py())
+        print("找不到 %s -- %s" % (router_py(), _NO_ROUTER_HINT))
         return 2
     cfg = _cfg_or_default()
     alive, ver, kind = healthz()
@@ -416,7 +421,8 @@ def show_procs():
 def check_cfg():
     """[C]:只查存在/大小/可解析,永不打印內容;金鑰檔與 router.json 零讀取。"""
     print("== 設定檢查(零內容讀取:金鑰檔/router.json 只看存在) ==")
-    print("router.py       : %s" % ("在" if os.path.exists(router_py()) else "缺!設 STRATA_ROUTER_DIR"))
+    print("router.py       : %s" % ("在" if os.path.exists(router_py())
+                                    else "缺!%s" % _NO_ROUTER_HINT))
     if os.path.exists(router_py()):
         m = None
         with open(router_py(), "r", encoding="utf-8") as fh:
@@ -470,7 +476,7 @@ def run_console():
                 print("監控目標是遠端 %s:%s -- [G] 不在本機起 router,直接掛面板(摸不到會說原因)。"
                       % (cfg["host"], cfg["port"]))
             elif not os.path.exists(router_py()):
-                print("找不到 %s -- 面板照掛;要這殼代管服務請設 STRATA_ROUTER_DIR。" % router_py())
+                print("找不到 %s -- 面板照掛;要這殼代管服務:%s" % (router_py(), _NO_ROUTER_HINT))
             else:
                 do_start()                        # 本機目標:自動起+等上線(自己會報進度)
     except KeyboardInterrupt:                     # 等上線 20s 期間 Ctrl+C 不許裸 traceback(R3-P3-5)
