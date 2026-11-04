@@ -90,6 +90,7 @@ import hmac
 import http.client
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -105,7 +106,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "1.2.15"
+VERSION = "1.2.16"
 ROUTER_STARTED = int(time.time())   # process start epoch (stats started_at/uptime_s)
 LOG = logging.getLogger("strata-router")
 
@@ -168,6 +169,13 @@ def sha1_16(s):
 # RFC 7230 token: the only shape a header name may have on the wire. Relay
 # uses it to vet what a box sends back (see the response-copy site).
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+# C0/DEL controls a lying box can hide inside a header VALUE. They cannot forge
+# a line (bare CR/LF drop the header outright at the relay gate below), but
+# they truncate the value in some downstream stacks -- an operator's log would
+# then show something other than what the router saw. Response values relay
+# sanitized, never dropped (review R4-B/F2).
+_HDR_VAL_CTL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _as_int(v, default=None):
@@ -253,17 +261,28 @@ class Backend:
     # ---- health state machine (rule 4) -----------------------------------
     def note_connect_failure(self, err, max_fails, backoff):
         down_msg = None
+        debug_msg = None
         with self.lock:
             self.connect_failures += 1
             self.stats["connect_errors"] += 1
             self.stats["last_error"] = time.strftime("%H:%M:%S") + " " + err
             if self.connect_failures >= max_fails:
+                repeat = self.state == DOWN
                 self.state = DOWN
                 self.down_until = time.monotonic() + backoff
                 self.trial_open = False
-                down_msg = "backend %s -> DOWN (%s; probe again in %.0fs)" % (self.id, err, backoff)
+                if repeat:
+                    # already DOWN: refreshing the backoff each poll is correct,
+                    # re-ANNOUNCING "probe again in 5s" every ~3s is a log storm
+                    # that lies about when the probe will happen (R4-A/F6)
+                    debug_msg = ("backend %s still DOWN (%s; backoff refreshed %.0fs)",
+                                 self.id, err, backoff)
+                else:
+                    down_msg = "backend %s -> DOWN (%s; probe again in %.0fs)" % (self.id, err, backoff)
             elif self.state == HEALTHY:
                 self.state = SUSPECT
+        if debug_msg:  # never under the lock either -- same blocked-sink doctrine
+            LOG.debug(*debug_msg)
         if down_msg:  # NEVER log under the lock (L2-3/M3): a blocked log sink
             LOG.warning(down_msg)  # (GUI-piped stderr, quick-edit freeze, stuck
                                    # file) would hold the lock and freeze every
@@ -408,15 +427,22 @@ class Backend:
     # ---- load score (rule 3) ---------------------------------------------
     def load_score(self):
         """Lower is better. Own in-flight dominates: it includes requests parked
-        in that box's FIFO, which is precisely the queue we want to avoid."""
+        in that box's FIFO, which is precisely the queue we want to avoid.
+        Reported load counts ONLY while the status feed is fresh -- a box that
+        went blind used to keep contributing its last sample forever (R4-A/F5)
+        -- and only as a NON-NEGATIVE number: a peer that lies queued=-1e6 must
+        not win every new conversation ("more idle than idle" does not exist,
+        R4-B/F1). Blind boxes fall back to inflight-only scoring, the degradation
+        the poller has always documented as the right answer."""
         with self.lock:
             s = float(self.inflight) * 1000.0
-            q = self.reported.get("queued")
-            sv = self.reported.get("serving")
-            if q is not None:
-                s += float(q) * 60.0
-            if sv is not None:
-                s += max(0.0, float(sv) - 1.0) * 45.0
+            if self.ever_reported and (time.monotonic() - self.status_ts) <= self._stale_after():
+                q = self.reported.get("queued")
+                sv = self.reported.get("serving")
+                if q is not None:
+                    s += max(0.0, float(q)) * 60.0
+                if sv is not None:
+                    s += max(0.0, float(sv) - 1.0) * 45.0
             if self.state == DOWN:
                 s += 1e9
             elif self.state == SUSPECT:
@@ -441,7 +467,11 @@ class Backend:
                 "max_inflight": self.max_inflight,
                 "require_idle": self.require_idle,
                 "has_api_key": bool(self.api_key),
-                "accepting": self._accepts_locked(time.monotonic()),
+                # DOWN is part of the accepting verdict (R4-A/F1): placement is
+                # separately gated on state, so the old snapshot told monitors
+                # a dead box was open -- monitor-grade readouts means the gate
+                # word is the whole truth, half-open trials included
+                "accepting": self.state != DOWN and self._accepts_locked(time.monotonic()),
                 "ext_streak": self.ext_streak,
                 "reported_age_s": round(time.monotonic() - self.status_ts, 1) if self.ever_reported else None,
                 "score": round(self._score_locked(), 1),
@@ -493,6 +523,11 @@ class Pool:
         self.metrics = {
             "requests": 0, "sticky_hits": 0, "new_placements": 0, "migrations": 0,
             "pinned": 0, "pin_misses": 0, "last_resort": 0, "count_tokens_synthesized": 0,
+            # keyless GET/HEAD proxies (e.g. /v1/models probes): a real
+            # terminal of the ledger so requests == SUM(terminals) stays
+            # exact without letting monitoring probes masquerade as new
+            # conversations (review R4-A/F4)
+            "passthrough_gets": 0,
             "gate_bypass_borrow": 0, "overflow_placements": 0, "overflow_rollbacks": 0,
             "overflow_fizzles": 0, "overflow_evictions": 0,
             # operator-cancelled overflow re-homes (pin takeover, sticky
@@ -650,7 +685,11 @@ class Pool:
             return backend_id
 
     def _affinity_put(self, key, backend_id):
-        cap = int(self.cfg.get("sticky_max") or 20000)
+        # explicit None check: `or 20000` silently turned a configured 0 into
+        # 20000 and a negative cap into "empty the table on every write"
+        # (R4-A/F7); validate_cfg rejects non-positive caps at boot now
+        v = self.cfg.get("sticky_max")
+        cap = 20000 if v is None else int(v)
         with self.lock:
             self.affinity[key] = (backend_id, time.monotonic())
             self.affinity.move_to_end(key)
@@ -678,7 +717,7 @@ class Pool:
             return len(dead)
 
     # ---- selection --------------------------------------------------------
-    def pick(self, affinity_key, pin=None):
+    def pick(self, affinity_key, pin=None, passthrough=False):
         """Return (backend, reason, reserved, overflow_token). Never returns
         None: queueing beats failing. `reserved` is False only on the
         last-resort forward, where the cooldown refused the slot but we send
@@ -686,6 +725,9 @@ class Pool:
         `overflow_token` is non-None only for reason=="overflow": the
         provisional re-home it waits for, settled by the SAME request via
         commit / rollback / fizzle.
+        `passthrough`: a keyless GET/HEAD proxy (no conversation behind it) --
+        it still occupies a slot but books passthrough_gets, never
+        new_placements, so "new conversations" keeps its meaning (R4-A/F4).
 
         pin: an explicit x-strata-pin box id. It overrides affinity, tier and
         the max_inflight cap -- the operator escape hatch for "this subagent
@@ -798,7 +840,7 @@ class Pool:
                 if affinity_key:
                     self._affinity_put(affinity_key, alt.id)
                 with self.lock:
-                    self.metrics["new_placements"] += 1
+                    self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
                 return alt, "placed", True, None
 
         # Every reservation path lost the race or was refused. Give each
@@ -827,7 +869,7 @@ class Pool:
                 # either way; the ledger sum is untouched.
                 self._note_gate_bypass(be)
                 with self.lock:
-                    self.metrics["new_placements"] += 1
+                    self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
                 if affinity_key:
                     self._affinity_put(affinity_key, be.id)   # "placed" means homed
                 LOG.info("new placement found every gate closed mid-race; queued at live %s", be.id)
@@ -957,6 +999,13 @@ def affinity_key_of(path, body, headers):
         parts.append(_dump(_first(obj.get("input"))))
     if obj.get("messages") is not None:
         parts.append(_dump(_first(obj.get("messages"))))
+    if obj.get("prompt") is not None:
+        # legacy /v1/completions (R4-A/F3): stateless clients resend the whole
+        # prompt every turn, so the HEAD of it is the stable conversation
+        # prefix. Hashing only the head keeps the lane warm while the head
+        # holds and re-places when the conversation really changes -- without
+        # it, completions traffic got no affinity pillar at all.
+        parts.append(_dump(obj["prompt"])[:4096])
     lane = "prefix:" + sha1_16(chr(31).join(parts)) if any(parts) else None
 
     if scope and lane:
@@ -997,7 +1046,8 @@ def walk_ints(node, path, out, depth=0):
     elif isinstance(node, bool):
         return out
     elif isinstance(node, (int, float)):
-        out.append((".".join(path), float(node)))
+        if math.isfinite(float(node)):      # NaN/Infinity is not load data (R4-B/F1)
+            out.append((".".join(path), float(node)))
     elif isinstance(node, list):
         busy = 0
         for item in node:
@@ -1006,7 +1056,8 @@ def walk_ints(node, path, out, depth=0):
                 if st and st not in ("idle", "free", "empty", "none", "off"):
                     busy += 1
                 for k, v in item.items():
-                    if isinstance(v, (int, float)) and not isinstance(v, bool) and _QUEUE_KEYS.search(str(k)):
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and \
+                            math.isfinite(float(v)) and _QUEUE_KEYS.search(str(k)):
                         out.append((".".join(path + (str(k),)), float(v)))
             elif isinstance(item, (int, float)) and not isinstance(item, bool):
                 busy += 1 if item else 0
@@ -1049,7 +1100,10 @@ def _pick_box_extras(obj, out):
 
 def parse_status(payload):
     try:
-        obj = json.loads(payload)
+        # a lying box's NaN/Infinity literals arrive as None through this door
+        # -- they must never walk as load, ride /stats as invalid JSON literals,
+        # or poison score comparisons (R4-B/F1)
+        obj = json.loads(payload, parse_constant=lambda _name: None)
     except Exception:
         return _parse_prometheus(payload)
     leaves = []
@@ -1172,6 +1226,12 @@ class StatusPoller(threading.Thread):
             be.note_success()
             if code == 200 and body:
                 parsed = parse_status(body)
+                if parsed and any(isinstance(v, float) and not math.isfinite(v)
+                                  for v in parsed.values()):
+                    # last gate between an untrusted box and /stats + load_score
+                    # (R4-B/F1, prometheus path included): one non-finite number
+                    # makes the whole sample a lie -- reject the sample
+                    parsed = None
                 if parsed:
                     with be.lock:
                         be.reported = parsed
@@ -1736,7 +1796,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"error": {"message": "strata-router: x-strata-pin refused -- control token required (x-strata-control)"}})
             self.close_connection = True
             return
-        backend, reason, reserved, ovf_token = self.pool.pick(key, pin=pin)
+        backend, reason, reserved, ovf_token = self.pool.pick(
+            key, pin=pin, passthrough=(key is None and method in ("GET", "HEAD")))
         was_overflow = reason == "overflow"   # its pending entry must settle EXACTLY once
         # before this request ends: commit (it answered), rollback (target died
         # pre-send) or fizzle (ended any other way). ovf_settled tracks that.
@@ -1853,6 +1914,7 @@ class Handler(BaseHTTPRequestHandler):
                     # by which a browser page could READ our caller's model
                     # output (stress P1/F1).
                     continue
+                v = _HDR_VAL_CTL_RE.sub("", v)
                 if not _HEADER_NAME_RE.fullmatch(k) or "\r" in v or "\n" in v:
                     # Parser-drift backstop: 3.13's http.client splits bare
                     # CR/LF framing into separate well-formed headers (a lying
@@ -2040,7 +2102,9 @@ class Handler(BaseHTTPRequestHandler):
                 # stream break before the first status): the provisional
                 # re-home dies here, counted -- no stale entry can landmine
                 # this lane's next turn, and the placement counters stay a
-                # closed identity (requests == settled terminals + pin_misses)
+                # closed identity (requests == SUM(terminals); pin_misses is
+                # diagnostic -- a pin miss still places and ticks its own
+                # terminal, README's identity clause is the correct formula)
                 self.pool.overflow_fizzle(key, ovf_token)
             if reserved:
                 backend.end()
@@ -2365,6 +2429,43 @@ def _unwrap_keys(data, path):
     return out, True
 
 
+def _keys_lock(path, timeout=15.0):
+    """Exclusive cross-process lock around the keys-file read-modify-write
+    (review R4-B/F3): two concurrent --set-key runs used to lose one another's
+    entry -- a box's key silently gone until its next 401. Lock a sibling
+    <keys>.json.lock so the payload file itself is never the lock."""
+    fh = open(path + ".lock", "a+b")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                raise TimeoutError("another keys writer still holds %s.lock" % path)
+            time.sleep(0.1)
+
+
+def _keys_unlock(fh):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    try:
+        fh.close()   # closing releases the flock on POSIX
+    except OSError:
+        pass
+
+
 def _write_keys_file(path, keys):
     """Atomic, ACL-hardened write of the keys file, encrypted where the platform
     allows. Shared by --set-key and the boot-time plaintext migration.
@@ -2474,6 +2575,20 @@ def apply_keys(cfg, config_path, creating=False):
     keys, was_enc = _read_keys_file2(path) if path else ({}, True)
     if path:
         cfg["_keys_path"] = path
+        # hygiene sweep (review R4-B/F4): a hard crash between temp-write and
+        # replace leaves <keys>.json.new.<pid> behind forever -- ours to
+        # delete, and on the non-Windows plaintext fallback path those stale
+        # temps are the worst of it
+        try:
+            d, stem = os.path.split(path)
+            for name in os.listdir(d or "."):
+                if name.startswith(stem + ".new."):
+                    try:
+                        os.unlink(os.path.join(d or ".", name))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
         for k, v in keys.items():
             if v.startswith("REPLACE-WITH"):
                 raise SystemExit("keys file %s: entry %r still holds a placeholder" % (path, k))
@@ -2492,14 +2607,23 @@ def apply_keys(cfg, config_path, creating=False):
                 LOG.warning("keys file %s: entry %r matches no backend id (typo?)", path, k)
         if not was_enc and _dpapi_enabled():
             # v1.2.14 one-way migration, AFTER validation: same entries, rewritten
-            # as DPAPI ciphertext. Failures only warn -- boot continues on the
+            # as DPAPI ciphertext -- but UNDER the writer lock and re-read
+            # (review R4-B/F3 kin): a --set-key that landed while boot was still
+            # validating must not be wiped by this migration's stale snapshot.
+            # Newer on-disk values win; boot-validated entries absent from disk
+            # are kept. Failures only warn -- boot continues on the
             # validated plaintext (monitoring must never be the reason a serving
             # change breaks; the operator sees the warning and can --set-key).
             try:
-                _write_keys_file(path, keys)
+                _mlk = _keys_lock(path, timeout=5.0)
+                try:
+                    _disk, _ = _read_keys_file2(path)
+                    _write_keys_file(path, {**keys, **_disk})
+                finally:
+                    _keys_unlock(_mlk)
                 LOG.info("keys file %s: migrated to DPAPI ciphertext (same entries; opens only for "
                          "this Windows user on this machine)", path)
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 LOG.warning("keys file %s: still plaintext -- migration failed (%s); rerun --set-key "
                             "to store it encrypted", path, exc.__class__.__name__)
     # optional control-surface gate: inline field first, then the keys-file
@@ -2574,12 +2698,25 @@ def set_key(cfg, backend_id, config_path, keys_path):
     if _ILLEGAL_HV.search(kb):
         print("the key contains control bytes -- nothing stored")
         return 2
-    keys[backend_id] = key
     try:
-        note = _write_keys_file(path, keys)
+        lk = _keys_lock(path)
+    except Exception as exc:
+        print("cannot lock the keys file (%s) -- nothing written" % exc)
+        return 2
+    try:
+        # re-read and merge UNDER the lock (review R4-B/F3): a concurrent
+        # --set-key for another backend is additive now -- its fresh entry is
+        # merged in instead of being overwritten by this process's stale
+        # pre-prompt snapshot (that early read stays: fail on a broken keys
+        # file BEFORE asking anyone to type a secret)
+        fresh = _read_keys_file(path)
+        fresh[backend_id] = key
+        note = _write_keys_file(path, fresh)
     except Exception as exc:
         print("cannot store the key (%s) -- nothing written" % exc)
         return 2
+    finally:
+        _keys_unlock(lk)
     print("stored key for %r (%d chars) in %s%s -- keep this file out of git, chat and cloud drives"
           % (backend_id, len(key), path, note))
     return 0
@@ -2638,6 +2775,17 @@ def validate_cfg(cfg, pool, strict=True):
             cast(v)
         except (TypeError, ValueError):
             problems.append((k, "must be a number, got %r" % (v,)))
+    sm = cfg.get("sticky_max")
+    if sm is not None and not isinstance(sm, bool):
+        # range gate on top of _NUM_CFG's type gate: 0 was silently rewritten
+        # to the 20000 default (falsy trap) and a negative cap emptied the
+        # affinity table on every write -- neither is a mode we ship
+        # (review R4-A/F7)
+        try:
+            if float(sm) < 1:
+                problems.append(("sticky_max", "must be >= 1 (there is no 'affinity off' cap)"))
+        except (TypeError, ValueError):
+            pass
     for b in pool.backends:
         raw = b.cfg.get("priority")
         if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int)):

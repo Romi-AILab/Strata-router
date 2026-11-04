@@ -1309,9 +1309,11 @@ def main():
               "(no silent strip, no stale .new; L2-3/L3+L4); on Windows no key bytes survive in the raw file",
               _rc2 == 0 and _back2.get("local") == "new-ka"
               and _back2.get("remote") == "  padded-peer  "
-              and sorted(os.listdir(_kdir2)) == ["router.keys.json"]
+              # the .lock sibling stays by design (deleting it would break a
+              # waiting writer -- R4-B/F3); what must NOT survive is a .new temp
+              and sorted(n for n in os.listdir(_kdir2) if not n.endswith(".lock")) == ["router.keys.json"]
               and _sealed2,
-              "rc=%s entries=%s sealed=%s" % (_rc2, sorted(_back2), _sealed2))
+              "rc=%s entries=%s sealed=%s dir=%s" % (_rc2, sorted(_back2), _sealed2, sorted(os.listdir(_kdir2))))
 
         print("")
         print("5f) 2x2 stress guards -- protocol edges (P1) + scope/lane integrity & metric honesty (P2), v1.2.12")
@@ -2394,6 +2396,149 @@ def main():
                 if _second not in (False, None):
                     _second.server_close()
                 _r1.server_close()
+
+        # ================= v1.2.16 -- R4 review fix regressions =================
+        # (round-1 findings R4-A/F1 F3 F4 F5 F6 F7, R4-B/F1 F2 F3 F4)
+        _mm = stats(ROUTER_PORT)["router"]
+        check("v1.2.16: passthrough_gets exists as a ledger terminal",
+              "passthrough_gets" in _mm, json.dumps(_mm)[:200])
+
+        _rq0 = _mm["requests"]; _np0 = _mm["new_placements"]; _pg0 = _mm["passthrough_gets"]
+        _gm = get(ROUTER_PORT, "/v1/models")[0]      # box may 404; the proxy still ran
+        _mm = stats(ROUTER_PORT)["router"]
+        check("v1.2.16: keyless GET books passthrough_gets, never new_placements (R4-A/F4)",
+              _mm["requests"] == _rq0 + 1 and _mm["passthrough_gets"] == _pg0 + 1
+              and _mm["new_placements"] == _np0,
+              "GET->%s requests %s->%s new_pl %s->%s passthru %s->%s"
+              % (_gm, _rq0, _mm["requests"], _np0, _mm["new_placements"], _pg0, _mm["passthrough_gets"]))
+        _tt = sum(_mm.get(k, 0) for k in ("sticky_hits", "new_placements", "migrations",
+                                          "pinned", "last_resort", "overflow_placements",
+                                          "overflow_rollbacks", "overflow_fizzles",
+                                          "overflow_evictions", "operator_cancelled",
+                                          "passthrough_gets"))
+        check("v1.2.16: the closed identity holds over all 11 terminals (requests == SUM)",
+              _tt == _mm["requests"], "requests=%s terminals=%s" % (_mm["requests"], _tt))
+
+        _pc = {"model": "test-model", "max_tokens": 16,
+               "prompt": "R4-A/F3 stable completions prefix " + "filler " * 40,
+               "metadata": {"user_id": "r4f3-probe"}}
+        _c1 = call(ROUTER_PORT, "/v1/completions", _pc)
+        _c2 = call(ROUTER_PORT, "/v1/completions", _pc)
+        check("v1.2.16: /v1/completions has affinity -- same prompt homes once then sticks (R4-A/F3)",
+              _c1[0] == 200 and _c1[1].get("x-strata-backend") in ("a", "b")
+              and _c2[1].get("x-strata-backend") == _c1[1].get("x-strata-backend")
+              and _c2[1].get("x-strata-placement") == "sticky",
+              "%s/%s then %s/%s" % (_c1[1].get("x-strata-backend"), _c1[1].get("x-strata-placement"),
+                                    _c2[1].get("x-strata-backend"), _c2[1].get("x-strata-placement")))
+
+        _lb = R.Backend("unitbox", "http://127.0.0.1:9", "", cfg={})
+        _lb.ever_reported = True
+        _lb.reported = {"queued": 10.0}
+        _lb.status_ts = time.monotonic()
+        _sf = _lb.load_score()
+        _lb.status_ts = time.monotonic() - 3600.0
+        _ss = _lb.load_score()
+        _lb.reported = {"queued": -1000000.0}
+        _lb.status_ts = time.monotonic()
+        _sn = _lb.load_score()
+        check("v1.2.16: stale reported load ages out; a lying negative queued cannot buy the pool"
+              " (R4-A/F5 + R4-B/F1 clamp)",
+              _sf > 500.0 and _ss < 2.0 and _sn < 2.0,
+              "fresh=%s stale=%s negative=%s" % (round(_sf, 1), round(_ss, 3), round(_sn, 3)))
+
+        _lb.state = R.HEALTHY
+        _ak_ok = _lb.snapshot().get("accepting")
+        _lb.state = R.DOWN
+        _ak_down = _lb.snapshot().get("accepting")
+        check("v1.2.16: a DOWN box no longer claims accepting=true to the monitor (R4-A/F1)",
+              _ak_ok is True and _ak_down is False, "healthy=%s down=%s" % (_ak_ok, _ak_down))
+
+        _w = []
+        R.walk_ints({"live": {"queued": float("nan"), "running": 1.0}}, (), _w)
+        _psn = R.parse_status(b'{"live": {"queued": NaN, "serving": Infinity}}')
+        check("v1.2.16: non-finite numbers never walk the tree nor pass the JSON door (R4-B/F1)",
+              len(_w) == 1 and not _psn, "walk=%s parse=%r" % (_w, _psn))
+
+        check("v1.2.16: response header values relay C0/DEL-stripped; tab survives (R4-B/F2)",
+              R._HDR_VAL_CTL_RE.sub("", "a\x00b\x7fc\td") == "abc\td")
+
+        _p4 = R.Pool([R.Backend("u1", "http://127.0.0.1:9", "", cfg={})], {"sticky_max": 4})
+        for _i in range(7):
+            _p4._affinity_put("k%d" % _i, "u1")
+        check("v1.2.16: sticky_max is honored literally -- 4 means 4, oldest evicted first (R4-A/F7)",
+              len(_p4.affinity) == 4 and list(_p4.affinity) == ["k3", "k4", "k5", "k6"],
+              str(list(_p4.affinity)))
+
+        def _vsm(v):
+            c = {"backends": [{"id": "u1", "url": "http://127.0.0.1:9"}]}
+            if v is not None:
+                c["sticky_max"] = v
+            try:
+                R.validate_cfg(c, R.make_pool(c), strict=True)
+                return True
+            except SystemExit:
+                return False
+        check("v1.2.16: sticky_max < 1 refused at boot; absent or >=1 passes (R4-A/F7)",
+              _vsm(None) and _vsm(4) and not _vsm(0) and not _vsm(-5) and not _vsm(0.5),
+              "none=%s 4=%s 0=%s -5=%s 0.5=%s" % (_vsm(None), _vsm(4), _vsm(0), _vsm(-5), _vsm(0.5)))
+
+        class _StormCap(logging.Handler):
+            def __init__(self):
+                logging.Handler.__init__(self, level=logging.DEBUG)
+                self.recs = []
+
+            def emit(self, rec):
+                self.recs.append(rec)
+        _sc = _StormCap()
+        R.LOG.addHandler(_sc)
+        try:
+            _sb = R.Backend("stormbox", "http://127.0.0.1:9", "", cfg={})
+            _sb.note_connect_failure("boom", 1, 5.0)      # transition -> WARNING
+            _sb.note_connect_failure("boom", 1, 5.0)      # repeats -> debug only
+            _sb.note_connect_failure("boom", 1, 5.0)
+            _dw = [r.getMessage() for r in _sc.recs if r.levelno >= logging.WARNING
+                   and "DOWN" in r.getMessage()]
+        finally:
+            R.LOG.removeHandler(_sc)
+        check("v1.2.16: a dead box logs the DOWN transition once, repeats stay debug (R4-A/F6)",
+              len(_dw) == 1, "%d warnings: %s" % (len(_dw), _dw[:2]))
+
+        _kd = tempfile.mkdtemp(prefix="r4keys_")
+        try:
+            _kp = os.path.join(_kd, "router.keys.json")
+            _l1 = R._keys_lock(_kp, timeout=0.4)
+            _lkerr = None
+            try:
+                R._keys_lock(_kp, timeout=0.4)
+            except BaseException as _e:
+                _lkerr = _e
+            R._keys_unlock(_l1)
+            _l2 = R._keys_lock(_kp, timeout=0.4)          # released -> re-acquirable
+            R._keys_unlock(_l2)
+            check("v1.2.16: keys writes hold an exclusive lock; second writer times out, then it frees"
+                  " (R4-B/F3)", isinstance(_lkerr, TimeoutError) and _l2 is not None, repr(_lkerr))
+
+            with open(os.path.join(_kd, "router.json"), "w", encoding="utf-8") as _fh:
+                _fh.write("{}")
+            with open(_kp, "w", encoding="utf-8") as _fh:
+                json.dump({"u1": "sk-fake-r4sweep"}, _fh)
+            for _stale in ("router.keys.json.new.4242", "router.keys.json.new.99"):
+                with open(os.path.join(_kd, _stale), "w", encoding="utf-8") as _fh:
+                    _fh.write('{"leftover": "stale temp"}')
+            _acfg = {"backends": [{"id": "u1", "url": "http://127.0.0.1:9"}]}
+            R.apply_keys(_acfg, os.path.join(_kd, "router.json"))
+            check("v1.2.16: boot sweeps stale <keys>.json.new.* temps a hard crash left behind (R4-B/F4)",
+                  not [n for n in os.listdir(_kd) if ".new." in n], str(os.listdir(_kd))[:200])
+        finally:
+            for _n in os.listdir(_kd):
+                try:
+                    os.unlink(os.path.join(_kd, _n))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(_kd)
+            except OSError:
+                pass
     finally:
         proc.terminate()
         try:

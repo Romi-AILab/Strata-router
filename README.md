@@ -503,7 +503,10 @@ the ledger can lag is LRU-evicting pending overflow tokens past 4096 concurrent
 parked re-homes, a flood shape this deployment cannot reach without first
 exhausting its threads -- and since v1.2.11 even that is COUNTED
 (`overflow_evictions`, and a non-zero value there is worth an eyeball), so a counter that stops
-explaining requests is itself the alarm.
+explaining requests is itself the alarm. Since v1.2.16 keyless GET/HEAD proxies
+(monitor probes at `/v1/models` and friends) book their own terminal
+`passthrough_gets` -- `new_placements` counts real new conversations only, and
+the identity still closes over every request.
 
 ## Limits
 
