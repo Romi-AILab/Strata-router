@@ -173,6 +173,18 @@ class FakeStrata:
                     self.wfile.flush()
                     self.close_connection = True
                     return
+                if outer.lie and self.path == "/v1/liect":
+                    # R6-C/P3-1 (v1.2.17): NUL smuggled INSIDE the content-type
+                    # value -- the one header the router skips in the sanitized
+                    # relay loop and rebuilds from getheader afterwards, so
+                    # that reattach gate must sanitize too. RAW write keeps the
+                    # \x00 exactly as a lying box's socket would send it.
+                    self.wfile.write(
+                        b"HTTP/1.1 200 OK\r\nx-nul: a\x00b\r\n"
+                        b"content-type: text/plain; q\x00z=1\r\ncontent-length: 2\r\n\r\n{}")
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return
                 if self.path == "/v1/status":
                     if outer.blind:
                         return self._send(500, b'{"error":"updating"}')
@@ -2537,6 +2549,125 @@ def main():
                     pass
             try:
                 os.rmdir(_kd)
+            except OSError:
+                pass
+
+        # ================= v1.2.17 -- R6 review fix regressions =================
+        # (round-2 findings: R6-C/P3-1 P3-2 P3-3 + note-1, R6-D/P2)
+
+        # R6-C/P3-1: lying box smuggles NUL inside content-type -- the skip-
+        # and-reattach path must sanitize exactly like the relay loop does.
+        _fk17 = (a.require_key, b.require_key, a.lie, b.lie)
+        a.require_key = b.require_key = None
+        a.lie = b.lie = True
+        try:
+            _c17 = http.client.HTTPConnection("127.0.0.1", ROUTER_PORT, timeout=15.0)
+            _c17.request("GET", "/v1/liect")
+            _r17 = _c17.getresponse()
+            _ct17 = _r17.getheader("content-type")
+            _xn17 = _r17.getheader("x-nul")
+            _r17.read()
+            _c17.close()
+        finally:
+            a.require_key, b.require_key, a.lie, b.lie = _fk17
+        check("v1.2.17: the content-type reattach strips NUL/C0 like the relay loop (R6-C/P3-1)",
+              _ct17 == "text/plain; qz=1" and _xn17 == "ab",
+              "content-type=%r x-nul=%r" % (_ct17, _xn17))
+
+        _sb2 = R.Backend("scorebox", "http://127.0.0.1:9", "", cfg={})
+        _sb2.state = R.HEALTHY
+        _sb2.ever_reported = True
+        _sb2.reported = {"queued": -1000000.0}
+        _sb2.status_ts = time.monotonic()
+        _s17_lie = _sb2.snapshot()["score"]
+        _sb2.reported = {"queued": 500.0}
+        _s17_honest = _sb2.snapshot()["score"]
+        _sb2.status_ts = time.monotonic() - 3600.0
+        _s17_blind = _sb2.snapshot()["score"]
+        check("v1.2.17: snapshot score IS the placement score -- clamp + freshness gate (R6-C/P3-2, R6-D/P3)",
+              _s17_lie == 0.0 and _s17_honest == 30000.0 and _s17_blind == 0.0,
+              "lie=%s honest=%s blind=%s" % (_s17_lie, _s17_honest, _s17_blind))
+
+        _he_cls = next(_k for _k in R.Router.__mro__[1:] if "handle_error" in _k.__dict__)
+        _he_orig = _he_cls.handle_error
+        _he_hits = []
+
+        def _he_spy(_self, _request, _client):
+            _he_hits.append(type(sys.exc_info()[1]).__name__)
+        _he_cls.handle_error = _he_spy
+        try:
+            _hr17 = R.Router.__new__(R.Router)   # handle_error touches no state
+            for _exc17 in (ConnectionAbortedError(10053, "wsa abort"), BrokenPipeError(),
+                           ConnectionResetError(), TimeoutError(), ValueError("real fault")):
+                try:
+                    raise _exc17
+                except BaseException:
+                    _hr17.handle_error(None, ("127.0.0.1", 1))
+        finally:
+            _he_cls.handle_error = _he_orig
+        check("v1.2.17: WinError-10053 aborts are silenced with the other hang-ups; faults still print (R6-C/P3-3)",
+              _he_hits == ["ValueError"], str(_he_hits))
+
+        _f4home = R.Backend("f4home", "http://127.0.0.1:9", "", cfg={})
+        _f4alt = R.Backend("f4alt", "http://127.0.0.1:9", "", cfg={})
+        _f4pool = R.Pool([_f4home, _f4alt], {})
+        _f4alt.begin()                                 # what pick booked on the overflow
+        _f4ends = []
+        _f4end_real = _f4alt.end
+        _f4alt.end = lambda: (_f4ends.append(1), _f4end_real())[1]
+        _f4pool._overflow_pending[555] = ("f4lane", "f4home", "f4alt")
+        _f4home.state = R.DOWN                         # home died mid-request too
+        _f4place_real = _f4pool._place
+        _f4pool._place = lambda **_kw: (None, False)   # nowhere to migrate onward to
+        try:
+            _f4late = _f4pool.overflow_rollback("f4lane", 555, "f4alt")
+        finally:
+            _f4pool._place = _f4place_real
+        _f4early = _f4pool.overflow_rollback("f4lane", 999, "f4alt")  # pop miss: plain None,
+        # the reservation stays with the caller's finally -- unchanged semantics
+        check("v1.2.17: released verdict stops a double end() when rollback finds no box; early-None stays plain None (R6-C note-1)",
+              _f4late is not None and _f4late[0] is None and _f4late[2] is False
+              and len(_f4ends) == 1 and _f4alt.inflight == 0
+              and _f4early is None and len(_f4ends) == 1,
+              "late=%r ends=%s inflight=%s early=%r" % (_f4late, len(_f4ends), _f4alt.inflight, _f4early))
+
+        _r5dir = tempfile.mkdtemp(prefix="r6keys_")
+        try:
+            _r5p = os.path.join(_r5dir, "router.keys.json")
+            if os.name == "nt":
+                _rp_real = os.replace
+                _r5tries = []
+
+                def _flaky_replace(src, dst):
+                    _r5tries.append(1)
+                    if len(_r5tries) < 3:
+                        _err17 = OSError(5, "Access is denied")
+                        _err17.winerror = 5
+                        raise _err17
+                    return _rp_real(src, dst)
+
+                os.replace = _flaky_replace
+                try:
+                    R._write_keys_file(_r5p, {"u1": "sk-fake-retry"})
+                finally:
+                    os.replace = _rp_real
+                _r5rt, _ = R._read_keys_file2(_r5p)
+                check("v1.2.17: keys replace waits out a concurrent reader's WinError-5 window (R6-D/P2)",
+                      len(_r5tries) == 3 and _r5rt == {"u1": "sk-fake-retry"},
+                      "tries=%s roundtrip=%s" % (len(_r5tries), _r5rt))
+            else:
+                R._write_keys_file(_r5p, {"u1": "sk-fake-retry"})
+                _r5rt, _ = R._read_keys_file2(_r5p)
+                check("v1.2.17: keys write path intact off Windows (retry gate is nt-only) (R6-D/P2)",
+                      _r5rt == {"u1": "sk-fake-retry"}, str(_r5rt))
+        finally:
+            for _n in os.listdir(_r5dir):
+                try:
+                    os.unlink(os.path.join(_r5dir, _n))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(_r5dir)
             except OSError:
                 pass
     finally:

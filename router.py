@@ -106,7 +106,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "1.2.16"
+VERSION = "1.2.17"
 ROUTER_STARTED = int(time.time())   # process start epoch (stats started_at/uptime_s)
 LOG = logging.getLogger("strata-router")
 
@@ -433,21 +433,11 @@ class Backend:
         -- and only as a NON-NEGATIVE number: a peer that lies queued=-1e6 must
         not win every new conversation ("more idle than idle" does not exist,
         R4-B/F1). Blind boxes fall back to inflight-only scoring, the degradation
-        the poller has always documented as the right answer."""
+        the poller has always documented as the right answer. The formula
+        itself lives in _score_locked -- placement and the monitor-facing
+        snapshot read the SAME number (R6-C/P3-2, R6-D/P3)."""
         with self.lock:
-            s = float(self.inflight) * 1000.0
-            if self.ever_reported and (time.monotonic() - self.status_ts) <= self._stale_after():
-                q = self.reported.get("queued")
-                sv = self.reported.get("serving")
-                if q is not None:
-                    s += max(0.0, float(q)) * 60.0
-                if sv is not None:
-                    s += max(0.0, float(sv) - 1.0) * 45.0
-            if self.state == DOWN:
-                s += 1e9
-            elif self.state == SUSPECT:
-                s += 5e3
-            return s + random.random()          # spread ties across both boxes
+            return self._score_locked() + random.random()   # jitter spreads ties
 
     def snapshot(self):
         with self.lock:
@@ -485,13 +475,22 @@ class Backend:
             }
 
     def _score_locked(self):
+        """Single source of truth for "how loaded is this box" (caller holds
+        the lock). Placement adds only the tie-break jitter; the snapshot
+        exports this number verbatim. It carries BOTH v1.2.16 defenses --
+        non-negative clamp and freshness gate -- because the display copy used
+        to have neither: /stats showed a lying box -60,000,000 and froze a
+        blind box at its last sample while placement had long since fallen
+        back to inflight-only (R6-C/P3-2, R6-D/P3: monitors must never be
+        handed a number the router itself has disowned)."""
         s = float(self.inflight) * 1000.0
-        q = self.reported.get("queued")
-        sv = self.reported.get("serving")
-        if q is not None:
-            s += float(q) * 60.0
-        if sv is not None:
-            s += max(0.0, float(sv) - 1.0) * 45.0
+        if self.ever_reported and (time.monotonic() - self.status_ts) <= self._stale_after():
+            q = self.reported.get("queued")
+            sv = self.reported.get("serving")
+            if q is not None:
+                s += max(0.0, float(q)) * 60.0
+            if sv is not None:
+                s += max(0.0, float(sv) - 1.0) * 45.0
         if self.state == DOWN:
             s += 1e9
         elif self.state == SUSPECT:
@@ -583,10 +582,14 @@ class Pool:
         Returns (backend, reason, reserved): the live home ("sticky"), or --
         when the home itself raced into DOWN inside this same request -- a
         fresh placement ("migrated"), the pick-time doctrine again: a queued
-        turn anywhere beats a 502 the SDK would only retry. None only when
-        there is nothing to roll back to (an operator cleared the pending
-        entry mid-flight): the caller's honest 502 stands and that request
-        releases its own reservation in its finally."""
+        turn anywhere beats a 502 the SDK would only retry. The two honest-502
+        endings differ in WHO holds the reservation: plain None means the
+        rollback never touched it (no pending entry -- an operator cleared it):
+        the caller's finally still releases ITS OWN alt reservation. A
+        (None, "released", False) verdict means this function already ended
+        the alt and the caller must NOT end it twice (R6-C note-1: today the
+        branch behind it is unreachable -- _place re-includes when exclude
+        covers everything -- but the contract must not depend on that)."""
         with self.lock:
             pend = self._overflow_pending.pop(token, None) if token else None
         if pend is None or pend[0] != affinity_key or pend[2] != failed_id:
@@ -619,7 +622,9 @@ class Pool:
             LOG.warning("overflow of %s died AND home %s is DOWN; migrated onward to %s (nothing lost)",
                         short(affinity_key), pend[1], alt2.id)
             return alt2, "migrated", reserved
-        return None                     # no other box exists; the 502 stands
+        # no other box exists; the honest 502 stands -- but alt.end() ran
+        # above, so hand the caller the released verdict (R6-C note-1)
+        return (None, "released", False)
 
     def overflow_fizzle(self, affinity_key, token):
         """The overflow request ended WITHOUT ever answering (read timeout,
@@ -1837,6 +1842,12 @@ class Handler(BaseHTTPRequestHandler):
                     # pending mid-flight): the honest 502 stands; the finally
                     # releases this request's own alt reservation
                     raise
+                if outcome[0] is None:
+                    # rolled back and found nowhere to go: the honest 502
+                    # stands, but the rollback already ended the alt -- the
+                    # finally must not end() it a second time (R6-C note-1)
+                    reserved = False
+                    raise
                 LOG.info("%s %s: overflow target %s died before send; %s at %s instead (nothing was lost)",
                          method, bare, backend.id,
                          "queued at home" if outcome[1] == "sticky" else "migrated", outcome[0].id)
@@ -1925,7 +1936,14 @@ class Handler(BaseHTTPRequestHandler):
                     # must be RFC 7230 tokens, values must be single-line.
                     continue
                 self.send_header(k, v)
-            self.send_header("content-type", resp.getheader("content-type") or "application/json")
+            # the reattach must pass the SAME sanitizer as the relay loop:
+            # content-type is skipped there precisely because it is rebuilt
+            # here, so before R6-C/P3-1 a lying box's "text/plain; q\x00z=1"
+            # slipped the C0 gate intact and a log that truncates at NUL saw
+            # a different type than the router did.
+            self.send_header("content-type",
+                             _HDR_VAL_CTL_RE.sub("", resp.getheader("content-type")
+                                                 or "application/json"))
             chunk_out = not head and self.request_version != "HTTP/1.0"
             if head:
                 # a HEAD response is header-only: no chunk framing, no body,
@@ -2149,8 +2167,14 @@ class Router(ThreadingHTTPServer):
 
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
-        if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
-            return  # the agent hung up mid-stream; noise, not a fault
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                            ConnectionAbortedError, TimeoutError)):
+            # the agent hung up mid-stream; noise, not a fault. The aborted
+            # variant is the Windows shape of exactly that: a killed agent's
+            # SO_LINGER hard-close hits the keep-alive readline with WinError
+            # 10053, and killed CLI agents are this router's client base
+            # (R6-C/P3-3: without it every such death was a traceback).
+            return
         super().handle_error(request, client_address)
 
 
@@ -2497,7 +2521,24 @@ def _write_keys_file(path, keys):
             except Exception as exc:
                 note = ('; WARNING icacls failed (%s) -- run it yourself on %s: icacls "%s" '
                         '/inheritance:r /grant:r "%%USERNAME%%:F"' % (exc, path, path))
-        os.replace(tmp, path)          # replace AFTER icacls: no inherited-ACL window on the real path
+        # replace AFTER icacls: no inherited-ACL window on the real path.
+        # Bounded retry for the Windows sharing race (R6-D/P2): a concurrent
+        # --set-key process holds the REAL path open -- apply_keys' boot read
+        # and set_key's pre-prompt read open it WITHOUT FILE_SHARE_DELETE --
+        # and os.replace needs DELETE access on the target, so it fails with
+        # WinError 5/32 while any such reader sits in its ms-scale window
+        # (>=3 concurrent writers used to lose the FIRST one's value, silently
+        # keeping the old key). We hold the writer lock, so nobody else can
+        # WRITE meanwhile -- there is only nothing to do but wait out readers.
+        for _attempt in range(100):
+            try:
+                os.replace(tmp, path)
+                break
+            except OSError as exc:
+                if (os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32)
+                        or _attempt == 99):
+                    raise
+                time.sleep(0.1)
     finally:
         try:
             if os.path.exists(tmp):
