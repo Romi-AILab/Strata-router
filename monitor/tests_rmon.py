@@ -698,6 +698,52 @@ class TestLaunchShell(unittest.TestCase):
             else:
                 os.environ["STRATA_ROUTER_DIR"] = old
 
+    # ---- merge-1 定位器:monorepo 的 ../router 優先,舊姊妹 strata-router 保留 fallback
+    def test_router_dir_merged_prefers_sibling_router_package(self):
+        root = os.path.join(_TMP, "mergedrepo")
+        mon = os.path.join(root, "monitor")
+        merged = os.path.join(root, "router")
+        legacy = os.path.join(root, "strata-router")
+        for d in (mon, merged, legacy):
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "router.py") if d != mon else os.path.join(d, "rmon.py"),
+                      "w", encoding="utf-8") as fh:
+                fh.write("# fixture\n")
+        old = os.environ.pop("STRATA_ROUTER_DIR", None)
+        real = rmon.my_dir
+        try:
+            rmon.my_dir = lambda: mon
+            self.assertEqual(launch.router_dir(), merged)   # BOTH exist -> merged wins
+            os.unlink(os.path.join(merged, "router.py"))
+            self.assertEqual(launch.router_dir(), legacy)   # merged empty -> legacy fallback
+            os.unlink(os.path.join(legacy, "router.py"))
+            self.assertEqual(launch.router_dir(), legacy)   # neither -> legacy hint (message-stable)
+        finally:
+            rmon.my_dir = real
+            if old is not None:
+                os.environ["STRATA_ROUTER_DIR"] = old
+
+    def test_router_dir_env_beats_merged_layout(self):
+        root = os.path.join(_TMP, "mergedrepo2")
+        mon = os.path.join(root, "monitor")
+        merged = os.path.join(root, "router")
+        for d in (mon, merged):
+            os.makedirs(d, exist_ok=True)
+        with open(os.path.join(merged, "router.py"), "w", encoding="utf-8") as fh:
+            fh.write("# fixture\n")
+        real = rmon.my_dir
+        old = os.environ.get("STRATA_ROUTER_DIR")
+        try:
+            rmon.my_dir = lambda: mon
+            os.environ["STRATA_ROUTER_DIR"] = _TMP
+            self.assertEqual(launch.router_dir(), _TMP)     # env still rules the monorepo
+        finally:
+            rmon.my_dir = real
+            if old is None:
+                os.environ.pop("STRATA_ROUTER_DIR", None)
+            else:
+                os.environ["STRATA_ROUTER_DIR"] = old
+
     def test_healthz_down_never_raises(self):            # R1-A/F1
         cfgp = rmon.cfg_path()
         with open(cfgp, "w", encoding="utf-8") as fh:

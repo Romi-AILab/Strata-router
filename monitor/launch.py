@@ -39,7 +39,15 @@ def router_dir():
     d = os.environ.get("STRATA_ROUTER_DIR")
     if d:
         return d
-    return os.path.join(os.path.dirname(rmon.my_dir()), "strata-router")
+    parent = os.path.dirname(rmon.my_dir())
+    # merge-1: inside the monorepo the router lives in the sibling package
+    # ../router -- but the legacy standalone sibling (strata-router) stays a
+    # live fallback: an operator mid-cutover keeps BOTH layouts working, and
+    # only STRATA_ROUTER_DIR above them both decides otherwise.
+    for cand in ("router", "strata-router"):
+        if os.path.exists(os.path.join(parent, cand, "router.py")):
+            return os.path.join(parent, cand)
+    return os.path.join(parent, "strata-router")   # neither found: legacy hint
 
 
 def router_py():
@@ -272,7 +280,8 @@ def _ask(prompt):
 
 def do_start(assume_yes=False):
     if not os.path.exists(router_py()):
-        print("找不到 %s -- 先設 STRATA_ROUTER_DIR 或把 strata-router 放在本目錄的姊妹資料夾。" % router_py())
+        print("找不到 %s -- 先設 STRATA_ROUTER_DIR,或把 router 放在本目錄的姊妹資料夾"
+              "(monorepo 的 router/,或獨立的 strata-router/)。" % router_py())
         return 2
     cfg = _cfg_or_default()
     alive, ver, kind = healthz()

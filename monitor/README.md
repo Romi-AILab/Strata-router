@@ -92,6 +92,8 @@ python rmon.py --replay FILE # 回放拍序列(JSON 單拍或 JSONL),不碰網�
   90 天沒再用的舊目標快取自動回收、`router.pid.json`、router.log)。
 - 環境變數(進階,一般不用設):`RMON_CONFIG` 指定 monitor.json 路徑;`RMON_STATE_DIR`
   指定狀態目錄(測試/多-instance 用);`STRATA_ROUTER_DIR` 告訴操作殼 router 在哪。
+  未設時依序找姊妹目錄 `../router`(monorepo 同樹)→ 舊的 `../strata-router`
+  (獨立佈局,切换期間兩邊都認),都找不到就看選單 `[S]`/`[C]` 的指示。
 - **router 升級後的同步儀式**:`router.py` 的 `VERSION` 超過 rmon 的 `SCHEMA_KNOWN_MAX` 時,
   帳目燈對新版失配只能宣稱「未知」(灰)。發新版請順手把 `SCHEMA_KNOWN_MAX` 抬高,router 的
   帳目終端增減時並同步 `TERMS`(v1.2.16 起第 11 項為 `passthrough_gets`),然後重跑
