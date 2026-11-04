@@ -12,3 +12,9 @@ pyprocs.txt
 __pycache__/
 *.pyc
 .claude/
+
+# --- monitor package (merged 2026-11-04, merge verdict F1 hard gate) ---
+# machine-local monitor targets (real host/port coordinates) stay on the machine;
+# ship monitor/monitor.json.example instead
+monitor.json
+rmon-cache-*.json

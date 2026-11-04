@@ -1,0 +1,8 @@
+{
+  "_comment": "複製成 monitor.json 再改。這裡准出現的只有 host/port/mode/names/interval -- 任何 key/token/secret 欄名會被 rmon 直接拒絕(紅線)。金鑰請用 router.py --set-key。",
+  "host": "127.0.0.1",
+  "port": 8088,
+  "mode": "friend",
+  "names": {"local": "地端", "remote": "遠端"},
+  "interval": 2.0
+}
