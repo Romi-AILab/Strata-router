@@ -25,7 +25,7 @@ import sys
 import time
 import unicodedata
 
-VERSION = "0.1.4"
+VERSION = "0.2.0"
 SCHEMA_KNOWN_MAX = (1, 2, 17)           # rmon 內建對照的 router schema 上限
 TERMS = ["sticky_hits", "new_placements", "migrations", "pinned", "last_resort",
          "overflow_placements", "overflow_rollbacks", "overflow_fizzles",
@@ -543,8 +543,12 @@ def _gc_caches(keep):
 def _term_ok(force_ascii):
     if force_ascii:
         return False
+    if os.environ.get("NO_COLOR"):
+        # NO_COLOR 慣例(no-color.org):環境層一票否決自動開色,連 WT 也不開;
+        # 顯式 --color 是使用者當下的手勢,仍可越過(與 --ascii 的強制相反)。
+        return False
     # 只在確定支援 ANSI 的終端自動開色(Windows Terminal);legacy cmd 要色用
-    # --color(屆時由 _enable_vt 去開 VT 輸出模式,開了就有真色)。
+    # --color(屆時由 _console_nice 的 want_vt 去開 VT 輸出模式並讀回確認)。
     return bool(os.environ.get("WT_SESSION"))
 
 
@@ -666,6 +670,116 @@ def _print_lines(L):
         print(line)
 
 
+# ---------------------------------------------------------------- 固定框重繪引擎(v0.2.0)
+# 教義:只用絕對歸位(ESC[H);禁發相對游標移動(ESC[<n>A/B)——源碼+行為雙測鎖
+# (tests_rmon.TestFrameEngine)。每拍重新歸位 = 每拍自我修復,誤差不可能累積。
+
+_RX_SGR = re.compile(r"\x1b\[[0-9;]*m")   # 串流中唯一的 escape 來源是自家 _c(資料面已被 clean() 剝光 ESC)
+
+
+def _clip(s, cols):
+    """可見寬用 dw()(全角=2)裁到 cols;SGR 整段跳過、不准攔腰剪;
+    截斷補誠實標記 `…`(與 clean 的 [截斷] 同族:截了要看得出來)+ 一律 reset。"""
+    if dw(_RX_SGR.sub("", s)) <= cols:
+        return s
+    mark = "…"
+    budget, vis, n, i = cols - 1, [], 0, 0
+    while i < len(s):
+        m = _RX_SGR.match(s, i)
+        if m:
+            vis.append(m.group(0)); i = m.end(); continue
+        cw = 2 if unicodedata.east_asian_width(s[i]) in ("W", "F") else 1
+        if n + cw > budget:
+            break
+        vis.append(s[i]); n += cw; i += 1
+    return "".join(vis) + mark + "\x1b[0m"
+
+
+def fit_lines(L, cols):
+    """render 的邏輯行 → 物理行:先攤平行內嵌 `\\n`(禮讓閘行),再逐行裁寬。
+    框行數 = len(回傳清單),這是行數算式的輸入契約。"""
+    out = []
+    for logical in L:
+        for ph in str(logical).split("\n"):
+            out.append(_clip(ph, cols))
+    return out
+
+
+class _Frame:
+    """固定框原地重繪:游標絕對歸位 + 逐行 EL + 尾行不換行。
+    只准在「已驗證吃得到 VT 的真實 console」路徑上使用。不准出現相對游標移動。
+    行數算式(可證):最後一行寫完即停 ⇒ 游標停第 N 行行尾;殘行擦除只在縮框時
+    發生,擦除後總行數 = 上一拍行數 ≤ 終端行數 ⇒ 永不越過視窗底、永不捲動。"""
+
+    def __init__(self, out=None):
+        self.out = out if out is not None else sys.stdout
+        self.rows = 0            # 上一拍拍出幾物理行
+        self.first = True
+
+    def draw(self, lines):       # lines:已裁寬的物理行(list[str]),不含尾換行
+        buf = ["\x1b[H"]
+        for i, ln in enumerate(lines):
+            if i:
+                buf.append("\r\n")
+            buf.append(ln)
+            buf.append("\x1b[K")             # 抹掉本行右側殘留(上一拍較長的尾巴)
+        if self.first:
+            buf.append("\x1b[J")             # 首拍:框以下的橫幅殘字,清一次
+            self.first = False
+        else:
+            for _ in range(max(0, self.rows - len(lines))):
+                buf.append("\r\n\x1b[K")     # 上一拍多出來的行整行擦掉
+        self.rows = len(lines)
+        self.out.write("".join(buf))
+        self.out.flush()
+
+
+def _term_size():
+    """終端尺寸測試縫(供 monkeypatch):回 (cols, rows);get_terminal_size 失敗自返慣例值。"""
+    ts = shutil.get_terminal_size((88, 24))
+    return ts.columns, ts.lines
+
+
+def _live_wait(interval):
+    """等鍵測試縫(v0.1.4 do_live 內圈的純搬移,行為等價):0.15s 輪詢 q/r。
+    回 "q"(離開)、"r"(立刻補一拍)、None(節奏到)。無 msvcrt(非 nt)就乾等。"""
+    waited = 0.0
+    while waited < interval:
+        try:
+            import msvcrt
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch().lower()
+                if ch == "q":
+                    return "q"
+                if ch == "r":
+                    return "r"
+        except ImportError:
+            pass
+        time.sleep(0.15)
+        waited += 0.15
+    return None
+
+
+def _frame_probe():
+    """能力探測測試縫,回 (可原地重繪?, VT 輸出已讀回確認?)。
+    nt:GetConsoleMode 讀回成功才算吃 VT(只信讀回,不信 SetConsoleMode 的 rc);
+    POSIX:tty 即假設吃 VT(非主戰場)。非 console(redirect/pipe)→ (False, False)。"""
+    if os.name == "nt":
+        vt = _console_nice(True, want_vt=True)
+        return vt, vt
+    return bool(sys.stdout and sys.stdout.isatty()), True
+
+
+def _warn_stderr(msg):
+    """降級宣告走 stderr:stdout 保持與 v0.1.4 逐字元相容(`live > log` 存檔用途
+    一個位元都不多),人類的終端仍然看得到這句。寫不进就算,不許反殺主流程。"""
+    try:
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _snapshot_state(cfg):
     try:
         snap = fetch(cfg)
@@ -766,36 +880,64 @@ def do_once(cfg, color):
 
 
 def do_live(cfg, interval, color):
-    if os.name == "nt":
-        _console_nice(True)
+    """常駐面板。v0.2.0:VT 讀回確認的終端走「固定框原地重繪」;其餘環境逐字元
+    回到 v0.1.4 追加(降級=最壞情況就是今天)。逃生門 `RMON_NO_FRAME=1`:能力
+    俱全也自願退回追加(含 v0.1.4 的每拍 2J 節奏)。"""
+    no_frame = bool(os.environ.get("RMON_NO_FRAME"))
+    frame_on, vt_ok = _frame_probe()
+    frame_on = frame_on and not no_frame
+    if color and not vt_ok:
+        # 誠實降色:VT 未讀回確認就發 SGR = 賭終端吃裸 escape(R1-A/F11);不賭。
+        # 這同時轉正 M0 latent 缺口:--color 開 VT 的承諾自此真的生效(讀回為準)。
+        _warn_stderr("(此終端未讀回確認 VT:色彩強制關閉,改素色。)\n")
+        color = False
+    if not frame_on:
+        _warn_stderr("(此終端不支援原地重繪:逐拍追加,同 v0.1.4。)\n")
+    full_clear = color and not frame_on   # v0.1.4 鎖:有色+無框(RMON_NO_FRAME 路徑)才每拍 2J 清屏
+    entered_frame = frame_on
+    foot = "q 離開 · r 立刻刷新 · 關窗就關窗(無值守承諾)"
+    fr = _Frame() if frame_on else None
+    if entered_frame:
+        sys.stdout.write("\x1b[?25l")      # 游標碼綁 frame_on(比舊「綁 color」更嚴)
     try:
         while True:
             model, dead, _ = _snapshot_state(cfg)
-            L = render(model or {}, cfg, color=color, dead=dead)
-            if color:
-                sys.stdout.write("\x1b[H\x1b[2J")
-            _print_lines(L)
-            sys.stdout.write("\nq 離開 · r 立刻刷新 · 關窗就關窗(無值守承諾)\n")
-            sys.stdout.flush()
-            waited = 0.0
-            while waited < interval:
-                try:
-                    import msvcrt
-                    if msvcrt.kbhit():
-                        ch = msvcrt.getwch().lower()
-                        if ch == "q":
-                            return 0
-                        if ch == "r":
-                            waited = interval
-                except ImportError:
-                    pass
-                time.sleep(0.15)
-                waited += 0.15
+            if frame_on:
+                cols, rows = _term_size()
+                L = render(model or {}, cfg, width=min(cols, 100), color=color, dead=dead)
+                phys = fit_lines(L, cols)
+                phys.append(_clip(foot, cols))
+                if len(phys) > rows:
+                    # 高度不足:寧可退化成會滾,不可截掉帳目燈(誠實教義);下拍自癒接管
+                    print("(視窗高度不足:本拍追加輸出;拉高視窗即回復原地重繪)")
+                    _print_lines(phys)
+                    sys.stdout.flush()
+                    fr.rows = 0
+                else:
+                    try:
+                        fr.draw(phys)
+                    except Exception:
+                        # 框壞最多退回今天,不許把 tick 迴圈炸成 traceback 瀑佈(cp950 fail-safe)
+                        print("(重繪失敗:本拍起轉追加,同 v0.1.4。)")
+                        _print_lines(phys)
+                        sys.stdout.flush()
+                        frame_on = False   # full_clear 不動:降級不回頭補 2J 閃爍
+            else:
+                L = render(model or {}, cfg, color=color, dead=dead)
+                if full_clear:
+                    sys.stdout.write("\x1b[H\x1b[2J")
+                _print_lines(L)
+                sys.stdout.write("\n" + foot + "\n")
+                sys.stdout.flush()
+            if _live_wait(interval) == "q":
+                return 0
     except KeyboardInterrupt:
         return 0
     finally:
-        if color:
-            sys.stdout.write("\x1b[0m\x1b[?25h\n")   # 無色終端不噴裸游標碼(R1-A/F11)
+        if entered_frame:
+            sys.stdout.write("\x1b[0m\r\n\x1b[?25h")   # 出框儀式:reset、落一行、還游標
+        elif color:
+            sys.stdout.write("\x1b[0m\x1b[?25h\n")     # v0.1.4 逐字元鎖(R1-A/F11)
         sys.stdout.flush()
         if os.name == "nt":
             _console_nice(False)
@@ -806,9 +948,14 @@ def do_live(cfg, interval, color):
 _SAVED_MODE = [None]
 
 
-def _console_nice(on, want_color=False):
-    """live/選單期間關掉本窗快速編輯/游標並(若要色)開 VT 輸出(R1-A/F11);
-    退出全部還原原值。本檔 ctypes 只准出現在這裡與 VT 開啟的分工內。"""
+def _console_nice(on, want_vt=False):
+    """live/選單期間關掉本窗快速編輯/游標並(若要 VT)開 VT 輸出(R1-A/F11);
+    退出全部還原原值。本檔 ctypes 只准出現在這裡與 VT 開啟的分工內。
+    回傳 = 「VT 輸出位已開啟」的讀回事實(v0.2.0 固定框的能力閘;on=False、
+    stdout 非 console、或讀回失敗一律 False —— SetConsoleMode 成功不等於 VT
+    開成,只信 GetConsoleMode 的讀回)。want_vt 舊名 want_color,語意升格:
+    「這條流會發 escape」(要色或重繪皆算)——escape 只進已驗證吃 VT 的流。"""
+    vt_ok = False
     try:
         import ctypes
         k32 = ctypes.windll.kernel32
@@ -819,14 +966,18 @@ def _console_nice(on, want_color=False):
             if on:
                 _SAVED_MODE[0] = mode.value
                 newm = mode.value & ~QE & ~INS
-                if want_color:
-                    newm |= VT                 # legacy cmd 的 --color:先開 VT 再談色
-                k32.SetConsoleMode(h, newm)
+                if want_vt:
+                    newm |= VT                 # legacy cmd --color / live 框:先開 VT 再談 escape
+                if k32.SetConsoleMode(h, newm):
+                    back = ctypes.c_uint32()
+                    if want_vt and k32.GetConsoleMode(h, ctypes.byref(back)):
+                        vt_ok = bool(back.value & VT)   # 讀回閘:證明吃 VT 的終端才收 escape
             elif _SAVED_MODE[0] is not None:
                 k32.SetConsoleMode(h, _SAVED_MODE[0])
                 _SAVED_MODE[0] = None
     except Exception:
         pass
+    return vt_ok
 
 # ---------------------------------------------------------------- main
 

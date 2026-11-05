@@ -22,7 +22,8 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 203, rmon tests >= 95 (1.2.17 sync era).
+Current floors: router smoke >= 203, rmon tests >= 112 (rmon v0.2.0 era).
+The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
 
@@ -40,8 +41,8 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 96       # rmon v0.1.4 era: 93 + two merged-layout router_dir tests
-                    # + one NUL-char-device stdin test (M3-B/P2-1)
+MIN_RMON = 112      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+                    # + NO_COLOR 1 (TUI adjudication 2026-11-05, in-place redraw)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.
@@ -82,6 +83,35 @@ def run_suite(name, argv, cwd, pattern, floor, floor_word):
     print("  PASS  %s -- %d %s (floor %d)" % (name, n, floor_word, floor))
 
 
+def check_root_entry():
+    """Root unified entry (v0.2.0, owner-mandated): the repo-root !-start.bat
+    must exist, be pure ASCII + CRLF, and delegate to monitor's launch.py go.
+    The check lives HERE, not in tests_rmon -- a pure monitor/ copy cannot see
+    the root, and a layout-dependent test would break that red line (M2-B/P2-1)."""
+    path = os.path.join(HERE, "!-start.bat")
+    if not os.path.isfile(path):
+        FAILS.append("root entry: !-start.bat is missing from the repo root")
+        print("  FAIL  root entry -- !-start.bat missing")
+        return
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    problems = []
+    if any(b > 127 for b in raw):
+        problems.append("non-ASCII bytes (cp950 cmd parsing hazard, R1-A/F4)")
+    if b"\n" in raw.replace(b"\r\n", b""):
+        problems.append("bare LF line endings (cmd needs CRLF)")
+    if b"\r\n" not in raw:
+        problems.append("no CRLF line endings at all")
+    text = raw.decode("ascii", "replace")
+    if "launch.py go" not in text or "monitor" not in text:
+        problems.append("does not delegate to monitor launch.py go")
+    if problems:
+        FAILS.append("root entry: " + "; ".join(problems))
+        print("  FAIL  root entry -- " + "; ".join(problems))
+        return
+    print("  PASS  root entry -- exists, pure ASCII, CRLF, delegates monitor launch.py go")
+
+
 def main():
     print("== 0a. gate selftest (does the audit still have teeth?) ==")
     sys.stdout.flush()
@@ -96,6 +126,10 @@ def main():
     r = subprocess.run([PY, os.path.join(HERE, "audit_package.py")], cwd=HERE, env=ENV)
     if r.returncode != 0:
         FAILS.append("audit_package gate failed (see above) -- DO NOT PUSH")
+
+    print("")
+    print("== 0c. root entry (owner-facing double-click) ==")
+    check_root_entry()
 
     print("")
     print("== 1. router package ==")

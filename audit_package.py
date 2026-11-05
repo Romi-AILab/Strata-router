@@ -48,6 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # The friend's mirror IS this exact set -- the review scope of any change to
 # packaging is "did this line change, and only this line".
 EXPECTED_TRACKED = {
+    "!-start.bat",          # root unified entry (v0.2.0, owner-mandated; delegates to monitor/launch.py go)
     ".gitattributes",
     ".gitignore",
     "README.md",

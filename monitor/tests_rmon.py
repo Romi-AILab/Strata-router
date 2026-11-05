@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests_rmon.py -- monitor v0.1.4 驗收(tests first red line:全部 temp dir、零真實 port)。
+"""tests_rmon.py -- monitor v0.2.0 驗收(tests first red line:全部 temp dir、零真實 port)。
 
 跑法:python tests_rmon.py -v
 涵蓋:3.8 相容(AST+compile 雙閘)、結構性零 POST、清洗(含 R1 換行偽造/Cf/代理字元)、
 寬度、設定紅線(含植樁清洗/巢狀拒絕)、presence 降級、tok/s 估算、帳目三態、禮讓閘三態、
 借用估計、replay 管線、diagnose 去識別化(含 target 遮罩)、HTML 逃脫、
-launch(探活不炸/pid 三因子/EOF 誠實/金鑰零讀取)、bat 純 ASCII+CRLF、零 ESC 金絲雀。
+launch(探活不炸/pid 三因子/EOF 誠實/金鑰零讀取)、bat 純 ASCII+CRLF、零 ESC 金絲雀、
+固定框引擎與降級路徑(v0.2.0:絕對歸位源碼+行為雙鎖、VT 讀回閘、RMON_NO_FRAME、NO_COLOR)。
 """
 import ast
 import builtins
@@ -14,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -1207,6 +1209,193 @@ class TestRound3Locks(unittest.TestCase):               # 第三輪 R3 紅隊(op
                 os.environ["RMON_CONFIG"] = old_cfg_env
         self.assertIn("monitor.json 缺失/損壞", out)
         self.assertIn("127.0.0.1:8088", out)
+
+
+class TestFrameEngine(unittest.TestCase):
+    """v0.2.0 固定框引擎(裁決 P1 §7):絕對歸位、寬度、SGR、攤平。
+    io.StringIO 直測,零 port、零真實 console、layout-free(純副本可重放)。"""
+
+    def _rmon_src(self):
+        with open(os.path.join(HERE, "rmon.py"), "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_abs_home_no_relative_up(self):
+        # 行為鎖:框輸出流裡任何相對游標移動(ESC[<n>A/B)都禁止;絕對歸位必在場
+        buf = io.StringIO()
+        fr = rmon._Frame(out=buf)
+        fr.draw(["alpha", "beta"])
+        fr.draw(["gamma"])
+        out = buf.getvalue()
+        self.assertIn("\x1b[H", out)
+        self.assertNotRegex(out, r"\x1b\[\d+[AB]")
+
+    def test_source_no_relative_cursor(self):
+        # 源碼鎖:相對游標字面形(ESC[數字A/B)在 rmon 源碼永不現形。
+        # 文件與註解裡的「ESC[<n>A/B」是散文,不匹配此模式 —— 鎖的正是可執行形。
+        self.assertNotRegex(self._rmon_src(), r"\\x1b\[\d+[AB]")
+
+    def test_two_draws_no_scrollback_growth(self):
+        # 第二幀只含自己的內容、往下蓋;無尾換行;\n 全部成對 \r\n(裸 \n 會推捲動)
+        buf = io.StringIO()
+        fr = rmon._Frame(out=buf)
+        fr.draw(["alpha", "beta"])
+        buf.truncate(0)
+        buf.seek(0)
+        fr.draw(["gamma"])
+        out = buf.getvalue()
+        self.assertTrue(out.startswith("\x1b[H"))
+        self.assertFalse(out.endswith("\n"))
+        plain = rmon._RX_SGR.sub("", out.replace("\x1b[K", "").replace("\x1b[J", ""))
+        self.assertIn("gamma", plain)
+        self.assertNotIn("beta", plain)
+        self.assertEqual(plain.count("\n"), plain.count("\r\n"))
+
+    def test_shrink_erases_leftover_rows(self):
+        # 10 行 → 4 行:恰 6 次整行擦除(殘行清理的行數算式)
+        buf = io.StringIO()
+        fr = rmon._Frame(out=buf)
+        fr.draw(["L%d" % i for i in range(10)])
+        buf.truncate(0)
+        buf.seek(0)
+        fr.draw(["S0", "S1", "S2", "S3"])
+        self.assertEqual(buf.getvalue().count("\r\n\x1b[K"), 6)
+
+    def test_first_draw_clears_below_once(self):
+        # 首拍清一次框下殘字;之後永不重複(3 拍全程 ESC[J 恰好 1 次)
+        buf = io.StringIO()
+        fr = rmon._Frame(out=buf)
+        fr.draw(["a", "b"])
+        fr.draw(["a"])
+        fr.draw(["c", "d", "e"])
+        self.assertEqual(buf.getvalue().count("\x1b[J"), 1)
+
+    def test_clip_wide_cjk_dw(self):
+        # 全角=2 算寬裁到 cols;截斷帶誠實標記;短行逐字元不動
+        cut = rmon._clip("盒" * 60, 40)
+        self.assertLessEqual(rmon.dw(rmon._RX_SGR.sub("", cut)), 40)
+        self.assertTrue(cut.endswith("…\x1b[0m"))
+        self.assertEqual(rmon._clip("盒盒盒", 40), "盒盒盒")
+
+    def test_clip_never_cuts_sgr(self):
+        # 剪點落在色段中段:SGR 整段跳過不攔腰;輸出無半截 escape;一律 reset 收尾
+        s = "\x1b[1;32m" + "盒" * 40 + "\x1b[0m"
+        cut = rmon._clip(s, 10)
+        self.assertTrue(cut.startswith("\x1b[1;32m"))
+        self.assertTrue(cut.endswith("…\x1b[0m"))
+        self.assertNotIn("\x1b", rmon._RX_SGR.sub("", cut))
+        self.assertLessEqual(rmon.dw(rmon._RX_SGR.sub("", cut)), 10)
+
+    def test_fit_flattens_embedded_newline(self):
+        # render 邏輯行內嵌 \n(禮讓閘行)→ 物理行攤平;框行數算式的輸入契約
+        self.assertEqual(rmon.fit_lines(["a\nb", "c"], 40), ["a", "b", "c"])
+
+
+class TestLiveFrameFlow(unittest.TestCase):
+    """do_live 的兩條路(固定框 / v0.1.4 追加)在假探測+假按鍵下可測 ——
+    v0.1.4 時代 do_live 是不可測黑盒(裁決 P1 §3.7 測試縫)。全部 monkeypatch+
+    StringIO:零 port、零真實 console、零真實網路。"""
+
+    CFG = {"host": "-", "port": 0, "mode": "friend", "names": {}, "interval": 0.5}
+
+    def setUp(self):
+        self._old = {}
+        for name in ("_snapshot_state", "_term_size", "_live_wait", "_frame_probe"):
+            self._old[name] = getattr(rmon, name)
+        self._old_env = os.environ.get("RMON_NO_FRAME")
+        os.environ.pop("RMON_NO_FRAME", None)
+        rmon._snapshot_state = lambda cfg: ({"boxes": []}, None, None)
+        rmon._live_wait = lambda iv: "q"        # 預設:畫一拍就走(測試不許真睡)
+
+    def tearDown(self):
+        for name, val in self._old.items():
+            setattr(rmon, name, val)
+        if self._old_env is None:
+            os.environ.pop("RMON_NO_FRAME", None)
+        else:
+            os.environ["RMON_NO_FRAME"] = self._old_env
+
+    def _go(self, probe, size=(80, 24), color=False, interval=0.5):
+        rmon._frame_probe = lambda: probe
+        rmon._term_size = lambda: size
+        buf = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = rmon.do_live(self.CFG, interval, color)
+        return rc, buf.getvalue(), err.getvalue()
+
+    def test_frame_off_appends_exact_v014(self):
+        # 「等於今天」鎖:無框路徑的 stdout 與 v0.1.4(_print_lines+footer)逐字元同
+        rmon._frame_probe = lambda: (False, True)
+        rmon._term_size = lambda: (80, 24)
+        buf = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = rmon.do_live(self.CFG, 0.5, False)
+        expect = "".join(l + "\n" for l in rmon.render({"boxes": []}, self.CFG, color=False, dead=None))
+        expect += "\nq 離開 · r 立刻刷新 · 關窗就關窗(無值守承諾)\n"
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue(), expect)
+        self.assertIn("不支援原地重繪", err.getvalue())   # 宣告走 stderr,不污染存檔 stdout
+
+    def test_no_escape_when_frame_off(self):
+        rc, out, err = self._go((False, False))
+        self.assertNotIn("\x1b", out)          # redirect/pipe 零 escape 紅線(素色)
+
+    def test_vt_gate_forces_plain_color(self):
+        # VT 未讀回確認 → 要色請求被誠實降色(不賭裸 escape);latent 缺口轉正的行為鎖
+        rc, out, err = self._go((False, False), color=True)
+        self.assertNotIn("\x1b", out)
+        self.assertIn("色彩強制關閉", err)
+
+    def test_height_overflow_degrades_with_notice(self):
+        rc, out, err = self._go((True, True), size=(80, 3))
+        self.assertIn("視窗高度不足", out)
+        self.assertIn("q 離開", out)
+        self.assertIn("rmon v", out)           # 完整面板內容照印(不截帳目燈)
+        self.assertNotIn("\x1b[H", out)        # 本拍走追加,未進框
+
+    def test_env_veto_rmon_no_frame(self):
+        os.environ["RMON_NO_FRAME"] = "1"      # 逃生門:能力俱全也自願退回 v0.1.4 追加
+        rc, out, err = self._go((True, True))
+        self.assertNotIn("\x1b[H", out)
+        self.assertIn("q 離開", out)
+
+    def test_footer_inside_frame(self):
+        rc, out, err = self._go((True, True), size=(120, 40))
+        self.assertIn("\x1b[H", out)
+        self.assertIn("q 離開", out)
+        self.assertNotIn("承諾)\n", out)       # footer 在框內:無追加式的「尾帶換行」形態
+        self.assertIn("\x1b[?25l", out)        # 藏游標綁 frame_on(進場)
+        self.assertIn("\x1b[?25h", out)        # 還游標(出場儀式)
+
+    def test_q_returns_zero_first_tick(self):
+        rc, out, err = self._go((True, True), size=(120, 40))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("\x1b[H"), 1)   # 恰好一幀:q 一條路回選單
+
+
+class TestNoColorEnv(unittest.TestCase):
+    """NO_COLOR 慣例(v0.2.0):環境層對「自動開色」一票否決;
+    顯式 --color 是使用者當下手勢,仍可越過(main 的 color 算式,非 _term_ok)。"""
+
+    def setUp(self):
+        self._old = (os.environ.get("WT_SESSION"), os.environ.get("NO_COLOR"))
+
+    def tearDown(self):
+        for k, v in zip(("WT_SESSION", "NO_COLOR"), self._old):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_no_color_beats_auto_color(self):
+        os.environ["WT_SESSION"] = "1"
+        self.assertTrue(rmon._term_ok(False))          # WT 自動開色基線
+        os.environ["NO_COLOR"] = "1"
+        self.assertFalse(rmon._term_ok(False))         # NO_COLOR 一票否決
+        os.environ.pop("NO_COLOR")
+        self.assertTrue(rmon._term_ok(False))          # 撤除即還原
+        self.assertFalse(rmon._term_ok(True))          # --ascii 永遠赢
 
 
 if __name__ == "__main__":

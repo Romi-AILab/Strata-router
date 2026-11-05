@@ -1,4 +1,4 @@
-# Strata Monitor(rmon v0.1.4)
+# Strata Monitor(rmon v0.2.0)
 
 Strata router 的**一條龍終端**:雙擊啟動 → 服務自動上線 → **同一個視窗**即時顯示
 遠端閒不閒置、算力夠不夠、兩台混合每秒實際吐多少 token。體驗基準是 cc-switch /
@@ -28,7 +28,7 @@ Strata 原生監控:**即時、無打扰、全在 terminal**。這是儀表板,*
 | `launch.py` | 操作殼 + 一條龍入口 `go`:起停 router 只准在這裡,只准子程序/taskkill(永不 import router);router.py 旁有 `router.json` 時自動帶 `--config`(router 該參數無預設值;只驗存在,內容零讀取);`[K]` 有「三因子身分核可、殺無赦禁令」 |
 | `monitor.json` | 你的目標設定(host/port/顯示名)。**這裡不准出現金鑰**——欄名含 key/token/secret 會被直接拒絕(含 `names` 的鍵);`names` 只收純字串,巢狀物件直接拒絕 |
 | `monitor.json.example` | 範本 |
-| `!-start.bat` | 雙擊入口(= `launch.py go`) |
+| `!-start.bat` | 雙擊入口(= `launch.py go`;repo 根目錄的 `!-start.bat` 是等價統一入口,委派到這裡) |
 | `tests_rmon.py` | 測試:`python tests_rmon.py`(全綠才算装好) |
 
 ## 命令(一切都在 terminal 裡,本專案不開網頁)
@@ -46,7 +46,18 @@ python rmon.py --replay FILE # 回放拍序列(JSON 單拍或 JSONL),不碰網�
 (預設已去識別化,連監控目標都不出現;`--full` 才出實址,公開發文前想清楚)。
 
 `live` 期間快速編輯游標會自動關掉(選文字不會凍住畫面),退出全部還原。
-顏色只在 Windows Terminal 自動開;legacy cmd 用素色,要色加 `--color`(會順手打開該終端的 VT 序列輸出,退出還原)。
+
+**v0.2.0 起 `live` 是固定框原地重繪**:每一拍在螢幕同一塊區域覆寫(游標絕對歸位,
+永不發「上移 N 行」那類相對移動——錯誤不累積,每拍自我修復),scrollback 不再成長。
+框上不上線**以讀回驗證為準**(GetConsoleMode 讀回 VT 位,不信「設定呼叫成功了」):
+驗證不到的終端(輸出被重導、管線、怪異舊 conhost)降回 v0.1.4 的逐拍追加,輸出
+逐字元相同;降級宣告走 stderr,`live > log` 存檔的 stdout 一個位元都不多。
+不想要框:`set RMON_NO_FRAME=1` 即刻得 v0.1.4 體驗(不需改碼或發版)。
+視窗太矮放不下整框:該拍自動退回追加並說明,拉高視窗即回復(下拍自癒)——
+寧可退化成會滾,不截掉帳目燈。
+顏色只在 Windows Terminal 自動開(設了 `NO_COLOR` 環境變數則連 WT 也不自動開);
+legacy cmd 用素色,要色加 `--color`(真的會開該終端的 VT 輸出位並**讀回確認**——
+讀回成功才有真色,讀回失敗會宣告「色彩強制關閉」改素色,不賭裸 escape;退出還原)。
 
 ## 面板上每個數字的口徑(誠實教義)
 
@@ -91,7 +102,9 @@ python rmon.py --replay FILE # 回放拍序列(JSON 單拍或 JSONL),不碰網�
 - 状態檔在 `%LOCALAPPDATA%\strata-monitor\`(速率快取**按目標分流檔**、多機切換互不覆蓋、
   90 天沒再用的舊目標快取自動回收、`router.pid.json`、router.log)。
 - 環境變數(進階,一般不用設):`RMON_CONFIG` 指定 monitor.json 路徑;`RMON_STATE_DIR`
-  指定狀態目錄(測試/多-instance 用);`STRATA_ROUTER_DIR` 告訴操作殼 router 在哪。
+  指定狀態目錄(測試/多-instance 用);`RMON_NO_FRAME=1` 關掉固定框(退回 v0.1.4 追加);
+  `NO_COLOR` 依慣例關掉自動開色(顯式 `--color` 仍可越過);`STRATA_ROUTER_DIR`
+  告訴操作殼 router 在哪。
   未設時依序找姊妹目錄 `../router`(monorepo 同樹)→ 舊的 `../strata-router`
   (獨立佈局,切换期間兩邊都認),都找不到就看選單 `[S]`/`[C]` 的指示。
 - **router 升級後的同步儀式**:`router.py` 的 `VERSION` 超過 rmon 的 `SCHEMA_KNOWN_MAX` 時,

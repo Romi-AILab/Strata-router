@@ -39,13 +39,15 @@ python run_all_tests.py
 ## 版本與發行列車
 
 - router 升級:`router/router.py` 的 `VERSION` → tag `vX.Y.Z`(既有歷史,不改寫)。
-- monitor 升級:`monitor/rmon.py` 的 `VERSION`;router 帳目終態增減時同步
+- monitor 升級:`monitor/rmon.py` 的 `VERSION` → tag `rmon-X.Y.Z`(`v*` 序列是 router 專用,
+  兩包各自發車互不撞號);router 帳目終態增減時同步
   `rmon.py` 的 `TERMS` 與 `SCHEMA_KNOWN_MAX`(見 monitor README 的同步儀式)。
 - 合併前歷史完整保留(`git log --follow router/router.py` 追得回去)。
 
 ## 給朋友(鏡像/自用)
 
 需要 Python 3.8+,純 stdlib。clone 後:`router/` 照
-[router/README.md](router/README.md) 快速開始;`monitor/` 雙擊
-`monitor/!-start.bat` 一條龍。兩包同一棵樹時面板自動找到 router;
+[router/README.md](router/README.md) 快速開始;整組一條龍就雙擊** repo 根目錄的
+`!-start.bat`**(統一入口,委派 `monitor/launch.py go`;`monitor/!-start.bat` 保留,
+兩者等價)。兩包同一棵樹時面板自動找到 router;
 只要其中一包,複製那個子資料夾走也照常單獨運作。
