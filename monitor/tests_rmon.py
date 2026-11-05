@@ -1227,12 +1227,14 @@ class TestFrameEngine(unittest.TestCase):
         fr.draw(["gamma"])
         out = buf.getvalue()
         self.assertIn("\x1b[H", out)
-        self.assertNotRegex(out, r"\x1b\[\d+[AB]")
+        # \d* 不是 \d+:ECMA-48 的無參數形 ESC[A(預設=1)也是相對游標移動
+        # (round-1/A-P2-2 修復:雙鎖同刀,無參數形不得從牙縫溜過)
+        self.assertNotRegex(out, r"\x1b\[\d*[AB]")
 
     def test_source_no_relative_cursor(self):
-        # 源碼鎖:相對游標字面形(ESC[數字A/B)在 rmon 源碼永不現形。
+        # 源碼鎖:相對游標字面形(ESC[數字A/B,含無參數 ESC[A)在 rmon 源碼永不現形。
         # 文件與註解裡的「ESC[<n>A/B」是散文,不匹配此模式 —— 鎖的正是可執行形。
-        self.assertNotRegex(self._rmon_src(), r"\\x1b\[\d+[AB]")
+        self.assertNotRegex(self._rmon_src(), r"\\x1b\[\d*[AB]")
 
     def test_two_draws_no_scrollback_growth(self):
         # 第二幀只含自己的內容、往下蓋;無尾換行;\n 全部成對 \r\n(裸 \n 會推捲動)
@@ -1284,6 +1286,12 @@ class TestFrameEngine(unittest.TestCase):
         self.assertTrue(cut.endswith("…\x1b[0m"))
         self.assertNotIn("\x1b", rmon._RX_SGR.sub("", cut))
         self.assertLessEqual(rmon.dw(rmon._RX_SGR.sub("", cut)), 10)
+        # 命名危害本體:強制剪點落在 escape 字元中間(budget=4 < 色段 7 字元)
+        mid = rmon._clip(s, 5)
+        self.assertTrue(mid.startswith("\x1b[1;32m"))
+        self.assertTrue(mid.endswith("…\x1b[0m"))
+        self.assertNotIn("\x1b", rmon._RX_SGR.sub("", mid))
+        self.assertLessEqual(rmon.dw(rmon._RX_SGR.sub("", mid)), 5)
 
     def test_fit_flattens_embedded_newline(self):
         # render 邏輯行內嵌 \n(禮讓閘行)→ 物理行攤平;框行數算式的輸入契約
@@ -1372,6 +1380,90 @@ class TestLiveFrameFlow(unittest.TestCase):
         rc, out, err = self._go((True, True), size=(120, 40))
         self.assertEqual(rc, 0)
         self.assertEqual(out.count("\x1b[H"), 1)   # 恰好一幀:q 一條路回選單
+
+    def test_height_overflow_selfheal_clears_below(self):
+        # 縮矮一拍(追加)再復原:復原框必須再發 ESC[J 收框以下,否則追加殘行
+        # (含殘留的 footer 帳目行)會永遠掛在活框下面(round-1/B-P2-1 修復鎖)
+        sizes = iter([(120, 40), (80, 3), (120, 40)])
+        def ts():
+            try:
+                return next(sizes)
+            except StopIteration:
+                return (120, 40)
+        rmon._frame_probe = lambda: (True, True)
+        rmon._term_size = ts
+        waits = iter(["", "", "q"])
+        rmon._live_wait = lambda iv: next(waits)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            rmon.do_live(self.CFG, 0.5, False)
+        out = buf.getvalue()
+        blocks = out.split("\x1b[H")[1:]
+        self.assertEqual(len(blocks), 2)           # 第二拍追加、不進框
+        self.assertIn("視窗高度不足", out)
+        self.assertIn("\x1b[J", blocks[0])         # 首框清橫幅殘字一次
+        self.assertIn("\x1b[J", blocks[1])         # 復原框再清框以下(自癒完整=設計 §3.6)
+
+    def test_shrink_between_ticks_stays_inside_screen(self):
+        # 中途縮窗且新框放得下:殘行擦除以現高為帽,該拍 LF 總數 ≤ rows-1
+        # ——「永不捲動」不變量在縮窗角度的修復鎖(round-1/B-P3-1)
+        orig_render = rmon.render
+        ticks = iter(["big", "small"])
+        def fake_render(model, cfg, **kw):
+            return ["X%02d" % i for i in range(15)] if next(ticks) == "big" else ["Y"] * 3
+        rmon.render = fake_render
+        try:
+            sizes = iter([(100, 20), (100, 6)])
+            def ts():
+                try:
+                    return next(sizes)
+                except StopIteration:
+                    return (100, 6)
+            rmon._frame_probe = lambda: (True, True)
+            rmon._term_size = ts
+            waits = iter(["", "q"])
+            rmon._live_wait = lambda iv: next(waits)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                rmon.do_live(self.CFG, 0.5, False)
+            blocks = buf.getvalue().split("\x1b[H")[1:]
+            self.assertEqual(len(blocks), 2)
+            # 修復算式:殘行擦除以現高為帽 → 6 行窗、新框 4 行:擦除恰 6-4=2 次
+            # (未修碼是 16-4=12 次,走 LF 過窗底 7 行 = 捲動爆發)
+            self.assertEqual(blocks[1].count("\r\n\x1b[K"), 2)
+        finally:
+            rmon.render = orig_render
+
+    def test_noframe_color_keeps_v014_2j_cadence(self):
+        # RMON_NO_FRAME=1 + 有色:逐拍逐字元等於 v0.1.4 —— 2J 清屏節奏不是死碼
+        # (full_clear 的修復鎖;round-1/B-P3-3)
+        os.environ["RMON_NO_FRAME"] = "1"
+        rmon._frame_probe = lambda: (True, True)
+        rmon._term_size = lambda: (80, 24)
+        waits = iter(["", "q"])
+        rmon._live_wait = lambda iv: next(waits)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            rmon.do_live(self.CFG, 0.5, True)
+        out = buf.getvalue()
+        self.assertEqual(out.count("\x1b[H\x1b[2J"), 2)      # 兩拍各一次,順序逐字元同 v0.1.4
+        self.assertTrue(out.endswith("\x1b[0m\x1b[?25h\n"))  # 出場儀式也是 v0.1.4 原句
+
+
+class TestConsoleNiceLock(unittest.TestCase):
+    """VT 讀回仲裁器的直接鎖(round-1/B-P3-2):正值只有真 console 測得準(環境變數),
+    但誠實面的契約可以釘死 —— 沒要 VT 的路徑與退出路徑永不得宣稱 VT。
+    此鎖殺掉「盲目回 True」的仲裁器變異:讀回閘一旦失明,整個 escape 安全論證就塌。"""
+
+    def tearDown(self):
+        rmon._console_nice(False)        # 無論走過哪條路,本窗 console 模式一律還原
+
+    def test_never_claims_vt_unless_asked(self):
+        self.assertIs(rmon._console_nice(True), False)               # 未 request 永不宣稱
+        self.assertIs(rmon._console_nice(False, want_vt=True), False)  # 退出路恆 False
+
+    def test_readback_returns_bool(self):
+        self.assertIsInstance(rmon._console_nice(True, want_vt=True), bool)
 
 
 class TestNoColorEnv(unittest.TestCase):

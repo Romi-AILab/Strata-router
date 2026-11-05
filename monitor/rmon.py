@@ -913,7 +913,11 @@ def do_live(cfg, interval, color):
                     _print_lines(phys)
                     sys.stdout.flush()
                     fr.rows = 0
+                    fr.first = True   # 追加過=框以下又有了字:復原拍必須再清一次框下(P1§3.6 首拍重置)
                 else:
+                    # 中途縮窗:舊行數以現高為帽,殘行擦除永不走 LF 過視窗底
+                    # (「永不捲動」的行數算式由此恢复完整:行間 LF + 擦除 ≤ rows-1)
+                    fr.rows = min(fr.rows, rows)
                     try:
                         fr.draw(phys)
                     except Exception:

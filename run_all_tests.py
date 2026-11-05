@@ -41,8 +41,9 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 112      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
-                    # + NO_COLOR 1 (TUI adjudication 2026-11-05, in-place redraw)
+MIN_RMON = 117      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+                    # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
+                    # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.
@@ -103,8 +104,20 @@ def check_root_entry():
     if b"\r\n" not in raw:
         problems.append("no CRLF line endings at all")
     text = raw.decode("ascii", "replace")
-    if "launch.py go" not in text or "monitor" not in text:
-        problems.append("does not delegate to monitor launch.py go")
+    # Delegation must be an EXECUTABLE line, not a remark that merely mentions
+    # the words (round-1/A-P3-1: a rem-comment-only bat satisfied the substring check).
+    delegated = False
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("::") or s.lower().startswith("rem "):
+            continue
+        if "launch.py go" in s:
+            delegated = True
+            break
+    if not delegated:
+        problems.append("no executable delegation line to launch.py go (a rem comment does not count)")
+    if "monitor" not in text:
+        problems.append("does not anchor into the monitor/ folder")
     if problems:
         FAILS.append("root entry: " + "; ".join(problems))
         print("  FAIL  root entry -- " + "; ".join(problems))

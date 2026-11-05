@@ -47,7 +47,7 @@ python run_all_tests.py
 ## 給朋友(鏡像/自用)
 
 需要 Python 3.8+,純 stdlib。clone 後:`router/` 照
-[router/README.md](router/README.md) 快速開始;整組一條龍就雙擊** repo 根目錄的
-`!-start.bat`**(統一入口,委派 `monitor/launch.py go`;`monitor/!-start.bat` 保留,
+[router/README.md](router/README.md) 快速開始;整組一條龍就雙擊 repo 根目錄的
+`!-start.bat`(統一入口,委派 `monitor/launch.py go`;`monitor/!-start.bat` 保留,
 兩者等價)。兩包同一棵樹時面板自動找到 router;
 只要其中一包,複製那個子資料夾走也照常單獨運作。
