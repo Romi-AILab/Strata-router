@@ -101,6 +101,14 @@ _B64ISH = re.compile(r"[A-Za-z0-9+/]{32,}={0,2}")
 # 40+ hex: sha-shaped tokens. Docs that must cite a commit use 7-8 char
 # short refs (M2-A/P2-2).
 _HEXLONG = re.compile(r"[0-9a-f]{40,}")
+# Chopped base64url tokens WITHOUT an sk- prefix -- real API tokens mix
+# case and carry digits; prose kebab-case has no digits and version strings
+# are dot-broken or too short, so both lookaheads together stay quiet on
+# legitimate text (M3-A/P3-N1: alnum-only runs let -/_-chopped secrets
+# through -- the promise made when adopting P1-1, now actually kept).
+# Same policy as _B64ISH: if prose trips this, fix the prose, not the pattern.
+_URLTOKEN = re.compile(
+    r"(?=[A-Za-z0-9_\-]*[0-9])(?=[A-Za-z0-9_\-]*[A-Z])[A-Za-z0-9_\-]{24,}")
 # Tailscale MagicDNS hostnames identify a real machine even with no IP in
 # sight. The shipped example host uses the reserved ".tsnet.invalid" shape
 # instead; a real MagicDNS name must never replace it. (The backslash-
@@ -122,6 +130,7 @@ PATTERNS = [
     ("tailscale/CGNAT address", _TAILSCALE),
     ("api-key-shaped token", _APIKEY),
     ("long base64/blob", _B64ISH),
+    ("chopped base64url token", _URLTOKEN),
     ("long hex token", _HEXLONG),
     ("tailscale magic-dns name", _TSNET),
     ("user-home path", _USERSDIR),
@@ -155,23 +164,35 @@ def git_blob(spec):
 
 
 def decode_views(data):
-    """bytes -> list of candidate texts. utf-8 if it decodes; else UTF-16
-    when a leading NUL hints at a wide encoding, with latin-1 (never fails,
-    byte-lossless) as the last look. A file is only skipped if nothing can
-    read it at all -- which is nothing (M2-A/P2-2)."""
-    try:
-        return [data.decode("utf-8")]
-    except UnicodeDecodeError:
-        pass
+    """bytes -> list of candidate texts. A file is only skipped if nothing
+    can read it at all -- which is nothing. Order is load-bearing
+    (M3-A/P1-N1): a UTF-16 BOM (notepad and old PowerShell's default save)
+    decodes as UTF-16 FIRST; a utf-8 text that decodes WITH NUL bytes is
+    re-scanned de-NULled (BOM-less UTF-16 of ASCII decodes as utf-8 and
+    NULs would chop every pattern's match in half); the last-resort net is
+    the whole file as latin-1 with NULs stripped, appended to every path."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return [data.decode("utf-16")]
+        except (UnicodeDecodeError, ValueError, UnicodeError):
+            pass    # a lying BOM -- fall through to the general path
     views = []
-    if b"\x00" in data[:2]:
-        for enc in ("utf-16", "utf-16-le", "utf-16-be"):
-            try:
-                views.append(data.decode(enc))
-                break
-            except (UnicodeDecodeError, ValueError, UnicodeError):
-                continue
-    views.append(data.decode("latin-1"))
+    try:
+        text = data.decode("utf-8")
+        views.append(text)
+        if "\x00" in text:
+            views.append(text.replace("\x00", ""))
+    except UnicodeDecodeError:
+        if b"\x00" in data:
+            for enc in ("utf-16", "utf-16-le", "utf-16-be"):
+                try:
+                    views.append(data.decode(enc))
+                    break
+                except (UnicodeDecodeError, ValueError, UnicodeError):
+                    continue
+    net = data.decode("latin-1").replace("\x00", "")
+    if net not in views:
+        views.append(net)
     return views
 
 
@@ -196,23 +217,32 @@ def scan_content(name, data):
 # fails this gate: the audit keeps its own teeth honest.
 
 def _canaries():
+    key = ("sk-" + "ant-api03-" + "SyntheticAbCdEf0123456" +
+           "789abcdefghIJKLmnopqr" + "stuv0123456789WXYZ")
     must_hit = [
-        ("anthropic key", "sk-" + "ant-api03-" + "SyntheticAbCdEf0123456" +
-                          "789abcdefghIJKLmnopqr" + "stuv0123456789WXYZ"),
+        ("anthropic key", key),
         ("openai key", "sk-" + "P" * 48),
         ("proj key", "sk-" + "proj-Ab12Cd34Ef56Gh78"),
         ("hyphen/underscore key", "sk-" + "ab_cd-ef_gh-ij_kl-mn"),
         ("base64 blob", "Qb7" + "x" * 37 + "=="),
+        ("chopped base64url token", "Ab3dEf6Hi9Kl2Mn5" + "Pg8Rt0Vx4-Zc1Yb7" +
+                                    "Wk5Jh2Gd9Fs6Bn3M" + "q8Lj"),
         ("hex token", "d" * 40),
         ("cgnat four-octet", "100" + "." + "67" + "." + "68" + "." + "71"),
         ("cgnat three-octet", "100" + "." + "64" + ".0"),
         ("magic-dns name", "my-box" + ".ts" + ".net"),
         ("user-home path", "C:" + chr(92) + "Users" + chr(92) + "Someone"),
+        # M3-A/P1-N1: every UTF-16 shape must be READ and scanned, not
+        # decoded away -- notepad saves LE+BOM, old PowerShell Out-File too.
+        ("utf16 le + BOM key", ("key=" + key).encode("utf-16")),
+        ("utf16 be + BOM key", b"\xfe\xff" + ("key=" + key).encode("utf-16-be")),
+        ("utf16 le no-BOM key", ("key=" + key).encode("utf-16-le")),
     ]
     must_miss = [
         ("project FAKE sentinel", "sk-" + "FAKE" + "-REPLACE-ME-1234"),
         ("project fake shape", "sk-" + "fake-r4sweep"),
         ("prose risk/task", "risk-analyze the task-based routing"),
+        ("kebab prose with digits", "co2-monitoring-pipeline-2026-report"),
         ("doc example ip", "203.0.113.71"),
         ("version numbers", "v1.2.100 and 1.2.100.1"),
         ("reserved example host", "peer-box" + ".tsnet" + ".invalid:8081"),
@@ -224,13 +254,15 @@ def _canaries():
 def run_selftest():
     print("== selftest: canaries prove the patterns still have teeth ==")
     must_hit, must_miss = _canaries()
-    for label, s in must_hit:
-        if scan_content(label, s.encode("utf-8")):
+    for label, payload in must_hit:
+        blob = payload.encode("utf-8") if isinstance(payload, str) else payload
+        if scan_content(label, blob):
             ok("teeth: %s shape is caught" % label)
         else:
             fail("selftest: patterns are BLIND to the %s shape" % label)
-    for label, s in must_miss:
-        hits = scan_content(label, s.encode("utf-8"))
+    for label, payload in must_miss:
+        blob = payload.encode("utf-8") if isinstance(payload, str) else payload
+        hits = scan_content(label, blob)
         if hits:
             fail("selftest: false positive on %s: %s" % (label, hits))
         else:
@@ -257,7 +289,14 @@ def main(argv):
                 paths.append(p)
             else:
                 fail("gate: no such path: %s" % p)
+        if raw and not paths:
+            fail("gate: the given paths contain no files at all -- a green "
+                 "gate must have scanned something (M3-A/P3-N2)")
         for p in paths:
+            if os.path.getsize(p) > 16 * 1024 * 1024:   # M3-A/P3-N3: the
+                fail("gate: refusing %s -- over 16MB; the mirror is plain "
+                     "text, a file this size has no business entering it" % p)
+                continue                                 # mirror is text; refuse, don't slurp
             with open(p, "rb") as fh:
                 hits = scan_content(p, fh.read())
             for h in hits:

@@ -693,6 +693,17 @@ class TestLaunchShell(unittest.TestCase):
         self.assertFalse(launch.pid_alive(-1))
         self.assertFalse(launch.pid_alive(0x7FFFFF00))
 
+    def test_char_device_stdin_is_not_a_terminal(self):   # M3-B/P2-1
+        # NUL 字元裝置過得了 isatty、過不了 console 偵測。假 stdin 宣稱 True 時,
+        # _stdin_tty 必須回到偵測的原始事實:_redirected 測試下兩者同 False(== NUL
+        # 世界,即修複生效),真終端下兩者同 True -- 斷言對兩種環境都成立。
+        saved = sys.stdin
+        try:
+            sys.stdin = type("NulStdin", (), {"isatty": lambda s: True})()
+            self.assertEqual(launch._stdin_tty(), launch._console_input_attached())
+        finally:
+            sys.stdin = saved
+
     def test_router_dir_env_override(self):
         old = os.environ.get("STRATA_ROUTER_DIR")
         os.environ["STRATA_ROUTER_DIR"] = _TMP
@@ -1200,6 +1211,9 @@ class TestRound3Locks(unittest.TestCase):               # 第三輪 R3 紅隊(op
 
 if __name__ == "__main__":
     try:
-        unittest.main(verbosity=2, exit=False)
+        _res = unittest.main(verbosity=2, exit=False).result
     finally:
         tearDownModule()
+    # M3-A/P1-N2:紅套必須紅著退出 -- run_all_tests 的 rc 閘是朋友唯一的警報,
+    # exit=False 原樣回 shell 等於把紅測認證成綠(passed-count 過 floor 更救不了)。
+    sys.exit(0 if _res.wasSuccessful() else 1)

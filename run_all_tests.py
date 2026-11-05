@@ -40,7 +40,8 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 95       # rmon v0.1.4 era: 93 + two merged-layout router_dir tests
+MIN_RMON = 96       # rmon v0.1.4 era: 93 + two merged-layout router_dir tests
+                    # + one NUL-char-device stdin test (M3-B/P2-1)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.

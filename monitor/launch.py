@@ -88,11 +88,25 @@ def _cfg_or_default():
                 "interval": rmon.INTERVAL_DEF}
 
 
-def _stdin_tty():
+def _console_input_attached():
+    """stdin 是真的 console 輸入柄才算數。NUL 字元裝置能過 isatty()(CPython
+    只認 GetFileType==CHAR),但它沒有 console mode、msvcrt 讀不到 q -- 常駐面板
+    會永不結束(M3-B/P2-1:`go < /dev/null`/`<nul`/部分排程壳踩中)。"""
     try:
-        return bool(sys.stdin) and sys.stdin.isatty()
+        mode = ctypes.c_ulong()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(
+            ctypes.windll.kernel32.GetStdHandle(-10), ctypes.byref(mode)))
     except Exception:
         return False
+
+
+def _stdin_tty():
+    try:
+        if not (sys.stdin and sys.stdin.isatty()):
+            return False
+    except Exception:
+        return False
+    return _console_input_attached()
 
 # ---------------------------------------------------------------- 進程事實
 # 本檔 ctypes 只做三件事:GetProcessTimes(建立時間)、QueryFullProcessImageNameW
@@ -467,7 +481,9 @@ def run_console():
     (本機目標且找得到 router.py 才自動起;遠端只掛面板),然後同窗直接進 live。
     面板 q 回選單;router 的生命週期仍只歸 [S]/[K] 管,殼/窗死了服務不死。
     非互動 stdin(管線/排程/CI)不掛常駐面板 -- 面板的 q 只出得自真終端,
-    管線下會永不結束(R3-P2-2,違反本殼「管線一律視為不」教義);降單拍後走選單。"""
+    管線下會永不結束(R3-P2-2,違反本殼「管線一律視為不」教義);降單拍後走選單。
+    「真終端」以 console 輸入柄為準:NUL 字元裝置過得了 isatty,過不了這道雙卡
+    (M3-B/P2-1)。"""
     cfg = _cfg_or_default()
     try:
         alive, ver, kind = healthz()
