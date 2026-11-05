@@ -22,7 +22,7 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 203, rmon tests >= 112 (rmon v0.2.0 era).
+Current floors: router smoke >= 203, rmon tests >= 121 (rmon v0.2.0 era).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -41,9 +41,11 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 117      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+MIN_RMON = 121      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
+                    # + round-2 L2 locks 4 (EL-per-row, LF structure, no-2J-in-frame,
+                    # exit-ritual CRLF)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.
@@ -104,25 +106,34 @@ def check_root_entry():
     if b"\r\n" not in raw:
         problems.append("no CRLF line endings at all")
     text = raw.decode("ascii", "replace")
-    # Delegation must be an EXECUTABLE line, not a remark that merely mentions
-    # the words (round-1/A-P3-1: a rem-comment-only bat satisfied the substring check).
-    delegated = False
+    # Delegation must be a line cmd really EXECUTES (round-1/A-P3-1 + round-2/A2-P3-2:
+    # @-prefixed remarks, echo-printed fakes, monitor-word-only-in-rem, and a bare
+    # "launch.py go" without an interpreter ALL satisfied the earlier checks). Rules:
+    # a leading '@' (echo-mute) is stripped before anything is decided; '::'/'rem '
+    # never count; 'echo' prints, it never delegates; the delegate line must invoke a
+    # real interpreter (python/py) on launch.py go; the monitor/ anchor must sit on an
+    # executable line too (cd/pushd), decoration does not anchor the double-click.
+    interp = re.compile(r"(?:^|[\s(<])(?:python(?:\.exe)?|py)(?:[\s)>]|$)")
+    executable = []
     for line in text.splitlines():
         s = line.strip()
-        if not s or s.startswith("::") or s.lower().startswith("rem "):
+        if s.startswith("@"):
+            s = s[1:].strip()          # '@' only mutes echo; the rest really runs
+        low = s.lower()
+        if not s or low.startswith("::") or low.startswith("rem ") or low.startswith("echo"):
             continue
-        if "launch.py go" in s:
-            delegated = True
-            break
-    if not delegated:
-        problems.append("no executable delegation line to launch.py go (a rem comment does not count)")
-    if "monitor" not in text:
-        problems.append("does not anchor into the monitor/ folder")
+        executable.append(low)
+    if not any("launch.py go" in s and interp.search(s) for s in executable):
+        problems.append("no executable line invokes an interpreter on launch.py go"
+                        " (rem/echo/@rem fakes do not count)")
+    if not any("monitor" in s for s in executable):
+        problems.append("no executable line anchors into the monitor/ folder")
     if problems:
         FAILS.append("root entry: " + "; ".join(problems))
         print("  FAIL  root entry -- " + "; ".join(problems))
         return
-    print("  PASS  root entry -- exists, pure ASCII, CRLF, delegates monitor launch.py go")
+    print("  PASS  root entry -- exists, pure ASCII, CRLF, an executable line runs"
+          " an interpreter on monitor launch.py go")
 
 
 def main():

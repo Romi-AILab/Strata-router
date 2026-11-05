@@ -1449,6 +1449,46 @@ class TestLiveFrameFlow(unittest.TestCase):
         self.assertEqual(out.count("\x1b[H\x1b[2J"), 2)      # 兩拍各一次,順序逐字元同 v0.1.4
         self.assertTrue(out.endswith("\x1b[0m\x1b[?25h\n"))  # 出場儀式也是 v0.1.4 原句
 
+    # ---- round-2 L2 鎖測(B2):碼對而鎖無牙的四面,B2 變異掃描目擊後補牙 ----
+
+    def test_frame_per_row_erase_line(self):
+        # B2-P3-1:逐行 EL 要「每行恰一條、行行結尾」——舊套件只釘 `\r\n EL` 雙元組,
+        # 而那形態上只由空行與殘行擦除構成(行間是 EL,CRLF,行本體,EL),首行/任意
+        # 行本體的 EL 被刪仍全綠 —— 雙元組計數當行數計數器是我自己的洞,一併記帳。
+        rc, out, err = self._go((True, True), size=(120, 40))
+        self.assertTrue(out.startswith("\x1b[?25l\x1b[H"))   # 進場:藏游標、絕對歸位
+        el = "\x1b[K"
+        body = out.split("\x1b[H", 1)[1].split("\x1b[0m", 1)[0]   # 繪框塊(出場儀式前)
+        self.assertTrue(body.endswith("\x1b[J"))             # 首拍清框下,掛塊尾
+        rows = body[:-len("\x1b[J")].split("\r\n")
+        self.assertGreater(len(rows), 3)                     # 反空洞:確為多行框
+        self.assertEqual([r.endswith(el) for r in rows], [True] * len(rows))
+        self.assertEqual(body.count(el), len(rows))          # 每行恰一條(不多不少)
+
+    def test_frame_line_feed_structure(self):
+        # B2-P3-2:行間 LF 結構釘死成「LF 數 == EL 行數」——舊斷言
+        # `count("\n")==count("\r\n")` 在 0==0 空洞綠(把 CRLF 全刪也綠)。
+        rc, out, err = self._go((True, True), size=(120, 40))
+        block = out.split("\x1b[H", 1)[1]
+        lf, crlf = block.count("\n"), block.count("\r\n")
+        self.assertGreater(crlf, 5)                          # 反空洞:LF 必須存在
+        self.assertEqual(lf, crlf)                           # 每個 LF 都是 CRLF 的一部分
+        self.assertEqual(crlf, out.count("\x1b[K"))          # LF 數 = 行數(行間 N-1 + 儀式 1)
+
+    def test_frame_color_never_full_clears(self):
+        # B2-P3-3:固定框+有色任何一拍都不得發 2J —— 2J 是 v0.1.4 追加式的清屏儀式,
+        # 闖進框節奏=逐拍整屏閃爍+清掉使用者捲動區。舊套件對 2J 零負向斷言。
+        rc, out, err = self._go((True, True), size=(120, 40), color=True)
+        self.assertIn("\x1b[H", out)                         # 真的進框(非降級路徑)
+        self.assertNotIn("\x1b[2J", out)
+
+    def test_frame_exit_ritual_exact(self):
+        # B2-P3-4:框路徑出場儀式逐字元 `\x1b[0m\r\n\x1b[?25h` —— reset、落一行
+        # (讓殼提示符不吃掉最後框行)、還游標;結尾不得多 \n(框契約:不越框動螢幕)。
+        # 舊套件框路徑只有 assertIn(25h),刪 \r\n 或補 \n 都綠。
+        rc, out, err = self._go((True, True), size=(120, 40))
+        self.assertTrue(out.endswith("\x1b[0m\r\n\x1b[?25h"))
+
 
 class TestConsoleNiceLock(unittest.TestCase):
     """VT 讀回仲裁器的直接鎖(round-1/B-P3-2):正值只有真 console 測得準(環境變數),
