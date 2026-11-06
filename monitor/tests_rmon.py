@@ -44,6 +44,23 @@ TERMS = rmon.TERMS
 BOX_URL_PRIV = "http://203.0.113.71:18443/v1"       # 文件保留假址,測去識別化用
 
 
+def mock_mod():
+    """假 subprocess:Popen 成功且 pid 恆 424242,零真 spawn。"""
+    class _P:
+        def __init__(self, cmd, **kw):
+            self.pid = 424242
+    return type("M", (), {"Popen": _P, "DEVNULL": -3,
+                          "call": staticmethod(lambda *a, **k: 0)})
+
+
+def mock_time_mod():
+    """假 time 模組:牆鐘一經核心觸碰即刻紅(F-P2-7 注入時鐘的牙),sleep 零耗時。"""
+    def _boom():
+        raise AssertionError("do_start_core 不得用牆鐘 time.time()")
+    return type("T", (), {"time": staticmethod(_boom),
+                          "sleep": staticmethod(lambda s: None)})
+
+
 def tearDownModule():
     shutil.rmtree(_TMP, ignore_errors=True)
 
@@ -772,9 +789,10 @@ class TestLaunchShell(unittest.TestCase):
         self.assertIn(kind, ("refused", "timeout", "dns", "reset", "http"))
 
     def test_pid_identity_three_factors(self):           # R1-A/F2 + R1-B/F7
-        launch.write_pid(os.getpid())
+        launch.write_pid(os.getpid(), target="127.0.0.1:8088")
         rec = launch.read_pid()
         self.assertIsInstance(rec, dict)
+        self.assertEqual(rec.get("target"), "127.0.0.1:8088")   # 刀0:血統必須帶目標
         self.assertTrue(launch.pid_matches(rec))          # 自己:活+時間對+python 映像
         self.assertFalse(launch.pid_matches({"pid": os.getpid(), "created": 1}))
         self.assertFalse(launch.pid_matches({"pid": os.getpid()}))   # 舊格式=不給殺
@@ -819,6 +837,10 @@ class TestLaunchShell(unittest.TestCase):
             "call": staticmethod(lambda *a, **k: 0)})
         launch.healthz = hz
         launch.healthz_local = lambda port, timeout=2.0: True
+        real_owner = launch.port_owner_pid
+        launch.port_owner_pid = lambda port: os.getpid()   # 自家子=本測試程序
+        real_hzat = launch.healthz_at
+        launch.healthz_at = lambda cfg, timeout=2.0: (False, None, "refused")
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -826,6 +848,8 @@ class TestLaunchShell(unittest.TestCase):
             out = buf.getvalue()
         finally:
             launch.subprocess, launch.healthz, launch.healthz_local = real
+            launch.port_owner_pid = real_owner
+            launch.healthz_at = real_hzat
             if old_env is None:
                 os.environ.pop("STRATA_ROUTER_DIR", None)
             else:
@@ -1528,6 +1552,211 @@ class TestNoColorEnv(unittest.TestCase):
         os.environ.pop("NO_COLOR")
         self.assertTrue(rmon._term_ok(False))          # 撤除即還原
         self.assertFalse(rmon._term_ok(True))          # --ascii 永遠赢
+
+
+
+class TestWatchdogKnife0(unittest.TestCase):
+    """刀 0(D8''/D1''/D4''/D5''):do_start_core 參數化 + kernel 埠主蓋檔 +
+    pidfile target 欄 + 原子寫 + do_stop 死分支不毀佐證。假縫,零真 port、零真 spawn。"""
+
+    CFG = {"host": "127.0.0.1", "port": 8088, "mode": "friend", "names": {},
+           "interval": 2.0}
+
+    def setUp(self):
+        self.saved = {}
+        for k in ("subprocess", "healthz", "healthz_local", "healthz_at", "pid_alive",
+                  "port_owner_pid", "time"):
+            self.saved[k] = getattr(launch, k, "<absent>")
+        self.saved_env = {k: os.environ.get(k) for k in
+                          ("STRATA_ROUTER_DIR", "RMON_STATE_DIR")}
+        self.state = tempfile.mkdtemp(prefix="wd-k0-")
+        self.rdir = tempfile.mkdtemp(prefix="wd-k0-router-")
+        io.open(os.path.join(self.rdir, "router.py"), "w", encoding="utf-8").close()
+        os.environ["RMON_STATE_DIR"] = self.state
+        os.environ["STRATA_ROUTER_DIR"] = self.rdir
+        launch.subprocess = mock_mod()
+        launch.time = mock_time_mod()
+        launch.healthz = lambda timeout=2.0: (False, None, "refused")
+        launch.healthz_at = lambda cfg, timeout=2.0: (False, None, "refused")
+        launch.pid_alive = lambda pid: True
+        launch.port_owner_pid = lambda port: None
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v == "<absent>":
+                try:
+                    delattr(launch, k)
+                except AttributeError:
+                    pass
+            else:
+                setattr(launch, k, v)
+        for k, v in self.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.state, ignore_errors=True)
+        shutil.rmtree(self.rdir, ignore_errors=True)
+
+    def run_core(self, alive_seq=None, owner=None, cfg=None, assume_yes=False,
+                 input_answer="n"):
+        """alive_seq[i]=第 i 拍 healthz_local(單一額=恆回)。時鐘步進 0.5/拍。"""
+        seq = list(alive_seq if alive_seq is not None else [False, True])
+        calls = []
+
+        def hz_local(port, timeout=2.0):
+            calls.append(port)
+            return seq[0] if len(seq) == 1 else seq.pop(0)
+        launch.healthz_local = hz_local
+        launch.port_owner_pid = lambda port: owner
+        t = [0.0]
+
+        def now():
+            v = t[0]
+            t[0] += 0.5
+            return v
+        real_input = builtins.input
+        builtins.input = lambda *a: input_answer
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = launch.do_start_core(cfg=cfg or dict(self.CFG), now=now,
+                                          assume_yes=assume_yes)
+        finally:
+            builtins.input = real_input
+        return rc, out.getvalue(), calls
+
+    def seed_rec(self, rec):
+        os.makedirs(self.state, exist_ok=True)
+        with io.open(os.path.join(self.state, "router.pid.json"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(rec if isinstance(rec, str) else json.dumps(rec))
+
+    def read_rec(self):
+        with io.open(os.path.join(self.state, "router.pid.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # --- 三因子 + target 血統(D1''(c):pid_matches 是值守唯一 kernel 佐證) ---
+    def test_pid_record_three_factor_and_target(self):
+        launch.write_pid(os.getpid(), target="127.0.0.1:8088")
+        rec = launch.read_pid()
+        self.assertEqual(rec["target"], "127.0.0.1:8088")
+        self.assertTrue(launch.pid_matches(rec))               # 活 router 三因子恆真
+        self.assertFalse(launch.pid_matches({"pid": os.getpid(), "created": 1}))
+
+    # --- 變體①:上線前子進程已死(含贏家側 timeout) -> 不釘檔,rc2 誠實崩潰路 ---
+    def test_dead_child_before_online_does_not_pin(self):
+        launch.pid_alive = lambda pid: False
+        rc, out, _ = self.run_core(alive_seq=[False])
+        self.assertEqual(rc, 2)
+        self.assertIsNone(launch.read_pid())
+        self.assertIn("退出", out)
+
+    # --- 變體②(C-P1-1 反例):healthz 真、子「當下」仍活、埠主是別人 -> 收編不釘檔 ---
+    def test_winner_owns_port_no_pin_adopt_wording(self):
+        rc, out, _ = self.run_core(alive_seq=[True], owner=999111)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(launch.read_pid())                   # 贏家的檔輪不到我們蓋
+        self.assertIn("收編", out)
+
+    # --- 變體③:正常單起,埠主=自家子 -> 蓋檔且必帶 target ---
+    def test_own_child_owner_pins_with_target(self):
+        rc, out, _ = self.run_core(alive_seq=[True], owner=424242)
+        self.assertEqual(rc, 0)
+        rec = self.read_rec()
+        self.assertEqual(rec["pid"], 424242)
+        self.assertEqual(rec["target"], "127.0.0.1:8088")
+
+    # --- E-P3-1 第三文案:上線後自家子崩 -> 不謊稱「贏家收編」 ---
+    def test_child_crash_after_online_third_wording(self):
+        launch.pid_alive = lambda pid: False
+        rc, out, _ = self.run_core(alive_seq=[True], owner=None)
+        self.assertEqual(rc, 2)
+        self.assertIsNone(launch.read_pid())
+        self.assertNotIn("收編", out)                          # 不是別人佔埠
+        self.assertIn("退出", out)
+
+    # --- E-P2-1:cfg 呼叫方注入;核心碰 _cfg_or_default 即紅 ---
+    def test_core_uses_injected_cfg_not_reread(self):
+        def boom():
+            raise AssertionError("do_start_core 不得重讀 monitor.json")
+        real_cfg = launch._cfg_or_default
+        launch._cfg_or_default = boom
+        try:
+            rc, out, calls = self.run_core(
+                alive_seq=[True], owner=424242,
+                cfg={"host": "127.0.0.1", "port": 8123, "mode": "friend",
+                     "names": {}, "interval": 2.0})
+        finally:
+            launch._cfg_or_default = real_cfg
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[-1], 8123)
+
+    # --- F-P2-7:等待圈只認注入時鐘(mock time.time 一碰即紅);有界退出 ---
+    def test_core_uses_injected_clock_bounded(self):
+        rc, out, calls = self.run_core(alive_seq=[False])
+        self.assertEqual(rc, 2)
+        self.assertTrue(0 < len(calls) < 500)                  # 20s/0.5 = ~40 拍
+        self.assertIn("沒回應", out)
+
+    # --- 確認閘語意保留:遠端 + 答 n -> 保留原樣、零 Popen ---
+    def test_remote_confirm_gate_answer_no_keeps_semantics(self):
+        captured = []
+        class _P:
+            def __init__(self, cmd, **kw):
+                captured.append(cmd)
+        launch.subprocess = type("M", (), {"Popen": _P, "DEVNULL": -3,
+                                           "call": staticmethod(lambda *a, **k: 0)})
+        rc, out, _ = self.run_core(
+            cfg={"host": "203.0.113.71", "port": 8088, "mode": "friend",
+                 "names": {}, "interval": 2.0}, input_answer="n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured, [])
+        self.assertIn("保留原樣", out)
+
+    # --- F-P2-5:pidfile 原子寫(每拍 read_pid 不得見到撕裂/空檔) ---
+    def test_write_pid_is_atomic(self):
+        real_replace, real_open = os.replace, io.open
+        order = []
+
+        def spy_replace(a, b):
+            order.append("replace")
+            return real_replace(a, b)
+
+        def spy_open(f, *a, **k):
+            mode = a[0] if a else k.get("mode", "r")
+            if str(f).endswith("router.pid.json") and "w" in mode:
+                order.append("direct-write-target")
+            return real_open(f, *a, **k)
+        os.replace = spy_replace
+        io.open = builtins.open = spy_open
+        try:
+            launch.write_pid(os.getpid(), target="127.0.0.1:8088")
+        finally:
+            os.replace, io.open, builtins.open = real_replace, real_open, real_open
+        self.assertIn("replace", order)
+        self.assertNotIn("direct-write-target", order)         # 永不直接開目標檔寫
+
+    # --- D5'':[K] 死分支:完整記錄=佐證,保留;畸形=零價值,可清 ---
+    def test_stop_dead_valid_record_keeps_evidence(self):
+        self.seed_rec({"pid": 424242, "created": 134000000000000000,
+                       "target": "127.0.0.1:8088"})
+        launch.pid_alive = lambda pid: False
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = launch.do_stop(assume_yes=True)
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(launch.read_pid())                # 佐證仍在 -> 准救仍可判
+        self.assertIn("保留", out.getvalue())
+
+    def test_stop_dead_malformed_record_is_cleared(self):
+        self.seed_rec('{"pid": 424242}')                       # 缺 created/target
+        launch.pid_alive = lambda pid: False
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = launch.do_stop(assume_yes=True)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(launch.read_pid())
 
 
 if __name__ == "__main__":

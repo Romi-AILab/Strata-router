@@ -212,11 +212,32 @@ def read_pid():
     return None
 
 
-def write_pid(pid):
+def write_pid(pid, target=None):
+    """血統記錄:pid+created(+target,刀0 契約)。原子寫(F-P2-5:值守每拍
+    read_pid,不得見到空檔/半檔);tmp+os.replace 比照 router 金鑰檔先例。"""
     rec = {"pid": pid, "created": get_created(pid)}
+    if target:
+        rec["target"] = target
     os.makedirs(rmon.state_dir(), exist_ok=True)
-    with open(pidfile(), "w", encoding="utf-8") as fh:
-        json.dump(rec, fh)
+    tmp = pidfile() + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        os.replace(tmp, pidfile())
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def rec_shape_ok(rec):
+    """記錄是否具血統佐證價值(D4''/D5''):pid+created+target 三者俱備;
+    畸形 -> 值守視同無記錄(收編態),[K] 死分支可清(零佐證價值)。"""
+    return (isinstance(rec, dict) and isinstance(rec.get("pid"), int)
+            and isinstance(rec.get("created"), int)
+            and isinstance(rec.get("target"), str))
 
 
 def clear_pid():
@@ -227,10 +248,10 @@ def clear_pid():
 
 # ---------------------------------------------------------------- 探活
 
-def healthz(timeout=2.0):
+def healthz_at(cfg, timeout=2.0):
     """回 (alive, version|None, kind|None)。503=活著但全盒 DOWN,仍算活。
-    任何底層炸點都吃下(F1:router 沒跑時本殼必須还能說話,不能 traceback)。"""
-    cfg = _cfg_or_default()
+    任何底層炸點都吃下(F1:router 沒跑時本殼必須还能說話,不能 traceback)。
+    cfg 由呼叫方注入 -- do_start_core 不得重讀 monitor.json(E-P2-1)。"""
     try:
         st, body = rmon.http_get_safe(cfg["host"], cfg["port"], "/healthz", timeout)
     except rmon.Dead as d:
@@ -242,6 +263,10 @@ def healthz(timeout=2.0):
     return True, ver or "?", ("http503" if st == 503 else "http200")
 
 
+def healthz(timeout=2.0):
+    return healthz_at(_cfg_or_default(), timeout)
+
+
 def healthz_local(port, timeout=2.0):
     """[S] 的上線確認只看本機(loopback 上的這個 port),不去摸 monitor.json
     可能指向的遠端 -- 遠端摸不到不代表本機沒起來(R1-A/F10)。"""
@@ -250,6 +275,36 @@ def healthz_local(port, timeout=2.0):
         return st in (200, 503)
     except rmon.Dead:
         return False
+
+
+def port_owner_pid(port, _af_inet=2, _tbl_owner_all=3, _listen=2):
+    """port 的 TCP LISTEN 持有者 pid -- kernel 事實,蓋檔唯一 oracle(D8'')。
+    GetExtendedTcpTable 唯讀列舉:零 connect、零 bind;查無/任何異常 -> None。
+    (時間窗启发式已被 round-2 面 F PoC 推翻:輸家 import 慢一點照樣 clobber,
+    唯有埠主身分是零競態的;探針實證 owner==self 於自 bind 的 93xx 回真值。)"""
+    try:
+        class _Row(ctypes.Structure):
+            _fields_ = [("state", ctypes.c_uint32), ("laddr", ctypes.c_uint32),
+                        ("lport", ctypes.c_uint32), ("raddr", ctypes.c_uint32),
+                        ("rport", ctypes.c_uint32), ("owner", ctypes.c_uint32)]
+        size = ctypes.c_uint32(0)
+        iph = ctypes.windll.iphlpapi
+        iph.GetExtendedTcpTable(None, ctypes.byref(size), 0, _af_inet, _tbl_owner_all, 0)
+        if not size.value:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        if iph.GetExtendedTcpTable(buf, ctypes.byref(size), 0, _af_inet, _tbl_owner_all, 0) != 0:
+            return None
+        n = ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint32)).contents.value
+        for i in range(n):
+            row = ctypes.cast(ctypes.addressof(buf) + 4 + i * 24,
+                              ctypes.POINTER(_Row)).contents
+            lport = ((row.lport >> 8) & 0xFF) | ((row.lport & 0xFF) << 8)
+            if row.state == _listen and lport == int(port) and row.owner:
+                return int(row.owner)
+        return None
+    except Exception:
+        return None
 
 
 def status_lines():
@@ -298,19 +353,25 @@ def _ask(prompt):
         return "n"
 
 
-def do_start(assume_yes=False):
+def do_start_core(cfg, now, assume_yes=False, emit=print):
+    """[S]/值守共用的啟動核心(D8''/E-P2-1/F-P2-7):
+    cfg = 呼叫方注入快照 -- 核心零重讀 monitor.json(值守凍幀期間藏不起 input());
+    now = 注入時鐘(值守給 time.monotonic,時鐘跳變不製造無界凍窗/假失敗);
+    emit = 展示參數化(選單 print;值守 stderr+log,零 stdout 教義)。
+    蓋檔=kernel 埠主 oracle(D8''):只有 port 的 LISTEN 持有者確認是自家子
+    (或表暫查不到但子仍活)才釘 pidfile -- 雙窗競態(E6)任何時序變量都別想
+    再把死 pid/別人贏家釘進血統檔。值守路徑永不 assume_yes(D8''白文)。"""
     if not os.path.exists(router_py()):
-        print("找不到 %s -- %s" % (router_py(), _NO_ROUTER_HINT))
+        emit("找不到 %s -- %s" % (router_py(), _NO_ROUTER_HINT))
         return 2
-    cfg = _cfg_or_default()
-    alive, ver, kind = healthz()
+    alive, ver, kind = healthz_at(cfg)
     if alive:
-        print("/healthz 已在應(v%s,目標 %s:%s),不重複啟動。" % (ver, cfg["host"], cfg["port"]))
+        emit("/healthz 已在應(v%s,目標 %s:%s),不重複啟動。" % (ver, cfg["host"], cfg["port"]))
         return 0
     if not rmon._is_loopback_host(cfg["host"]) and not assume_yes:
-        print("注意:監控目標指向 %s:%s(遠端),但 [S] 會在「本機」起一個 router。" % (cfg["host"], cfg["port"]))
+        emit("注意:監控目標指向 %s:%s(遠端),但 [S] 會在「本機」起一個 router。" % (cfg["host"], cfg["port"]))
         if _ask("要在本機起 router 嗎? y/N: ") != "y":
-            print("保留原樣,沒起。")
+            emit("保留原樣,沒起。")
             return 0
     os.makedirs(rmon.state_dir(), exist_ok=True)
     log = open(logfile(), "ab")
@@ -326,27 +387,44 @@ def do_start(assume_yes=False):
                              stdout=log, stderr=log, stdin=subprocess.DEVNULL,
                              creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
     except OSError as exc:
-        print("起動失敗:%s" % exc)
+        emit("起動失敗:%s" % exc)
         return 2
     finally:
         log.close()
-    write_pid(p.pid)
-    print("已啟動 router(pid %d),等本機 /healthz..." % p.pid)
-    t0 = time.time()
+    target = "%s:%s" % (cfg["host"], cfg["port"])
+    emit("已啟動 router(pid %d),等本機 /healthz..." % p.pid)
+    t0 = now()
     deadline = t0 + 20.0
-    while time.time() < deadline:
+    while now() < deadline:
         time.sleep(0.5)
         if healthz_local(cfg["port"]):
-            print("上線了:v%s(本機 port %d;輸出導向 %s)" % (healthz()[1], cfg["port"], logfile()))
+            if not pid_alive(p.pid):
+                # E-P3-1 第三文案:不是「贏家收編」,是自家子上線後自己崩了
+                emit("自家子上線後退出了(port 已無人應):視同崩潰,未記 pid -- 看 %s。" % logfile())
+                return 2
+            owner = port_owner_pid(cfg["port"])
+            if owner is not None and owner != p.pid:
+                emit("port %d 由 pid %s 持有(非本殼子進程):收編 -- 本殼不殺它、"
+                     "也不會對它自動重啟;要本殼管它請先停掉真正持有者再 [S]。" % (cfg["port"], owner))
+                return 0
+            write_pid(p.pid, target=target)
+            emit("上線了:v%s(本機 port %d;輸出導向 %s)"
+                 % (healthz_at(cfg)[1] or "?", cfg["port"], logfile()))
             return 0
         if not pid_alive(p.pid):
             break
-    spent = int(time.time() - t0)
+    spent = int(now() - t0)
     if not pid_alive(p.pid):
-        print("進程已退出(%.0fs)-- 看 %s 前幾行(常見:port 被佔、router.json 格式)。" % (spent, logfile()))
+        emit("進程已退出(%.0fs)-- 看 %s 前幾行(常見:port 被佔、router.json 格式)。" % (spent, logfile()))
         return 2
-    print("進程還在但本機 /healthz %.0fs 沒回應 -- 看 %s;可用 [K] 停掉重試。" % (spent, logfile()))
+    write_pid(p.pid, target=target)   # 子仍在=身分事實,[K] 必須reachable(此檔三因子恆真)
+    emit("進程還在但本機 /healthz %.0fs 沒回應 -- 看 %s;可用 [K] 停掉重試。" % (spent, logfile()))
     return 2
+
+
+def do_start(assume_yes=False):
+    # 選單路徑維持 time.time 語意不動(F-P2-7 界線);值守直調 do_start_core+monotonic。
+    return do_start_core(_cfg_or_default(), time.time, assume_yes=assume_yes)
 
 
 def _taskkill(pid, force=False):
@@ -368,8 +446,14 @@ def do_stop(assume_yes=False):
             print("pid %d 活著但身分不符(建立時間/映像檔對不上)-- PID 可能被回收重用,"
                   "本殼拒殺(不誤傷無辜)。確認後可自行刪除 %s 再操作。" % (rec["pid"], pidfile()))
             return 2
+        if rec_shape_ok(rec):
+            # D5'':死而完整的記錄=值守血統佐證([S] 覆寫重釘;停機意圖由 halt 檔
+            # 載體),刪除會讓「准救目標」無聲降成收編態 -- 保留。
+            print("pid 記錄屬本殼過去 router(進程已退出):保留作值守佐證,"
+                  "[S] 重啟會覆寫它;確定要清除請手動刪 %s。" % pidfile())
+            return 0
         clear_pid()
-        print("pid 檔過期,已清掉;本來就沒在跑(本殼範圍內)。")
+        print("pid 檔為舊/畸形格式(無佐證價值),已清掉;本來就沒在跑(本殼範圍內)。")
         return 0
     # 殼起的 router 是 DETACHED:無控制台可收關閉事件,taskkill 不帶 /F 必敗
     # (R1-A/F3 實測)。不演「優雅停」的假象,直接說清楚再問。
