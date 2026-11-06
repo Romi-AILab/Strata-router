@@ -1759,6 +1759,214 @@ class TestWatchdogKnife0(unittest.TestCase):
         self.assertIsNone(launch.read_pid())
 
 
+class TestWatchdogKnife1(unittest.TestCase):
+    """刀1:Watch 純狀態機(D''1 兩段式觸發 / D''7 觸發後收尾 / 條款8 footer 優先序)。
+    全部副作用走縫:read_rec/matches/halt_present/other_lock_pid/spawn/on_disable/now
+    -- 零檔案、零 port、零真進程(宿主/鎖/日誌是刀2 的接線面)。"""
+
+    def setUp(self):
+        self.t = [0.0]
+        self.rec = {"pid": 424242, "created": 1345678, "target": "127.0.0.1:9401"}
+        self.rec_alive = False        # pid_matches 縫:記錄進程已死 = 准救佐證
+        self.halted = False
+        self.spawn_result = ("spawned_ok", 0)
+        self.spawn_calls = []
+        self.disabled = []
+
+    def now(self):
+        return self.t[0]
+
+    def mk(self, host="127.0.0.1", interval=2.0):
+        w = launch.Watch({"host": host, "port": 9401}, interval, now=self.now)
+        w.read_rec = lambda: self.rec
+        w.matches = lambda rec: self.rec_alive
+        w.halt_present = lambda: self.halted
+        w.other_lock_pid = lambda: 555111
+
+        def _spawn():
+            self.spawn_calls.append(1)
+            return self.spawn_result
+        w.spawn = _spawn
+        w.on_disable = lambda: self.disabled.append(1)
+        return w
+
+    def advance(self, sec):
+        self.t[0] += sec
+
+    def tick(self, w, kind):
+        self.advance(2.0)
+        return w.on_tick(kind)
+
+    def drive_to_pending(self, w):
+        for _ in range(8):
+            note = self.tick(w, "refused")
+            if "重啟中" in note:
+                return note
+        self.fail("8 拍內未能武裝觸發")
+
+    def fire(self, w):
+        return self.tick(w, "refused")     # N+1 拍入口:真 spawn 在此執行
+
+    def test_trigger_is_two_stage_and_needs_three_votes_over_six_seconds(self):
+        w = self.mk()
+        self.assertNotIn("重啟中", self.tick(w, "refused"))     # 1 票
+        self.assertNotIn("重啟中", self.tick(w, "refused"))     # 2 票
+        self.assertNotIn("重啟中", self.tick(w, "timeout"))     # 3 票但首拍跨度僅 4s
+        note = self.tick(w, "refused")                          # 跨度 6s 達標
+        self.assertIn("重啟中", note)
+        self.assertEqual(self.spawn_calls, [])                  # 武裝拍只畫不動(D''1)
+        self.tick(w, None)                                      # N+1 入口才真 spawn
+        self.assertEqual(len(self.spawn_calls), 1)
+
+    def test_dns_reset_no_vote_and_union_alternation_survives(self):
+        w = self.mk()                                           # D1'(b) 聯集代數
+        self.tick(w, "refused")
+        self.tick(w, "timeout")                                 # 交替不清零
+        self.assertNotIn("重啟中", self.tick(w, "dns"))          # dns=不投票也不清零
+        self.assertNotIn("重啟中", self.tick(w, "reset"))         # 同上:票數仍 2
+        self.assertIn("重啟中", self.tick(w, "refused"))          # 第 3 票,跨度 2->10=8s >=6s
+
+    def test_http_and_alive_hard_reset(self):
+        w = self.mk()
+        self.tick(w, "refused")
+        self.tick(w, "refused")
+        self.tick(w, "http")                                    # squat 訊號=硬重置
+        for _ in range(3):                                      # 重計:3 票但要跨度夠
+            self.assertNotIn("重啟中", self.tick(w, "refused"))  # t8,10,12:2,3票/跨度4
+        self.assertIn("重啟中", self.tick(w, "refused"))          # t14:4票/跨度6
+
+    def test_each_condition_alone_blocks_trigger(self):
+        good = dict(self.rec)
+        cases = [
+            ("remote", dict(host="10.0.0.1"), None, None, None),
+            ("無記錄", None, None, None, "只提醒"),
+            ("畸形記錄", {"pid": 1}, None, None, "只提醒"),
+            ("target不符", {"pid": 5, "created": 6, "target": "127.0.0.1:9999"},
+             None, None, "只提醒"),
+            ("記錄進程還活(卡死)", good, True, None, None),
+            ("手動停機halt", good, None, True, "手動停機"),
+            ("未持鎖待機", good, None, None, "待機"),
+        ]
+        for name, rec, alive, halt, word in cases:
+            self.setUp()                                        # 重置縫狀態
+            self.rec = rec
+            if alive is not None:
+                self.rec_alive = alive
+            if halt is not None:
+                self.halted = halt
+            w = self.mk(host="10.0.0.1" if name == "remote" else "127.0.0.1")
+            if name == "未持鎖待機":
+                w.holds_lock = False
+            note = None
+            for _ in range(6):
+                note = self.tick(w, "refused")
+            self.assertEqual(self.spawn_calls, [], name)
+            if word:
+                self.assertIn(word, note, name)
+
+    def test_q_during_wait_cancels_trigger(self):
+        w = self.mk()
+        self.assertIn("重啟中", self.drive_to_pending(w))
+        w.cancel_pending()                                      # 等待拍間按 q=明確離上面板優先
+        self.assertNotIn("重啟中", self.tick(w, "refused"))
+        self.assertEqual(self.spawn_calls, [])
+
+    def test_recheck_suppression_before_spawn(self):
+        w = self.mk()
+        self.assertIn("重啟中", self.drive_to_pending(w))
+        self.halted = True                                      # 武裝後、spawn 前抑制態改變
+        note = self.fire(w)
+        self.assertEqual(self.spawn_calls, [])                  # D''7:spawn 前復檢(d)
+        self.assertIn("手動停機", note)
+
+    def test_cooldown_table_and_fuse_at_four(self):
+        self.spawn_result = ("failed", 2)
+        w = self.mk()
+        self.assertIn("重啟中1", self.drive_to_pending(w))
+        self.fire(w)
+        self.assertEqual(w.attempts, 1)                         # 額度於真 spawn 計(D''7)
+        self.assertIn("重啟中2", self.drive_to_pending(w))       # 第1次冷卻 0s
+        self.assertIn("冷卻", self.fire(w))                      # 第2次冷卻 10s
+        self.assertIn("冷卻", self.tick(w, "refused"))           # 冷卻閘壓住不武裝
+        self.advance(10.0)
+        self.assertIn("重啟中3", self.drive_to_pending(w))       # 第3次冷卻 30s
+        self.fire(w)
+        self.advance(30.0)
+        self.assertIn("重啟中4", self.drive_to_pending(w))
+        note = self.fire(w)
+        self.assertEqual(w.attempts, 4)
+        self.assertIn("熔斷", note)
+        self.assertIn("q→[S]", note)
+        for _ in range(8):                                      # 熔斷=停止觸發但仍在守
+            self.assertNotIn("重啟中", self.tick(w, "refused"))
+        self.assertEqual(len(self.spawn_calls), 4)
+
+    def test_already_alive_shortcut_no_burn(self):
+        w = self.mk()
+        self.assertIn("重啟中", self.drive_to_pending(w))
+        self.spawn_result = ("already", 0)                      # 「已在應」捷徑=恢復非失敗
+        note = self.fire(w)
+        self.assertEqual(w.attempts, 0)                         # 不計不燒(D''7)
+        self.assertNotIn("冷卻", note)
+        self.assertNotIn("熔斷", note)
+
+    def test_stable_ten_minute_reset_freezes_on_sleep_gap(self):
+        self.spawn_result = ("failed", 2)
+        w = self.mk()
+        self.drive_to_pending(w)
+        self.fire(w)                                            # 1 次失敗 -> attempts=1
+        self.assertEqual(w.attempts, 1)
+        self.drive_to_pending(w)
+        self.spawn_result = ("spawned_ok", 0)
+        self.fire(w)                                            # 成功 spawn 仍占一格(D''7)
+        self.assertEqual(w.attempts, 2)                         # -> 起「穩定歸零」累計
+        self.advance(700.0)                                     # 睡眠大跳:凍結不計(F-P3-8)
+        self.tick(w, None)
+        self.assertEqual(w.attempts, 2)                         # 睡 600s 不得無聲重置熔斷
+        for _ in range(301):                                    # 觀察到的 alive 拍距湊 602s
+            self.tick(w, None)
+        self.assertEqual(w.attempts, 0)                         # 穩定 10 分鐘 -> 歸零
+
+    def test_decision_path_exception_disables_once(self):
+        w = self.mk()
+
+        def boom():
+            raise PermissionError(13, "pidfile locked")          # 決策路(c)炸=終止(D''4)
+        w.read_rec = boom
+        self.assertIn("已停用", self.tick(w, "refused"))
+        self.assertEqual(self.disabled, [1])                    # on_disable 恰一次(刀2 靠它釋鎖)
+        self.assertIn("已停用", self.tick(w, "refused"))
+        self.assertIn("已停用", self.tick(w, None))
+        self.assertEqual(len(self.disabled), 1)                 # 不重試復活(D12)
+        self.assertEqual(self.spawn_calls, [])
+
+    def test_footer_priority_order(self):
+        w = self.mk()
+        self.assertEqual(self.tick(w, None), "開")               # 基態(未啟用逐字元教義由刀3 罩)
+        w.log_broken = True
+        self.assertEqual(self.tick(w, None), "事件紀錄:不可用")
+        w.log_broken = False
+        self.rec = None                                         # 無佐證 + 死訊 -> 收編詞
+        self.assertIn("只提醒", self.tick(w, "refused"))
+        self.assertIn("端口空時q→[S]", self.tick(w, "refused"))
+        self.tick(w, None)                                      # 活了 -> 收編詞退場
+        self.assertEqual(self.tick(w, None), "開")
+        w.holds_lock = False                                    # 待機 > 收編
+        self.rec = None
+        note = self.tick(w, "refused")
+        self.assertIn("待機", note)
+        self.assertIn("555111", note)
+        w.holds_lock = True
+        self.rec = {"pid": 424242, "created": 1345678,
+                    "target": "127.0.0.1:9401"}                 # 佐證回暖爐
+        w.attempts = 4                                          # 熔斷 > 冷卻/收編
+        self.assertIn("熔斷", self.tick(w, "refused"))
+        self.halted = True                                      # 手動停機 > 熔斷
+        self.assertIn("手動停機", self.tick(w, "refused"))
+        w.disable()                                             # 已停用 > 一切
+        self.assertIn("已停用", self.tick(w, "refused"))
+
+
 if __name__ == "__main__":
     try:
         _res = unittest.main(verbosity=2, exit=False).result

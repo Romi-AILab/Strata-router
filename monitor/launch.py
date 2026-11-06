@@ -432,6 +432,157 @@ def _taskkill(pid, force=False):
     return subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
 
 
+WATCH_STREAK_MIN = 3        # D1'(b):空端口 >=3 拍
+WATCH_STREAK_SPAN = 6.0     # ...且首拍至今跨度 >=6s(白文語意,鎖測罩)
+WATCH_BUDGET = 4            # D6:4 次重啟額度,熔斷後仍守不再觸發
+WATCH_COOLDOWN = (0.0, 10.0, 30.0, 90.0)   # 第 k 次嘗試後的固定冷卻表(可審計、可鎖測)
+WATCH_STABLE_RESET = 600.0  # 成功後連續觀察滿 10 分鐘穩定才歸零額度
+
+
+class Watch:
+    """值守狀態機(刀1)。純拍輸入(面板快照的 Dead kind 或 None=活),純 note 輸出
+    (footer 片段;rmon 端最終 byte-lock 是刀3 的事,條款8 詞彙表)。
+    D''1 兩段式觸發:第 N 拍武裝只回「重啟中 n」(此幀如實畫出),真 spawn 推遲到
+    下一拍入口執行 -- 阻塞期螢幕凍的正是這幀;cancel_pending()=等待拍間的使用者
+    姿態優先。所有副作用走縫(read_rec/matches/halt_present/other_lock_pid/spawn/
+    on_disable),刀2 接檔與鎖;測試把縫全部 fake 化。
+    D''4 scope 兩分:決策路(佐證/halt/冷卻/spawn)異常 -> 停用+on_disable 釋鎖
+    (恰一次,不重試復活);副作用路(事件紀錄)降級只認 log_broken 旗標(刀2 置)。"""
+
+    def __init__(self, cfg, interval, now=None):
+        self.cfg = cfg
+        self.target = "%s:%s" % (cfg["host"], cfg["port"])
+        self.interval = float(interval)
+        self.now = now or time.monotonic
+        self.loopback = rmon._is_loopback_host(cfg["host"])
+        self.read_rec = read_pid                 # 縫:每拍讀 pidfile 事實(收編口徑 D')
+        self.matches = pid_matches               # 縫:三因子身分(與殺教義同尺)
+        self.halt_present = lambda: False        # 縫:刀2 接 watch-<tag>.halt
+        self.other_lock_pid = lambda: None       # 縫:刀2 接鎖元資料(offset 1024)
+        self.spawn = None                        # 縫 -> ("spawned_ok"|"already"|"failed", rc)
+        self.on_disable = None                   # 縫:刀2 在此釋放鎖(條款3 餓死鏈)
+        self.holds_lock = True
+        self.log_broken = False                  # 刀2 的降級態旗標(條款4)
+        self.attempts = 0
+        self._streak = 0
+        self._first_t = None
+        self._last_t = None
+        self._cooldown_until = 0.0
+        self._pending = False
+        self._stable = None
+        self._disabled = False
+
+    def cancel_pending(self):
+        """等待拍間按 q:明確離上面板優先(D''1),投票一併重來。"""
+        self._pending = False
+        self._streak, self._first_t = 0, None
+
+    def disable(self):
+        """決策路終止態(D12):不重試復活;on_disable 恰一次(刀2 釋鎖)。"""
+        if not self._disabled:
+            self._disabled = True
+            self._pending = False
+            if self.on_disable:
+                try:
+                    self.on_disable()
+                except Exception:
+                    pass
+
+    def _rescue_ok(self):
+        """條件(c)+ D''5 shape 先行:缺檔/畸形/target 不符 -> 無佐證(收編態);
+        佐證俱備但三因子為真(卡死/還活)同屬不准救,但不是收編。"""
+        rec = self.read_rec()
+        if not rec_shape_ok(rec) or rec.get("target") != self.target:
+            return None, False
+        return rec, self.matches(rec)
+
+    def _suppressed(self, t):
+        """(a) 觸發點自判 loopback(雙閘,不靠構造點)+(d) 抑制表。"""
+        if not self.loopback:
+            return True
+        if self.halt_present():
+            return True
+        if self.attempts >= WATCH_BUDGET:
+            return True                          # 熔斷 != 停用:仍值守仍持鎖
+        if not self.holds_lock:
+            return True
+        if t < self._cooldown_until:
+            return True
+        rec, alive_rec = self._rescue_ok()
+        return rec is None or alive_rec
+
+    def _spawn_now(self, t):
+        self._streak, self._first_t = 0, None    # spawn 起重重新攢(D''7 冷卻末自然攢回)
+        outcome, _rc = self.spawn() if self.spawn else ("failed", 2)
+        if outcome == "already":
+            self._stable = WATCH_STABLE_RESET    # 「已在應」=恢復非失敗:不計不燒
+            return
+        self.attempts += 1                       # 真 spawn 起點計額度+起冷卻鐘(D''7)
+        self._cooldown_until = t + WATCH_COOLDOWN[self.attempts - 1]
+        if outcome == "spawned_ok":
+            self._stable = WATCH_STABLE_RESET
+
+    def _vote(self, kind, t):
+        if kind is None or kind in ("http", "decode"):
+            self._streak, self._first_t = 0, None    # 活/http/decode(squat)=硬重置
+            return
+        if kind in ("dns", "reset"):
+            return                                   # 不投票也不清零(D1'(b) 聯集代數)
+        if kind in ("refused", "timeout"):
+            if self._streak == 0:
+                self._first_t = t                    # 6s 帽=首拍至今,非滑窗
+            self._streak += 1                        # refused/timeout 交替不清零
+
+    def _note(self, t):
+        """條款8 優先序:已停用 > 手動停機 > 熔斷 > 重啟中 > 冷卻 > 待機 > 收編 > 降級 > 開。
+        (已停用由 on_tick 首行攔;「非目標(遠端)」死詞已刪 -- 構造閘在刀2,此處不回執。)"""
+        if self.halt_present():
+            return "手動停機"
+        if self.attempts >= WATCH_BUDGET:
+            return "熔斷(q→[S])"
+        if self._pending:
+            return "重啟中%d" % (self.attempts + 1)
+        left = self._cooldown_until - t
+        if left > 0:
+            return "冷卻%ds" % (int(left) + (1 if left > int(left) else 0))
+        if not self.holds_lock:
+            return "待機(他窗值守pid %s)" % (self.other_lock_pid() or "?")
+        rec, _alive = self._rescue_ok()
+        if rec is None and self._streak > 0:
+            return "只提醒(收編;端口空時q→[S]以殼參數重啟)"
+        if self.log_broken:
+            return "事件紀錄:不可用"
+        return "開"
+
+    def on_tick(self, kind):
+        if self._disabled:
+            return "已停用(異常)"
+        try:
+            t = self.now()
+            gap = None if self._last_t is None else t - self._last_t
+            self._last_t = t
+            if self._pending:
+                self._pending = False
+                if not self._suppressed(t):          # spawn 前復檢抑制態(D''7)
+                    self._spawn_now(t)
+            elif gap is not None and gap > 3 * self.interval + 2:
+                self._streak, self._first_t = 0, None    # 睡眠閘:歸零;穩定累計凍結不动
+            elif gap is not None and self._stable is not None and kind is None:
+                self._stable -= gap                       # 只算觀察到的 alive 拍距(F-P3-8)
+                if self._stable <= 0:
+                    self.attempts, self._stable = 0, None
+            self._vote(kind, t)
+            if not self._pending and self._streak >= WATCH_STREAK_MIN \
+                    and self._first_t is not None \
+                    and t - self._first_t >= WATCH_STREAK_SPAN \
+                    and not self._suppressed(t):
+                self._pending = True
+            return self._note(t)
+        except Exception:
+            self.disable()                           # 決策路異常=停用+釋鎖(D''4;副作用路不經此)
+            return "已停用(異常)"
+
+
 def do_stop(assume_yes=False):
     rec = read_pid()
     if rec is None:
