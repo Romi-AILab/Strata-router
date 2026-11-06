@@ -966,7 +966,9 @@ def run_console():
         _run_rmon(["once"])
     else:
         try:
-            rmon.do_live(cfg, cfg["interval"], rmon._term_ok(False))
+            # 值守接線(刀4):構造閘產物直掛面板;None=本窗不守(遠端/NO_WATCH/構造敗)
+            rmon.do_live(cfg, cfg["interval"], rmon._term_ok(False),
+                         watch=make_watch(cfg, cfg["interval"]))
         except KeyboardInterrupt:
             pass
         except Exception as exc:                  # 面板再怎么壞,不拖垮服務與殼(R2 整合紅線)

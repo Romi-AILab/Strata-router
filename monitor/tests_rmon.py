@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1061,7 +1062,7 @@ class TestConsoleFlow(unittest.TestCase):               # 使用者指示:同窗
             Box.n_start += 1
             return 0
 
-        def fake_live(cfg, interval, color):
+        def fake_live(cfg, interval, color, watch=None):   # 刀4 簽名跟進(watch 單鉤子)
             Box.live_calls.append((cfg["host"], cfg["port"]))
             return 0
 
@@ -2412,6 +2413,282 @@ class TestWatchdogKnife3(unittest.TestCase):
                 touched.add(n.attr)
         self.assertTrue(touched <= {"on_tick", "cancel_pending"}, touched)
         self.assertIn("on_tick", touched)
+
+
+class TestWatchdogKnife4(unittest.TestCase):
+    """刀4 接線面:run_console(go)把 make_watch 的產物餵給 do_live;非 tty 單拍
+    物理不武裝;生產碼 assume_yes 零調用者白文鎖。"""
+
+    CFG = {"host": "127.0.0.1", "port": 9401, "mode": "friend", "names": {},
+           "interval": 0.5}
+
+    def _patch_console(self, tty=True, make_watch_ret=None):
+        undo = []
+        box = {"start": 0, "live_watch": "未調用", "mk_calls": [], "once_args": []}
+
+        def setp(obj, name, val):
+            undo.append((obj, name, getattr(obj, name)))
+            setattr(obj, name, val)
+
+        setp(launch, "_cfg_or_default", lambda: dict(self.CFG))
+        setp(launch, "healthz", lambda timeout=2.0: (True, "9.9.9", "http200"))
+        setp(launch.rmon, "do_live",
+             lambda cfg, interval, color, watch=None: box.__setitem__("live_watch", watch) or 0)
+        setp(launch, "_stdin_tty", lambda: tty)
+        setp(launch, "make_watch",
+             lambda cfg, interval: box["mk_calls"].append((cfg["port"], interval))
+             or make_watch_ret)
+        setp(launch, "_run_rmon", lambda args: box["once_args"].append(list(args)))
+        return undo, box
+
+    def _run(self, undo):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            rc = launch.run_console()
+        for obj, name, val in reversed(undo):
+            setattr(obj, name, val)
+        return rc, buf.getvalue()
+
+    def test_go_feeds_make_watch_into_do_live(self):
+        sentinel = object()
+        undo, box = self._patch_console(make_watch_ret=sentinel)
+        rc, out = self._run(undo)
+        self.assertEqual(rc, 0)
+        self.assertEqual(box["mk_calls"], [(9401, 0.5)])      # 構造一次,吃 cfg 節拍
+        self.assertIs(box["live_watch"], sentinel)            # 原物進面板,不得中途丟棄
+
+    def test_non_tty_single_shot_never_arms(self):
+        undo, box = self._patch_console(tty=False, make_watch_ret=object())
+        rc, out = self._run(undo)
+        self.assertEqual(box["mk_calls"], [])                 # 單拍物理不武裝(README 限界)
+        self.assertEqual(box["once_args"], [["once"]])
+        self.assertIn("不掛常駐面板", out)
+
+    def test_production_code_zero_assume_yes_callers(self):
+        """條款9 白文:生產路徑(do_start/do_start_core)零 assume_yes=True 調用者
+        (tests 縫除外--本條只掃生產兩個源檔)。值守 spawn 縫更傳明文 False(D8'')。"""
+        for fn in ("launch.py", "rmon.py"):
+            src = open(os.path.join(rmon.my_dir(), fn), encoding="utf-8").read()
+            hits = re.findall(r"do_start\w*\([^)\n]*assume_yes=True", src)
+            self.assertEqual(hits, [], fn)
+
+
+class TestWatchdogCanary(unittest.TestCase):
+    """D10 三模式 canary + 雙程序 NBLCK(默認開,撞港誠實 skip 可見;桩自滅零 kill;
+    真 kill 只走產品自己的 do_stop 三因子路徑;RUNTIME 帽;93xx 專屬,永不碰 9177-9199/生產)。"""
+
+    PORTS = range(9311, 9319)
+
+    def setUp(self):
+        self.sock = None
+        self.port = None
+        for p in self.PORTS:
+            s = socket.socket()
+            try:
+                s.bind(("127.0.0.1", p))
+                self.sock, self.port = s, p
+                break
+            except OSError:
+                s.close()
+        if self.port is None:
+            self.skipTest("93xx 全佔:canary 跳過(可見 skip,D-P2-4)")
+        self._old_env = {}
+        self.state = tempfile.mkdtemp(prefix="wd-k4-")
+        self.rdir = tempfile.mkdtemp(prefix="wd-k4-r-")
+        for k, v in (("RMON_STATE_DIR", self.state), ("STRATA_ROUTER_DIR", self.rdir)):
+            self._old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+
+    def tearDown(self):
+        if self.sock is not None:
+            self.sock.close()
+        for k, v in self._old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.state, ignore_errors=True)
+        shutil.rmtree(self.rdir, ignore_errors=True)
+
+    def cfg(self):
+        return {"host": "127.0.0.1", "port": self.port, "mode": "friend",
+                "names": {}, "interval": 0.5}
+
+    def _stub_router(self, life):
+        """真「router」桩:bind 本 port 回 /healthz;WD_STUB_LIFE 秒後自滅(零 kill)。"""
+        with io.open(os.path.join(self.rdir, "router.py"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "import http.server, json, os, threading\n"
+                "class H(http.server.BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        b = json.dumps({'version': '9.9.9-canary'}).encode()\n"
+                "        self.send_response(200)\n"
+                "        self.send_header('Content-Length', str(len(b)))\n"
+                "        self.end_headers()\n"
+                "        self.wfile.write(b)\n"
+                "    def log_message(self, *a):\n"
+                "        pass\n"
+                "srv = http.server.HTTPServer(('127.0.0.1', int(os.environ['WD_STUB_PORT'])), H)\n"
+                "life = float(os.environ.get('WD_STUB_LIFE', '0'))\n"
+                "if life > 0:\n"
+                "    threading.Timer(life, srv.shutdown).start()\n"
+                "srv.serve_forever()\n")
+
+    def test_canary_crash_full_chain_real_spawn(self):
+        """crash 態全流程真相:死記錄+空端口 -> 兩段武裝 -> 真 spawn -> kernel 埠主
+        蓋檔 -> 最後由產品自己的 [K] 三因子路徑收尾(零測試側 kill)。"""
+        t_start = time.monotonic()
+        self._stub_router(life=30)
+        os.environ["WD_STUB_PORT"] = str(self.port)
+        os.environ["WD_STUB_LIFE"] = "30"
+        io.open(launch.pidfile(), "w", encoding="utf-8").write(
+            json.dumps({"pid": 424242, "created": 1345678,
+                        "target": "127.0.0.1:%d" % self.port}))       # 死的自家記錄
+        if self.sock:
+            self.sock.close()                       # 讓位給桩(綁定競爭由 RUNTIME 帽兜)
+            self.sock = None
+        hw = launch.HostWatch(self.cfg(), 0.5)
+        err = io.StringIO()
+        hw.out = err
+        fake_t = [1000.0]                        # 拍鐘 fake(免真睡 6s);真 spawn 仍走真時鐘
+        hw.w.now = lambda: fake_t[0]
+        try:
+            armed = False
+            for _ in range(8):
+                fake_t[0] += 2.0
+                if "重啟中" in hw.on_tick("refused"):
+                    armed = True
+                    break
+            self.assertTrue(armed, "武裝失敗:%s" % err.getvalue())
+            self.assertEqual(launch.read_pid()["pid"], 424242)   # 觸發拍只畫不動(D'')
+            fake_t[0] += 2.0
+            hw.on_tick("refused")                 # N+1 入口:真 spawn
+            self.assertLess(time.monotonic() - t_start, 20, "RUNTIME 帽")
+            rec = launch.read_pid()
+            self.assertIsNotNone(rec, "埠主==自家子應蓋檔:%s" % err.getvalue())
+            self.assertEqual(rec["target"], "127.0.0.1:%d" % self.port)
+            self.assertTrue(launch.pid_alive(rec["pid"]))
+            self.assertEqual(launch.port_owner_pid(self.port), rec["pid"])  # kernel 身分
+            self.assertEqual(hw.w.attempts, 1)
+        finally:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = launch.do_stop(assume_yes=True)      # 產品收尾路徑(三因子+[K]教義)
+            os.environ.pop("WD_STUB_PORT", None)
+            os.environ.pop("WD_STUB_LIFE", None)
+            launch._lock_release(hw.lock_fd)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(launch.port_owner_pid(self.port))    # 端口真的空了
+        self.assertLess(time.monotonic() - t_start, 25, "RUNTIME 帽")
+
+    def _http_stub_thread(self, code, body=b'{"boxes": []}'):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", self.port), H)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        return srv, th
+
+    def test_canary_squat_never_triggers(self):
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+        srv, _th = self._http_stub_thread(404)            # squat 者:任何 HTTP 都非 router
+        try:
+            _m, dead, _x = rmon._snapshot_state(self.cfg())
+            self.assertIsNotNone(dead)                    # 面板真訊號(非我捏 kind)
+            self.assertEqual(dead.kind, "http")           # D1(b) 地基石的真實落地
+            io.open(launch.pidfile(), "w", encoding="utf-8").write(
+                json.dumps({"pid": 424242, "created": 1345678,
+                            "target": "127.0.0.1:%d" % self.port}))
+            hw = launch.HostWatch(self.cfg(), 0.5)
+            calls = []
+            hw.w.spawn = lambda: (calls.append(1), ("spawned_ok", 0))[1]
+            try:
+                for _ in range(10):                       # 真 kind 餵拍:squat 永不入觸發集
+                    self.assertNotIn("重啟中", hw.on_tick(dead.kind))
+            finally:
+                launch._lock_release(hw.lock_fd)
+            self.assertEqual(calls, [])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_canary_alive_never_triggers(self):
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+        srv, _th = self._http_stub_thread(200)            # 活著(就算是桩)就不救
+        try:
+            model, dead, _x = rmon._snapshot_state(self.cfg())
+            self.assertIsNone(dead)                       # 面板訊號:活
+            io.open(launch.pidfile(), "w", encoding="utf-8").write(
+                json.dumps({"pid": 424242, "created": 1345678,
+                            "target": "127.0.0.1:%d" % self.port}))
+            hw = launch.HostWatch(self.cfg(), 0.5)
+            calls = []
+            hw.w.spawn = lambda: (calls.append(1), ("spawned_ok", 0))[1]
+            try:
+                for _ in range(10):
+                    self.assertNotIn("重啟中", hw.on_tick(None))
+            finally:
+                launch._lock_release(hw.lock_fd)
+            self.assertEqual(calls, [])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_canary_two_process_nblck(self):
+        """條款3/10:鎖紀律的雙程序真相(源碼鎖釘不了行為)--未釋放出「等」,
+        釋放後下一拍接得上。子程序走 own handle,超時才動它(教義)。"""
+        path = launch.watch_paths(self.cfg())["lock"]
+        fd = launch._lock_acquire(path)
+        self.assertIsNotNone(fd)
+        child = ("import os,sys,time,msvcrt\n"
+                 "p = sys.argv[1]\n"
+                 "end = time.time() + 12\n"
+                 "while time.time() < end:\n"
+                 "    fd = os.open(p, os.O_RDWR | os.O_CREAT)\n"
+                 "    try:\n"
+                 "        os.lseek(fd, 0, os.SEEK_SET)\n"
+                 "        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)\n"
+                 "        print('GOT', flush=True)\n"
+                 "        break\n"
+                 "    except OSError:\n"
+                 "        os.close(fd)\n"
+                 "        print('WAIT', flush=True)\n"
+                 "        time.sleep(0.2)\n")
+        p = subprocess.Popen([sys.executable, "-c", child, path],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, bufsize=1)
+        try:
+            t0 = time.monotonic()
+            first = p.stdout.readline().strip()          # 父持鎖中:孩子只能 WAIT
+            self.assertEqual(first, "WAIT")
+            time.sleep(0.4)
+            launch._lock_release(fd)                     # 釋放 -> 孩子下拍接手
+            line = ""
+            while time.monotonic() - t0 < 14:
+                line = p.stdout.readline().strip()
+                if line == "GOT":
+                    break
+            self.assertEqual(line, "GOT", "釋放後接不上鎖 = 鎖語意破產")
+            self.assertEqual(p.wait(timeout=10), 0)      # 子自滅(持鎖靠進程退出釋放)
+        finally:
+            if p.poll() is None:
+                p.kill()                                 # own handle(教義允許的最後手段)
+                p.wait(timeout=10)
 
 
 if __name__ == "__main__":
