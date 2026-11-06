@@ -22,7 +22,7 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 203, rmon tests >= 193 (watchdog L2-B teeth era).
+Current floors: router smoke >= 203, rmon tests >= 203 (watchdog R2 fix-batch era).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 193      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+MIN_RMON = 203      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
                     # + round-2 L2 locks 4 (EL-per-row, LF structure, no-2J-in-frame,
@@ -86,6 +86,17 @@ MIN_RMON = 193      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # construction failure abstains with a voice, real halt file
                     # reaches HostWatch; later-tick hook exception restores the
                     # unwatched footer -- M23's mutant dies on tick 3 only)
+                    # + watchdog R2 fix batch 10 (round-2 L2 solo review closed
+                    # inline, red-first: slow spawn block re-anchors the sleep
+                    # gate so "streak survives, re-arms after cooldown" holds on
+                    # real timing, router.log held by another program degrades
+                    # the child to DEVNULL instead of disabling the watch, a
+                    # blocked watchdog.log backlogs <=64 lines and backfills
+                    # with a 延補: prefix on recovery, cooldown table walked to
+                    # the exact second, decode hard-resets both the vote and the
+                    # stable legs, HostWatch->Watch wiring identity, already
+                    # clears the streak but not the counts, sleep-gate boundary
+                    # formula, restart + disable diagnostics reach stderr AND log)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.
@@ -113,7 +124,16 @@ def run_suite(name, argv, cwd, pattern, floor, floor_word):
         return
     last = ms[-1]
     n = int(last[0] if isinstance(last, tuple) else last)
-    tail = out.strip().splitlines()[-1] if out.strip() else ""
+    lines = out.splitlines()
+    # R2A/P3-5: the PASS tail must be the verdict line the gate PARSED, not the
+    # suite's literal last line -- rmon's last line is a bare "OK", which proves
+    # nothing about which count passed the floor. The verdict line is printed
+    # primary; a different literal last line is shown alongside, secondary.
+    verdict = ""
+    for ln in lines:
+        if re.search(pattern, ln):
+            verdict = ln
+    tail = next((ln for ln in reversed(lines) if ln.strip()), "")   # old strip() semantics
     if r.returncode != 0:
         FAILS.append("%s: exit %d (%s)" % (name, r.returncode, tail[:120]))
         print("  FAIL  %s -- %s" % (name, tail[:200]))
@@ -124,13 +144,16 @@ def run_suite(name, argv, cwd, pattern, floor, floor_word):
         print("  FAIL  %s -- %d %s, floor is %d" % (name, n, floor_word, floor))
         return
     print("  PASS  %s -- %d %s (floor %d)" % (name, n, floor_word, floor))
-    # D-P2-4 completion (L2-B/P2-6): skipped tests still count in "Ran N", so
-    # a floor-passing PASS can hide a suite that silently stopped running.
-    # The PASS line must show the suite's own verdict tail, and a skip count
-    # gets its own loud line -- green must not mean "everything ran".
-    if tail:
-        print("        tail: %s" % tail[:160])
-    if "skipped" in tail.lower():
+    # D-P2-4 completion (L2-B/P2-6) + R2A/P3-5: skipped tests still count in
+    # "Ran N", so a floor-passing PASS can hide a suite that silently stopped
+    # running. The PASS shows the parsed verdict line, plus the literal last
+    # line when it differs, and a skip count gets its own loud line -- green
+    # must not mean "everything ran".
+    if verdict:
+        print("        verdict: %s" % verdict.strip()[:160])
+    if tail.strip() and tail.strip() != verdict.strip():
+        print("        last line: %s" % tail.strip()[:160])
+    if "skipped" in (verdict + "\n" + tail).lower():
         print("        !!  %s: SKIPPED tests inside a PASS -- a suite silently "
               "not running is worse than a red one; read the tail above" % name)
 

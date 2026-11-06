@@ -18,6 +18,7 @@
 """
 import ctypes
 import ctypes.wintypes   # FILETIME/DWORD 屬子模組,只 import ctypes 拿不到(R1 自審latent)
+import collections     # deque:watchdog.log 封鎖期積壓帽(D''4 累積重試,R2A/P2-2)
 import glob
 import hashlib
 import json
@@ -383,8 +384,16 @@ def do_start_core(cfg, now, assume_yes=False, emit=print, tally=None):
         if _ask("要在本機起 router 嗎? y/N: ") != "y":
             emit("保留原樣,沒起。")
             return _done(0, "kept")    # 保留原樣 != 成功:不清 halt、不餵穩定累計
-    os.makedirs(rmon.state_dir(), exist_ok=True)
-    log = open(logfile(), "ab")
+    log = None                        # 副作用路(D''4 末句「router.log 占用同理不殺重啟動作」):
+    try:                              # 本機 log 被他程序佔用(Notepad 開 router.log 除錯
+        os.makedirs(rmon.state_dir(), exist_ok=True)   # 是用戶常態,R2A/P1-1);實測
+        log = open(logfile(), "ab")                    # PermissionError 13 會殺死整個值守
+    except OSError as exc:                             # -- 降級:log=None,子程序改 DEVNULL
+        emit("router.log 暫時開不了(%s):本次啟動改用 DEVNULL 輸出,"   # 敘事行照走 emit 進
+             "值守事件仍記 watchdog.log。" % rmon.clean(str(exc))[:120])  # watchdog.log
+    logfh = log if log is not None else subprocess.DEVNULL   # Popen 落點:真檔或 DEVNULL;
+                                                             # DEVNULL 是 int(-3)無 .close(),
+                                                             # 故 close 只認 log 不認 logfh
     # 與手動啟動對齊(2026-11-04 切版前實測發現):router 的 --config 沒有預設值,
     # 生产中是帶 --config router.json 跑的。殼起時若 router.py 旁有 router.json 就
     # 帶上(只看存在,內容零讀取);金鑰檔會跟著 --config 同目錄規則,與現行一致。
@@ -394,13 +403,14 @@ def do_start_core(cfg, now, assume_yes=False, emit=print, tally=None):
         cmd += ["--config", cfgj]
     try:
         p = subprocess.Popen(cmd, cwd=router_dir(),
-                             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                             stdout=logfh, stderr=logfh, stdin=subprocess.DEVNULL,
                              creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
     except OSError as exc:
         emit("起動失敗:%s" % exc)
         return _done(2, "failed")
     finally:
-        log.close()
+        if log is not None:           # 子程序已繼承自己的複製,父端真檔可關;
+            log.close()               # DEVNULL 分支 log=None,無檔可關(修 R2A 紅)
     target = "%s:%s" % (cfg["host"], cfg["port"])
     emit("已啟動 router(pid %d),等本機 /healthz..." % p.pid)
     t0 = now()
@@ -534,6 +544,9 @@ class Watch:
 
     def _spawn_now(self, t):
         outcome, _rc = self.spawn() if self.spawn else ("failed", 2)
+        self._last_t = self.now()   # spawn 阻塞(~27s)=已知阻塞不是睡眠:拍距就地重錨,
+                                    # 否則下一拍睡眠閘抹掉剛保住的 streak(R2A/P2-3),
+                                    # D''7「冷卻末自然攢回」就只在假時序測試裡成立
         if outcome == "already":
             self._streak, self._first_t = 0, None    # 恢復=成功類:清 streak
             self._stable = WATCH_STABLE_RESET        # 「已在應」不計不燒(D''7)
@@ -740,6 +753,8 @@ class HostWatch:
         self._last_note = None
         self._tick_no = 0
         self._armed = False
+        self._pend = collections.deque(maxlen=64)   # D''4 累積重試帽:封鎖期 ≤64 行,
+                                                    # 滿則丟最舊(誠實限界,非無界記憶體)
 
     def cancel_pending(self):
         """等待拍間 q=使用者明確離上面板優先(D''1;刀3 接鍵)。"""
@@ -770,8 +785,25 @@ class HostWatch:
 
     def _notify(self, line):
         self._out(line)
+        self._log(line)
+
+    def _log(self, line):
+        """log 腿統一落點(R2A/P2-2+P3-4):失敗 -> 積壓入帽、只降級從不停用;
+        成功 -> 清降級旗標(不等 %16 節流)並把積壓按最舊優先補寫(加「延補:」前綴,
+        尸檢媒體因此不丟章)。停用窗的積壓隨窗終結 —— 帽有界,誠實交代過。"""
         if not self._write_log(line):
             self.w.log_broken = True
+            self._pend.append(line)
+            return False
+        if self.w.log_broken:
+            self.w.log_broken = False
+        while self._pend:
+            old = self._pend.popleft()
+            if not self._write_log("延補: " + old):
+                self._pend.appendleft(old)
+                self.w.log_broken = True
+                return True
+        return True
 
     def _spawn(self):
         tally = {}
@@ -803,16 +835,14 @@ class HostWatch:
             self.lock_fd = _lock_acquire(self.paths["lock"])  # 已停用窗永不再搶(L2-A/P1-2),
             self.w.holds_lock = self.lock_fd is not None      #   否則「停用釋鎖」被自己還魂
         if self.w.log_broken and self._tick_no % WD_RETRY_EVERY == 0:
-            if self._write_log("事件紀錄恢復"):
-                self.w.log_broken = False
+            self._log("事件紀錄恢復")        # 節流試探:_log 成功即清旗標+補積壓
         note = self.w.on_tick(kind)
         if not self._armed and self.w.holds_lock:
             self._armed = True            # D9':首次武裝逃生門句(stderr+log 各一)
             self._notify("窗開值守已武裝:只守 %s。不想值守:Set RMON_NO_WATCH=1 "
                          "後重開窗(q→[G] 無效)。" % self.w.target)
         if note != self._last_note:       # 狀態遷移才落一行(不逐拍刷 Noise)
-            if not self._write_log(note):
-                self.w.log_broken = True
+            self._log(note)
         self._last_note = note
         return note
 
