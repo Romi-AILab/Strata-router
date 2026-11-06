@@ -22,7 +22,7 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 203, rmon tests >= 173 (watchdog knife-4 era).
+Current floors: router smoke >= 203, rmon tests >= 183 (watchdog L2-A fix era).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 173      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+MIN_RMON = 183      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
                     # + round-2 L2 locks 4 (EL-per-row, LF structure, no-2J-in-frame,
@@ -71,6 +71,13 @@ MIN_RMON = 173      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # kernel-owner stamping + do_stop cleanup, squat/alive never
                     # trigger via real panel signals, two-process NBLCK mutual
                     # exclusion + handoff)
+                    # + watchdog L2-A fix batch 10 (lock released on every panel
+                    # exit incl. [G] re-entry, disabled window never reacquires,
+                    # owner-oracle query-failure = conservative fail, restart
+                    # events land in watchdog.log, lock meta padded (ghost-pid),
+                    # stable reset requires continuous alive, failed spawn keeps
+                    # streak, disable footer snapshot + exception diag to log,
+                    # [K] warns when halt-intent write fails)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.

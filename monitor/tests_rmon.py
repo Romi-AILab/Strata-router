@@ -1886,14 +1886,17 @@ class TestWatchdogKnife1(unittest.TestCase):
         self.spawn_result = ("failed", 2)
         w = self.mk()
         self.assertIn("重啟中1", self.drive_to_pending(w))
-        self.fire(w)
+        note = self.fire(w)
         self.assertEqual(w.attempts, 1)                         # 額度於真 spawn 計(D''7)
-        self.assertIn("重啟中2", self.drive_to_pending(w))       # 第1次冷卻 0s
-        self.assertIn("冷卻", self.fire(w))                      # 第2次冷卻 10s
+        # L2-A/P3-3(失敗保 streak):第 1 格冷卻=0s -> 同一拍自然攢回、立刻再武裝
+        self.assertIn("重啟中2", note)
+        note = self.fire(w)                                     # 第 2 次失敗 -> 冷卻 10s
+        self.assertIn("冷卻", note)
         self.assertIn("冷卻", self.tick(w, "refused"))           # 冷卻閘壓住不武裝
         self.advance(10.0)
         self.assertIn("重啟中3", self.drive_to_pending(w))       # 第3次冷卻 30s
-        self.fire(w)
+        note = self.fire(w)                                     # 第 3 次失敗 -> 冷卻 30s
+        self.assertIn("冷卻", note)
         self.advance(30.0)
         self.assertIn("重啟中4", self.drive_to_pending(w))
         note = self.fire(w)
@@ -1918,8 +1921,7 @@ class TestWatchdogKnife1(unittest.TestCase):
         w = self.mk()
         self.drive_to_pending(w)
         self.fire(w)                                            # 1 次失敗 -> attempts=1
-        self.assertEqual(w.attempts, 1)
-        self.drive_to_pending(w)
+        self.assertEqual(w.attempts, 1)                         #   (保 streak:同拍已再武裝)
         self.spawn_result = ("spawned_ok", 0)
         self.fire(w)                                            # 成功 spawn 仍占一格(D''7)
         self.assertEqual(w.attempts, 2)                         # -> 起「穩定歸零」累計
@@ -2292,7 +2294,8 @@ class TestWatchdogKnife3(unittest.TestCase):
     FOOT_OFF = "q 離開 · r 立刻刷新 · 關窗就關窗(無值守承諾)"
     HEAD = "q 離開 · r 立刻刷新 · 窗開值守:"
     STATES = ["開", "重啟中1", "冷卻90s", "熔斷(q→[S])", "待機(他窗值守pid 4294967295)",
-              "只提醒(收編;端口空時q→[S]以殼參數重啟)", "手動停機", "已停用(異常)",
+              "只提醒(收編;端口空時q→[S]以殼參數重啟)", "手動停機",
+              "已停用(異常·已試2次)",              # L2-A/P3-4:D''9 快照版停用詞
               "事件紀錄:不可用"]
 
     class FakeWatch:
@@ -2689,6 +2692,252 @@ class TestWatchdogCanary(unittest.TestCase):
             if p.poll() is None:
                 p.kill()                                 # own handle(教義允許的最後手段)
                 p.wait(timeout=10)
+
+
+class TestWatchdogL2A(unittest.TestCase):
+    """L2 round-1 面A 採納項鎖測(修前紅/修後綠):
+    P1-1 面板任何出口交還鎖([G] 同進程再武裝不餵幽魂鎖);
+    P1-2 停用窗永不重搶鎖(餓死鏈堵點加閘);
+    P2-1 埠主查詢異常=保守失敗(D''2「不寫+誠實失敗」);
+    P2-2 重啟事件進 watchdog.log(尸檢媒體完整);
+    P3-1 鎖元資料定寬(舊長 pid 不黏新短 pid);
+    P3-2 穩定歸零要求連續 alive(死拍歸零,README「連續」兑现);
+    P3-3 失敗保 streak(D''7 白文;成功才清);
+    P3-4 停用 footer 快照 + 例外 diag 落檔 + [K] 停機意圖寫敗警告。"""
+
+    CFG = {"host": "127.0.0.1", "port": 9401, "mode": "friend", "names": {},
+           "interval": 0.5}
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp(prefix="wd-l2a-")
+        self.env_saved = {k: os.environ.get(k) for k in
+                          ("RMON_STATE_DIR", "RMON_NO_WATCH")}
+        os.environ["RMON_STATE_DIR"] = self.state
+        os.environ.pop("RMON_NO_WATCH", None)
+        self.saved = []
+        self.fds = []
+        self.hosts = []
+
+    def tearDown(self):
+        for fd in self.fds:
+            launch._lock_release(fd)
+        for hw in self.hosts:
+            try:
+                hw.release()
+            except Exception:
+                pass
+        for obj, name, val in reversed(self.saved):
+            setattr(obj, name, val)
+        for k, v in self.env_saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def setp(self, obj, name, val):
+        self.saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, val)
+
+    def _mk_host(self):
+        hw = launch.make_watch(dict(self.CFG), 0.5)
+        self.assertIsNotNone(hw)                              # loopback + 無 NO_WATCH
+        self.hosts.append(hw)
+        return hw
+
+    # ------------------------------------------------ P1-1 出口交還鎖
+    def test_panel_exit_releases_lock(self):
+        hw = self._mk_host()
+        self.assertIsNotNone(hw.lock_fd)
+        path = launch.watch_paths(dict(self.CFG))["lock"]
+        hw.release()                                          # 方法必須存在且冪等
+        hw.release()
+        fd = launch._lock_acquire(path)                       # 交還後立刻可再拿
+        self.assertIsNotNone(fd, "release() 後鎖仍被持 -- [G] 再武裝會被幽魂鎖擋")
+        self.fds.append(fd)
+
+    def test_run_console_releases_watch_on_all_exits(self):
+        class _Rec:
+            def __init__(self):
+                self.releases = 0
+            def release(self):
+                self.releases += 1
+        for name, behavior in (
+                ("q 正常返回", lambda cfg, interval, color, watch=None: 0),
+                ("Ctrl+C", lambda cfg, interval, color, watch=None: (_ for _ in ()).throw(KeyboardInterrupt())),
+                ("面板異常", lambda cfg, interval, color, watch=None: (_ for _ in ()).throw(ValueError("boom")))):
+            with self.subTest(name):
+                rec = _Rec()
+                self.setp(launch, "_cfg_or_default", lambda: dict(self.CFG))
+                self.setp(launch, "healthz", lambda timeout=2.0: (True, "9.9.9", "http200"))
+                self.setp(launch, "_stdin_tty", lambda: True)
+                self.setp(launch, "_run_rmon", lambda args: None)
+                self.setp(launch, "make_watch", lambda cfg, interval: rec)
+                self.setp(launch.rmon, "do_live", behavior)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                    rc = launch.run_console()
+                self.assertEqual(rc, 0)
+                self.assertEqual(rec.releases, 1,
+                                 "出口 %r 未交還值守鎖(幽魂鎖擋死 [G] 再武裝)" % name)
+
+    # ------------------------------------------------ P1-2 停用窗不重搶鎖
+    def test_disabled_window_never_reacquires_lock(self):
+        hw = self._mk_host()
+        path = launch.watch_paths(dict(self.CFG))["lock"]
+
+        def boom():
+            raise PermissionError(13, "pidfile locked")        # 決策路異常 -> 停用+釋鎖
+        hw.w.halt_present = boom
+        self.assertIn("已停用", hw.on_tick("refused"))
+        for _ in range(3):                                    # 停用後的拍不得重搶
+            hw.on_tick("refused")
+        fd = launch._lock_acquire(path)
+        self.assertIsNotNone(fd, "已停用窗活持鎖 -- 餓死鏈堵點被每拍重試還魂")
+        self.fds.append(fd)
+
+    # ------------------------------------------------ P2-1 埠主查詢異常=保守
+    def test_owner_query_failure_conservative(self):
+        writes = []
+
+        class _P:
+            pid = 424242
+
+        def fake_popen(*a, **k):
+            return _P()
+        rpy = os.path.join(self.state, "router.py")
+        with open(rpy, "w") as fh:
+            fh.write("# 存在即可(零執行)\n")
+        self.setp(launch, "router_py", lambda: rpy)
+        self.setp(launch, "router_dir", lambda: self.state)
+        self.setp(launch, "healthz_at", lambda cfg, timeout=2.0: (False, None, "refused"))
+        self.setp(launch.subprocess, "Popen", fake_popen)
+        self.setp(launch.time, "sleep", lambda s: None)
+        self.setp(launch, "healthz_local", lambda port, timeout=2.0: True)
+        self.setp(launch, "pid_alive", lambda pid: True)
+        self.setp(launch, "port_owner_pid", lambda port, *a, **k: None)  # kernel 表查無
+        self.setp(launch, "write_pid", lambda pid, target=None: writes.append(pid))
+        tally = {}
+        rc = launch.do_start_core(dict(self.CFG), lambda: 0.0, assume_yes=True,
+                                  emit=lambda s: None, tally=tally)
+        self.assertEqual(rc, 2)
+        self.assertEqual(tally.get("outcome"), "failed")
+        self.assertEqual(writes, [], "埠主證明不了就寫 pid -- D''2 保守條款被違反")
+
+    # ------------------------------------------------ P2-2 重啟事件進 log
+    def test_restart_events_reach_watchdog_log(self):
+        hw = self._mk_host()
+
+        def fake_core(cfg, now, assume_yes=False, emit=None, tally=None):
+            emit("已啟動 router(pid 424242),等本機 /healthz...")
+            emit("上線了:v9.9.9")
+            if tally is not None:
+                tally["outcome"] = "spawned_ok"
+            return 0
+        self.setp(launch, "do_start_core", fake_core)
+        self.assertEqual(hw._spawn(), ("spawned_ok", 0))
+        with open(launch.watch_paths(dict(self.CFG))["log"], encoding="utf-8") as fh:
+            blob = fh.read()
+        self.assertIn("上線了:v9.9.9", blob,
+                      "重啟細節只走 stderr,watchdog.log 尸檢媒體缺頁")
+
+    # ------------------------------------------------ P3-1 鎖元資料定寬
+    def test_lock_meta_padded_no_ghost_pid(self):
+        path = launch.watch_paths(dict(self.CFG))["lock"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:                          # 前一任「長 pid」的殘字
+            fh.seek(launch.LOCK_META_OFF)
+            fh.write(b"29388" * 4)
+        fd = launch._lock_acquire(path)
+        self.assertIsNotNone(fd)
+        self.fds.append(fd)
+        self.assertEqual(launch.lock_owner_pid(path), os.getpid(),
+                         "新短 pid 與舊長 pid 殘字黏成幽魂 pid")
+
+    # ------------------------------------------------ P3-2 穩定歸零要連續
+    def test_stable_reset_requires_continuous_alive(self):
+        t = [0.0]
+        w = launch.Watch(dict(self.CFG), 0.5, now=lambda: t[0])
+        w.read_rec = lambda: {"pid": 1, "created": 1, "target": "127.0.0.1:9401"}
+        w.matches = lambda rec: False
+        w.halt_present = lambda: False
+        w.spawn = lambda: ("failed", 2)
+        w.attempts = 1
+        w._stable = launch.WATCH_STABLE_RESET                 # 剛成功過,起算 600
+        for _ in range(100):                                  # 400s 全活
+            t[0] += 4.0
+            w.on_tick(None)
+        t[0] += 4.0
+        w.on_tick("refused")                                  # 死了 4s(未熔斷)
+        for _ in range(60):                                   # 再「活」240s:湊過 600
+            t[0] += 4.0
+            w.on_tick(None)
+        self.assertEqual(w.attempts, 1,
+                         "穿插死亡拍的距離也被算進「連續存活」-- 額度被準時歸零")
+
+    # ------------------------------------------------ P3-3 失敗保 streak
+    def test_failed_spawn_keeps_streak(self):
+        t = [0.0]
+        spawns = []
+        w = launch.Watch(dict(self.CFG), 0.5, now=lambda: t[0])
+        w.read_rec = lambda: {"pid": 1, "created": 1, "target": "127.0.0.1:9401"}
+        w.matches = lambda rec: False
+        w.halt_present = lambda: False
+
+        def _sp():
+            spawns.append(1)
+            return ("failed", 2)
+        w.spawn = _sp
+        for _ in range(4):                                    # 3 票 + 跨度 6s -> 武裝
+            t[0] += 2.0
+            note = w.on_tick("refused")
+        self.assertIn("重啟中", note)
+        t[0] += 2.0
+        note = w.on_tick("refused")                             # N+1:真 spawn(失敗)
+        self.assertEqual(len(spawns), 1)
+        self.assertEqual(w.attempts, 1)
+        self.assertGreaterEqual(w._streak, 3,
+                                "失敗把 streak 清光 -- D''7「失敗保 streak(冷卻末自然攢回)」")
+        # 冷卻表第 1 格=0s:保住的 streak 在同一拍自然攢回、立刻再武裝(D''7 語意)
+        self.assertIn("重啟中", note)
+        t[0] += 2.0
+        w.on_tick("refused")                                    # 第 2 次 spawn 執行(失敗)
+        self.assertEqual(len(spawns), 2)
+        self.assertEqual(w.attempts, 2)
+        self.assertIn("冷卻", w.on_tick("refused"))               # 第 2 格 10s 壓住
+
+    # ------------------------------------------------ P3-4 停用快照+diag+halt 寫敗
+    def test_disable_footer_snapshot_and_diag(self):
+        hw = self._mk_host()
+
+        def boom():
+            raise PermissionError(13, "pidfile locked")
+        hw.w.halt_present = boom
+        note = hw.on_tick("refused")
+        self.assertIn("已停用", note)
+        self.assertIn("已試", note, "D''9:停用態 footer 要帶一句快照摘要")
+        with open(launch.watch_paths(dict(self.CFG))["log"], encoding="utf-8") as fh:
+            blob = fh.read()
+        self.assertIn("PermissionError", blob,
+                      "停用只說「異常」不帶例外細節 -- 零 diagnostics 的停用無法排查")
+
+    def test_stop_warns_when_halt_intent_write_fails(self):
+        rec = {"pid": 424242, "created": 1.5, "target": "127.0.0.1:9401"}
+        self.setp(launch, "read_pid", lambda: dict(rec))
+        self.setp(launch, "pid_matches", lambda r: True)
+        self.setp(launch, "_taskkill", lambda pid, force=False: True)
+        self.setp(launch, "pid_alive", lambda pid: False)      # 殺後即死
+        self.setp(launch.time, "sleep", lambda s: None)
+        self.setp(launch, "clear_pid", lambda: None)
+        self.setp(launch, "write_halt", lambda cfg, pid: False)  # 意圖落檔失敗
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = launch.do_stop(assume_yes=True)
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("已終端", out)
+        self.assertIn("拉起", out,
+                      "停機意圖寫敗必須警告(值守會把剛殺的拉起來),靜默=背叛 [K]")
 
 
 if __name__ == "__main__":

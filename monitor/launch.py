@@ -360,8 +360,9 @@ def do_start_core(cfg, now, assume_yes=False, emit=print, tally=None):
     cfg = 呼叫方注入快照 -- 核心零重讀 monitor.json(值守凍幀期間藏不起 input());
     now = 注入時鐘(值守給 time.monotonic,時鐘跳變不製造無界凍窗/假失敗);
     emit = 展示參數化(選單 print;值守 stderr+log,零 stdout 教義)。
-    蓋檔=kernel 埠主 oracle(D8''):只有 port 的 LISTEN 持有者確認是自家子
-    (或表暫查不到但子仍活)才釘 pidfile -- 雙窗競態(E6)任何時序變量都別想
+    蓋檔=kernel 埠主 oracle(D8''):只有 port 的 LISTEN 持有者確認是自家子才釘
+    pidfile;查詢異常/表查無=證明不了,保守不寫+誠實失敗(D''2 條款 2,L2-A/P2-1
+    修正本檔舊註的寬鬆版) -- 雙窗競態(E6)任何時序變量都別想
     再把死 pid/別人贏家釘進血統檔。值守路徑永不 assume_yes(D8''白文)。
     tally = 結果出參載體(刀2):HostWatch 用它把結局分成 already(不計不燒)/
     spawned_ok/adopted/kept/failed 餵給 Watch._spawn_now;選單呼叫者不傳,零感。"""
@@ -412,7 +413,14 @@ def do_start_core(cfg, now, assume_yes=False, emit=print, tally=None):
                 emit("自家子上線後退出了(port 已無人應):視同崩潰,未記 pid -- 看 %s。" % logfile())
                 return _done(2, "failed")
             owner = port_owner_pid(cfg["port"])
-            if owner is not None and owner != p.pid:
+            if owner is None:
+                # D''2 條款2(L2-A/P2-1):埠主證明不了就不寫血統、不宣稱上線 --
+                # 保守失敗;服務多半其實活,下一次 [S]/面板會認成「已在應」自癒。
+                emit("本機 /healthz 已在應,但 kernel 埠主查詢失敗(無法證明埠歸誰):"
+                     "不寫 pid、不宣稱上線(保守);先看日誌或 [C] 自檢,再 [S] 一次"
+                     "通常會直接認成「已在應」。")
+                return _done(2, "failed")
+            if owner != p.pid:
                 emit("port %d 由 pid %s 持有(非本殼子進程):收編 -- 本殼不殺它、"
                      "也不會對它自動重啟;要本殼管它請先停掉真正持有者再 [S]。" % (cfg["port"], owner))
                 clear_halt(cfg)
@@ -482,6 +490,8 @@ class Watch:
         self._pending = False
         self._stable = None
         self._disabled = False
+        self.disable_exc = None                  # 停用例外 diag(L2-A/P3-4b):給 HostWatch 落檔
+        self._disable_note = None                # 停用 footer 快照(D''9 條款9)
 
     def cancel_pending(self):
         """等待拍間按 q:明確離上面板優先(D''1),投票一併重來。"""
@@ -523,15 +533,18 @@ class Watch:
         return rec is None or alive_rec
 
     def _spawn_now(self, t):
-        self._streak, self._first_t = 0, None    # spawn 起重重新攢(D''7 冷卻末自然攢回)
         outcome, _rc = self.spawn() if self.spawn else ("failed", 2)
         if outcome == "already":
-            self._stable = WATCH_STABLE_RESET    # 「已在應」=恢復非失敗:不計不燒
+            self._streak, self._first_t = 0, None    # 恢復=成功類:清 streak
+            self._stable = WATCH_STABLE_RESET        # 「已在應」不計不燒(D''7)
             return
-        self.attempts += 1                       # 真 spawn 起點計額度+起冷卻鐘(D''7)
+        self.attempts += 1                           # 真 spawn 起點計額度+起冷卻鐘(D''7)
         self._cooldown_until = t + WATCH_COOLDOWN[self.attempts - 1]
         if outcome in ("spawned_ok", "adopted"):
-            self._stable = WATCH_STABLE_RESET    # adopted=目標在跑(只是非自家子),穩定照走
+            self._streak, self._first_t = 0, None    # 成功 -> 清 streak+起穩定歸零(D''7)
+            self._stable = WATCH_STABLE_RESET        # adopted=目標在跑(只是非自家子),穩定照走
+        # 失敗:保 streak(D''7「失敗保 streak(冷卻閘壓住,冷卻末自然攢回)」,
+        # L2-A/P3-3 修正舊版誤實裝的清零) -- 冷卻一過,下一死拍立刻再武裝。
 
     def _vote(self, kind, t):
         if kind is None or kind in ("http", "decode"):
@@ -567,7 +580,7 @@ class Watch:
 
     def on_tick(self, kind):
         if self._disabled:
-            return "已停用(異常)"
+            return self._disable_note or "已停用(異常)"
         try:
             t = self.now()
             gap = None if self._last_t is None else t - self._last_t
@@ -578,10 +591,14 @@ class Watch:
                     self._spawn_now(t)
             elif gap is not None and gap > 3 * self.interval + 2:
                 self._streak, self._first_t = 0, None    # 睡眠閘:歸零;穩定累計凍結不动
-            elif gap is not None and self._stable is not None and kind is None:
-                self._stable -= gap                       # 只算觀察到的 alive 拍距(F-P3-8)
-                if self._stable <= 0:
-                    self.attempts, self._stable = 0, None
+            elif gap is not None and self._stable is not None:
+                if kind is None:
+                    self._stable -= gap                  # 只算觀察到的 alive 拍距(F-P3-8)
+                    if self._stable <= 0:
+                        self.attempts, self._stable = 0, None
+                elif kind in ("refused", "timeout", "http", "decode"):
+                    self._stable = None                  # 「連續」的兑现(L2-A/P3-2):
+                # dns/reset=凍結不計(與投票同口徑)    #   死拍歸零重攢,不準湊距離
             self._vote(kind, t)
             if not self._pending and self._streak >= WATCH_STREAK_MIN \
                     and self._first_t is not None \
@@ -589,9 +606,11 @@ class Watch:
                     and not self._suppressed(t):
                 self._pending = True
             return self._note(t)
-        except Exception:
-            self.disable()                           # 決策路異常=停用+釋鎖(D''4;副作用路不經此)
-            return "已停用(異常)"
+        except Exception as exc:
+            self.disable_exc = rmon.clean(repr(exc))[:160]   # diag 落檔載體(P3-4b)
+            self.disable()                                   # 決策路異常=停用+釋鎖(D''4;副作用路不經此)
+            self._disable_note = "已停用(異常·已試%d次)" % self.attempts  # D''9 快照
+            return self._disable_note
 
 
 WATCH_LOG = "watchdog.log"
@@ -628,7 +647,7 @@ def _lock_acquire(path):
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         os.lseek(fd, LOCK_META_OFF, os.SEEK_SET)
-        os.write(fd, ("%d" % os.getpid()).encode("ascii"))
+        os.write(fd, ("%-24d" % os.getpid())[:24].encode("ascii"))  # 定寬(L2-A/P3-1):舊長 pid 殘字不許與新短 pid 黏成幽魂
         return fd
     except OSError:
         if fd is not None:
@@ -757,7 +776,8 @@ class HostWatch:
     def _spawn(self):
         tally = {}
         rc = do_start_core(self.cfg, time.monotonic, assume_yes=False,
-                           emit=self._out, tally=tally)
+                           emit=self._notify,   # 重啟事件 stderr+log 雙寫(L2-A/P2-2):
+                           tally=tally)         #   watchdog.log 是尸檢媒體,缺頁不得
         outcome = tally.get("outcome", "failed")
         if outcome in ("spawned_ok", "adopted", "already"):
             return outcome, rc
@@ -767,13 +787,21 @@ class HostWatch:
         _lock_release(self.lock_fd)       # 條款3:停用必釋鎖(活持鎖者停用餓死鏈堵點)
         self.lock_fd = None
         self.w.holds_lock = False
-        self._notify("值守已停用(決策路異常):鎖已釋放,其他窗可接手。")
+        diag = (" -- " + self.w.disable_exc) if getattr(self.w, "disable_exc", None) else ""
+        self._notify("值守已停用(決策路異常)%s:鎖已釋放,其他窗可接手。" % diag)
+
+    def release(self):
+        """面板任何出口(q/Ctrl+C/異常)交還鎖(L2-A/P1-1):[G] 同進程再武裝
+        絕不能被自己的幽魂鎖擋死(footer 還會謊稱「他窗值守pid <自己>」)。冪等。"""
+        _lock_release(self.lock_fd)
+        self.lock_fd = None
+        self.w.holds_lock = False
 
     def on_tick(self, kind):
         self._tick_no += 1
-        if self.lock_fd is None:          # 待機窗每拍重試接手(條款3)
-            self.lock_fd = _lock_acquire(self.paths["lock"])
-            self.w.holds_lock = self.lock_fd is not None
+        if self.lock_fd is None and not self.w._disabled:   # 待機窗每拍重試接手(條款3);
+            self.lock_fd = _lock_acquire(self.paths["lock"])  # 已停用窗永不再搶(L2-A/P1-2),
+            self.w.holds_lock = self.lock_fd is not None      #   否則「停用釋鎖」被自己還魂
         if self.w.log_broken and self._tick_no % WD_RETRY_EVERY == 0:
             if self._write_log("事件紀錄恢復"):
                 self.w.log_broken = False
@@ -846,8 +874,11 @@ def do_stop(assume_yes=False):
             break
     if not pid_alive(rec["pid"]):
         clear_pid()
-        write_halt(_cfg_or_default(), rec["pid"])   # D5':[K] 真殺成功=停機意圖落檔(無 TTL)
+        halt_ok = write_halt(_cfg_or_default(), rec["pid"])  # D5':[K] 真殺成功=停機意圖落檔(無 TTL)
         print("已終端(pid %d)。" % rec["pid"])
+        if not halt_ok:
+            print("! 停機意圖未能落檔:本機值守窗可能把剛殺的 router 自動拉起 -- "
+                  "不想被拉起:Set RMON_NO_WATCH=1 後重開窗,或關掉值守窗。")
         return 0
     print("連 /F 都殺不掉?查工作管理員。")
     return 2
@@ -965,14 +996,20 @@ def run_console():
         print("(偵測到非互動 stdin:不掛常駐面板,只印單拍;常駐面板請在真終端視窗看。)")
         _run_rmon(["once"])
     else:
+        # 值守接線(刀4):構造閘產物直掛面板;None=本窗不守(遠端/NO_WATCH/構造敗)
+        watch = make_watch(cfg, cfg["interval"])
         try:
-            # 值守接線(刀4):構造閘產物直掛面板;None=本窗不守(遠端/NO_WATCH/構造敗)
-            rmon.do_live(cfg, cfg["interval"], rmon._term_ok(False),
-                         watch=make_watch(cfg, cfg["interval"]))
+            rmon.do_live(cfg, cfg["interval"], rmon._term_ok(False), watch=watch)
         except KeyboardInterrupt:
             pass
         except Exception as exc:                  # 面板再怎么壞,不拖垮服務與殼(R2 整合紅線)
             print("面板出了意外:%s -- 服務不受影響;可跑 [C] 自檢。" % rmon.clean(str(exc))[:120])
+        finally:
+            if watch is not None:                 # 出口必交鎖(L2-A/P1-1):[G] 同進程再武裝的命脈
+                try:
+                    watch.release()
+                except Exception:
+                    pass
     alive, ver, kind = healthz()
     print("(面板結束:router %s。[G] 再看面板 · [K] 停服務 · [q] 離開視窗而服務繼續跑。)"
           % (("在線 v%s" % ver) if alive else ("不回應(%s)" % kind)))
