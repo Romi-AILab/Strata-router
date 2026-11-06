@@ -22,7 +22,7 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 203, rmon tests >= 183 (watchdog L2-A fix era).
+Current floors: router smoke >= 203, rmon tests >= 193 (watchdog L2-B teeth era).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 183      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+MIN_RMON = 193      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
                     # + round-2 L2 locks 4 (EL-per-row, LF structure, no-2J-in-frame,
@@ -78,6 +78,14 @@ MIN_RMON = 183      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # stable reset requires continuous alive, failed spawn keeps
                     # streak, disable footer snapshot + exception diag to log,
                     # [K] warns when halt-intent write fails)
+                    # + watchdog L2-B teeth 10 (one lock per WD-B mutation that
+                    # survived: disable idempotent, kept keeps halt, already
+                    # clears halt, trigger-point loopback second gate, cooldown
+                    # note ceils never says 0s, watchdog.log logs note CHANGES
+                    # only, image factor of the three-factor kill, make_watch
+                    # construction failure abstains with a voice, real halt file
+                    # reaches HostWatch; later-tick hook exception restores the
+                    # unwatched footer -- M23's mutant dies on tick 3 only)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.
@@ -116,6 +124,15 @@ def run_suite(name, argv, cwd, pattern, floor, floor_word):
         print("  FAIL  %s -- %d %s, floor is %d" % (name, n, floor_word, floor))
         return
     print("  PASS  %s -- %d %s (floor %d)" % (name, n, floor_word, floor))
+    # D-P2-4 completion (L2-B/P2-6): skipped tests still count in "Ran N", so
+    # a floor-passing PASS can hide a suite that silently stopped running.
+    # The PASS line must show the suite's own verdict tail, and a skip count
+    # gets its own loud line -- green must not mean "everything ran".
+    if tail:
+        print("        tail: %s" % tail[:160])
+    if "skipped" in tail.lower():
+        print("        !!  %s: SKIPPED tests inside a PASS -- a suite silently "
+              "not running is worse than a red one; read the tail above" % name)
 
 
 def check_root_entry():

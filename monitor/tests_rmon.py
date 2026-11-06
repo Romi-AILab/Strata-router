@@ -2299,14 +2299,18 @@ class TestWatchdogKnife3(unittest.TestCase):
               "事件紀錄:不可用"]
 
     class FakeWatch:
-        def __init__(self, notes=None, raises=False):
+        def __init__(self, notes=None, raises=False, raises_after=None):
             self.notes = list(notes or ["開"])
             self.kinds = []
             self.cancelled = []
             self.raises = raises
+            self.raises_after = raises_after    # 守過 n 拍後才炸(L2-B/P2-1:後段拍)
+            self.ticks = 0
 
         def on_tick(self, kind):
-            if self.raises:
+            self.ticks += 1
+            if self.raises or (self.raises_after is not None
+                               and self.ticks > self.raises_after):
                 raise RuntimeError("host boom")
             self.kinds.append(kind)
             return self.notes.pop(0) if self.notes else "開"
@@ -2392,6 +2396,18 @@ class TestWatchdogKnife3(unittest.TestCase):
         self.assertIn("值守鉤子異常", err)
         self.assertIn(self.FOOT_OFF, out)                # footer 退回未值守承諾=如實
         self.assertNotIn(self.HEAD, out)
+
+    def test_hook_exception_on_later_tick_restores_footer(self):
+        # L2-B/P2-1(存活 M23):先老實守兩拍、第 3 拍才炸 -- 此後的每一幀都必須
+        # 退回未值守承諾。舊測只演第一拍就炸(彼時 foot 仍是初始未值守字串,
+        # 重置行從未被需要);刪掉 rmon 的 foot 重置行後,面板從該拍起永久宣稱
+        # 「窗開值守:開」而 watch 已是 None -- 宣稱跑在行為前面,腳本級查不出。
+        w = self.FakeWatch(notes=["開", "開"], raises_after=2)
+        rc, out, err = self._go(watch=w, waits=["", "", "q"])
+        self.assertEqual(rc, 0)
+        self.assertIn("值守鉤子異常", err)
+        self.assertEqual(out.count(self.HEAD), 2)        # 值守 footer 只准存在於守著的那兩幀
+        self.assertIn(self.FOOT_OFF, out)                # 炸後的幀如實退回未值守承諾
 
     def test_watched_footers_fit_80_display_cols(self):
         def width(s):
@@ -2857,7 +2873,9 @@ class TestWatchdogL2A(unittest.TestCase):
     # ------------------------------------------------ P3-2 穩定歸零要連續
     def test_stable_reset_requires_continuous_alive(self):
         t = [0.0]
-        w = launch.Watch(dict(self.CFG), 0.5, now=lambda: t[0])
+        # interval 2.0:拍距 4.0s 必須走在正常分支 -- 0.5 的睡眠閘是 3.5s,
+        # 全用它會整段滑進睡眠凍結支,累計根本不時不扣(牙空,teeth driver 實證)。
+        w = launch.Watch(dict(self.CFG), 2.0, now=lambda: t[0])
         w.read_rec = lambda: {"pid": 1, "created": 1, "target": "127.0.0.1:9401"}
         w.matches = lambda rec: False
         w.halt_present = lambda: False
@@ -2867,9 +2885,13 @@ class TestWatchdogL2A(unittest.TestCase):
         for _ in range(100):                                  # 400s 全活
             t[0] += 4.0
             w.on_tick(None)
+        self.assertEqual(w._stable, 204.0)                    # 首拍 gap=None 不扣:99×4.0,
+                                                              # 累計確實在扣(非睡眠凍結態)
         t[0] += 4.0
         w.on_tick("refused")                                  # 死了 4s(未熔斷)
-        for _ in range(60):                                   # 再「活」240s:湊過 600
+        self.assertIsNone(w._stable,
+                          "死拍必須歸零重攢(D''7「連續」;L2-A/P3-2),不準留殘值")
+        for _ in range(60):                                   # 再活 240s:殘值 200 早該湊過 0
             t[0] += 4.0
             w.on_tick(None)
         self.assertEqual(w.attempts, 1,
@@ -2938,6 +2960,175 @@ class TestWatchdogL2A(unittest.TestCase):
         self.assertIn("已終端", out)
         self.assertIn("拉起", out,
                       "停機意圖寫敗必須警告(值守會把剛殺的拉起來),靜默=背叛 [K]")
+
+
+class TestWatchdogL2B(unittest.TestCase):
+    """L2 round-1 面B 採納項鎖測(突變存活者 -> 逐條補牙,一條牙對一個存活者):
+    M09b disable() 冪等(on_disable 恰一次,重複呼叫不重複釋鎖/落檔);
+    M11b kept(遠端答 n)不清 halt(D5' 不對稱的另一半);
+    M11c already 捷徑清 halt(已在應也是成功 do_start);
+    M24  觸發點自判 loopback(雙閘並存的第二閘,不再只是宣稱);
+    M44  冷卻剩餘採進位(誠實:剩 0.2s 不許說「冷卻0s」);
+    M45  watchdog.log 只在狀態遷移落行(不逐拍刷 Noise);
+    M56  三因子第三因子:映像檔非 python* 照拒殺(活+建立時間全對也救不回来);
+    M58  make_watch 構造炸=棄權不重試、面板必須說話(F1);
+    M63  宿主真 halt 檔接線(README「手動停機最大」的載體)。"""
+
+    CFG = {"host": "127.0.0.1", "port": 9401, "mode": "friend", "names": {},
+           "interval": 0.5}
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp(prefix="wd-l2b-")
+        self.env_saved = {k: os.environ.get(k) for k in
+                          ("RMON_STATE_DIR", "RMON_NO_WATCH")}
+        os.environ["RMON_STATE_DIR"] = self.state
+        os.environ.pop("RMON_NO_WATCH", None)
+        self.saved = []
+        self.hosts = []
+
+    def tearDown(self):
+        for hw in self.hosts:
+            try:
+                hw.release()
+            except Exception:
+                pass
+        for obj, name, val in reversed(self.saved):
+            setattr(obj, name, val)
+        for k, v in self.env_saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def setp(self, obj, name, val):
+        self.saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, val)
+
+    # ------------------------------------------------ M09b disable 冪等
+    def test_disable_is_idempotent(self):
+        w = launch.Watch(dict(self.CFG), 0.5, now=lambda: 0.0)
+        calls = []
+        w.on_disable = lambda: calls.append(1)
+        w.disable()
+        w.disable()
+        w.disable()
+        self.assertEqual(calls, [1])    # 「恰一次」:重複 disable 不重複釋鎖/落檔/stderr
+
+    # ------------------------------------------------ M11c already 清 halt
+    def test_already_shortcut_clears_halt(self):
+        cfg = dict(self.CFG)
+        launch.write_halt(cfg, 424242)
+        paths = launch.watch_paths(cfg)
+        self.assertTrue(os.path.exists(paths["halt"]))
+        self.setp(launch, "router_py", lambda: __file__)   # 存在性閘:給個真存在的檔
+        self.setp(launch, "healthz_at", lambda c: (True, "9.9.9", "http"))
+        tally = {}
+        rc = launch.do_start_core(cfg, lambda: 0.0, emit=lambda s: None, tally=tally)
+        self.assertEqual((rc, tally.get("outcome")), (0, "already"))
+        # halt 無 TTL(D5' 定案),唯一清檔點=任何成功 do_start -- 已在應捷徑也是。
+        # 此路一斷,[G] 永遠清不掉意圖,值守被永久抑制且 footer 恆示「手動停機」。
+        self.assertFalse(os.path.exists(paths["halt"]))
+
+    # ------------------------------------------------ M11b kept 保留 halt
+    def test_kept_keeps_halt_untouched(self):
+        cfg = dict(self.CFG)
+        cfg["host"] = "10.0.0.1"                 # 遠端目標:kept 語意的現場
+        launch.write_halt(cfg, 424242)
+        paths = launch.watch_paths(cfg)
+        self.assertTrue(os.path.exists(paths["halt"]))
+        self.setp(launch, "router_py", lambda: __file__)
+        self.setp(launch, "healthz_at", lambda c: (False, None, "refused"))
+        self.setp(launch, "_ask", lambda prompt: "n")
+        tally = {}
+        rc = launch.do_start_core(cfg, lambda: 0.0, assume_yes=False,
+                                  emit=lambda s: None, tally=tally)
+        self.assertEqual((rc, tally.get("outcome")), (0, "kept"))
+        # 保留原樣 != 成功:不清 halt、不餵穩定累計(D5' 不對稱;碼註白寫,今日無牙)
+        self.assertTrue(os.path.exists(paths["halt"]))
+
+    # ------------------------------------------------ M24 雙閘第二閘
+    def test_trigger_point_loopback_second_gate(self):
+        # C-P2-1「雙閘並存」:構造閘先擋遠端,刀1 的遠端案例實為 target 不符擋的。
+        # 本測讓其餘閘全開(血統俱備、target 相符、進程已死、無 halt、未熔斷、
+        # 持鎖、冷卻過),唯一还能擋下觸發的只剩觸發點自判 loopback。
+        fires = []
+        t = [0.0]
+        cfg = dict(self.CFG)
+        cfg["host"] = "10.0.0.1"
+        w = launch.Watch(cfg, 0.5, now=lambda: t[0])
+        self.assertFalse(w.loopback)
+        w.read_rec = lambda: {"pid": 1, "created": 1, "target": "10.0.0.1:9401"}
+        w.matches = lambda rec: False            # 記錄進程已死:佐證俱備准救
+        w.spawn = lambda: (fires.append(1), ("spawned_ok", 0))[1]
+        for _ in range(4):                       # 3 死拍武裝 + 第 4 拍執行點
+            w.on_tick("refused")
+            t[0] += 3.0                          # 6s 跨度尺用 3s/拍湊滿(不踩睡眠閘)
+        self.assertEqual(fires, [])              # 遠端永不自動 spawn:第二閘有牙
+
+    # ------------------------------------------------ M44 冷卻進位
+    def test_cooldown_note_ceils_never_zero(self):
+        t = [100.0]
+        w = launch.Watch(dict(self.CFG), 0.5, now=lambda: t[0])
+        w.attempts = 1
+        w._cooldown_until = 109.5                # 剩 9.5s
+        self.assertEqual(w.on_tick("refused"), "冷卻10s")   # 進位不截斷
+        t[0] = 109.8
+        w._cooldown_until = 110.0                # 剩 0.2s
+        self.assertEqual(w.on_tick("refused"), "冷卻1s")    # 誠實:絕不說「冷卻0s」
+
+    # ------------------------------------------------ M45 log 只落遷移
+    def test_log_writes_only_on_note_change(self):
+        hw = launch.HostWatch(dict(self.CFG), 0.5, out=io.StringIO())
+        self.hosts.append(hw)
+        log = hw.paths["log"]
+        for _ in range(3):
+            self.assertEqual(hw.on_tick(None), "開")
+        with open(log, encoding="utf-8") as fh:
+            lines = [l for l in fh if l.strip()]
+        self.assertEqual(len(lines), 2)          # 武裝句 + 遷移「開」一行,不逐拍刷
+        launch.write_halt(dict(self.CFG), 424242)
+        self.assertEqual(hw.on_tick("refused"), "手動停機")
+        with open(log, encoding="utf-8") as fh:
+            self.assertEqual(len([l for l in fh if l.strip()]), 3)   # 遷移才落行
+
+    # ------------------------------------------------ M56 三因子映像檔腿
+    def test_third_kill_factor_is_image(self):
+        # 三因子=活+建立時間+映像 python*:前兩因子全過、映像非 python 也照拒殺。
+        # 走縫比照刀1 教義(副作用都走縫),零真子程序;README 資安紅線宣稱
+        # 「有測試把關」從此刻起對這半條腿也成立。
+        rec = {"pid": 4242, "created": 12345, "target": "127.0.0.1:9401"}
+        self.setp(launch, "pid_alive", lambda pid: True)
+        self.setp(launch, "get_created", lambda pid: 12345)
+        self.setp(launch, "image_name", lambda pid: "C:\\Windows\\System32\\cmd.exe")
+        self.assertFalse(launch.pid_matches(rec))
+        self.setp(launch, "image_name", lambda pid: "C:\\Python313\\PYTHON.EXE")
+        self.assertTrue(launch.pid_matches(rec))    # python* 大小寫不論
+
+    # ------------------------------------------------ M58 構造棄權
+    def test_make_watch_abstains_on_construction_failure(self):
+        # F1:值守可以缺席,面板必須說話。構造面炸(磁碟/權限級 OSError)->
+        # None + stderr 一句,絕不上拋殺面板。注:_lock_acquire 自己吞 OSError
+        # (拿不到鎖=待機窗,不是崩潰),所以「構造炸」只能從更外層注入 ——
+        # 用縫模擬 HostWatch 构造期拋異常,這正是 make_watch docstring 點名的場景。
+        def boom(path):
+            raise OSError(22, "disk gone (injected)")
+        self.setp(launch, "_lock_acquire", boom)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(launch.make_watch(dict(self.CFG), 0.5))
+        self.assertIn("值守無法武裝", err.getvalue())
+
+    # ------------------------------------------------ M63 真 halt 檔接線
+    def test_real_halt_file_suppresses_host(self):
+        # knife-1 用假縫測過「halt → 手動停機」;真檔 ↔ 真路徑這一段(README
+        # 「手動停機最大」的載體)由本測鎖住:HostWatch 的 halt_present 若斷線,
+        # [K] 之後值守會若無其事地把剛殺的 router 拉回來。
+        hw = launch.HostWatch(dict(self.CFG), 0.5, out=io.StringIO())
+        self.hosts.append(hw)
+        launch.write_halt(dict(self.CFG), 424242)
+        self.assertEqual(hw.on_tick(None), "手動停機")
+        self.assertEqual(hw.on_tick("refused"), "手動停機")
 
 
 if __name__ == "__main__":
