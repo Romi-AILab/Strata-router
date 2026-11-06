@@ -12,6 +12,7 @@ launch(探活不炸/pid 三因子/EOF 誠實/金鑰零讀取)、bat 純 ASCII+CR
 import ast
 import builtins
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -1965,6 +1966,320 @@ class TestWatchdogKnife1(unittest.TestCase):
         self.assertIn("手動停機", self.tick(w, "refused"))
         w.disable()                                             # 已停用 > 一切
         self.assertIn("已停用", self.tick(w, "refused"))
+
+
+class TestWatchdogKnife2(unittest.TestCase):
+    """刀2:值守宿主接線 -- 鎖(條款3)、halt(D5')、watchdog.log 輪轉/降級(D'')、
+    spawn 縫 tally 分類、構造閘(NO_WATCH/遠端)。全部落 temp state dir,零 port。"""
+
+    CFG = {"host": "127.0.0.1", "port": 9401}
+    REMOTE = {"host": "10.0.0.1", "port": 9401}
+
+    def setUp(self):
+        self.saved = {}
+        for k in ("subprocess", "time", "healthz", "healthz_at", "healthz_local",
+                  "pid_alive", "pid_matches", "port_owner_pid", "_taskkill",
+                  "do_start_core"):
+            self.saved[k] = getattr(launch, k, "<absent>")
+        self.saved_env = {k: os.environ.get(k) for k in
+                          ("RMON_STATE_DIR", "RMON_NO_WATCH", "STRATA_ROUTER_DIR")}
+        self.state = tempfile.mkdtemp(prefix="wd-k2-")
+        os.environ["RMON_STATE_DIR"] = self.state
+        self.hosts = []
+        self.fds = []
+
+    def tearDown(self):
+        for hw in self.hosts:
+            launch._lock_release(getattr(hw, "lock_fd", None))
+        for fd in self.fds:
+            launch._lock_release(fd)
+        for k, v in self.saved.items():
+            if v == "<absent>":
+                try:
+                    delattr(launch, k)
+                except AttributeError:
+                    pass
+            else:
+                setattr(launch, k, v)
+        for k, v in self.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def mk_host(self, cfg=None, err=None):
+        hw = launch.HostWatch(cfg or self.CFG, 2.0)
+        hw.out = err if err is not None else io.StringIO()
+        self.hosts.append(hw)
+        return hw
+
+    # ---- 路徑與 tag ----
+    def test_watch_paths_tagged_by_target(self):
+        p = launch.watch_paths(self.CFG)
+        tag = hashlib.sha1(b"127.0.0.1:9401").hexdigest()[:12]
+        self.assertTrue(p["lock"].endswith("watch-%s.lock" % tag))
+        self.assertTrue(p["halt"].endswith("watch-%s.halt" % tag))
+        self.assertTrue(p["log"].endswith("watchdog.log"))
+        other = {"host": "127.0.0.1", "port": 9402}
+        self.assertNotEqual(launch.watch_tag(self.CFG), launch.watch_tag(other))
+
+    # ---- 鎖(條款3;語義已親測:進程內雙 fd 互斥 True、offset1024 鎖外可讀) ----
+    def test_lock_contention_standby_and_release(self):
+        path = launch.watch_paths(self.CFG)["lock"]
+        fd1 = launch._lock_acquire(path)
+        self.assertIsNotNone(fd1)
+        try:
+            self.assertIsNone(launch._lock_acquire(path))      # 第二把 = 待機
+            self.assertEqual(launch.lock_owner_pid(path), os.getpid())
+        finally:
+            launch._lock_release(fd1)
+        fd2 = launch._lock_acquire(path)                       # 釋放的下一拍可接手
+        self.assertIsNotNone(fd2)
+        launch._lock_release(fd2)
+
+    def test_lock_source_discipline_ast(self):
+        """F-P1-1/條款3 + 親測教訓:只准 NBLCK(UNLCK 除外);seek(0) 先於 lock、
+        元資料寫在鎖後 offset 1024;**UNLCK 前必回鎖點**(親測:位點 1024 直接解 ->
+        PermissionError13 -- 解鎖也要 seek0 紀律,AST 罩)。"""
+        src = open(os.path.join(launch.rmon.my_dir(), "launch.py"),
+                   encoding="utf-8").read()
+        # 只掃真引用(文件內「拒采 LK_LOCK」的討論文字是誠實史料,不禁)
+        names = set(re.findall(r"msvcrt\.(LK_\w+)", src))
+        self.assertTrue(names <= {"LK_NBLCK", "LK_UNLCK"}, names)
+        self.assertTrue(names)                                   # 零引用也是走錯路
+        tree = ast.parse(src)
+        fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        def lines(fn, attr, lockname=None, off=None):
+            hits = []
+            for n in ast.walk(fns[fn]):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == attr):
+                    if lockname is not None:
+                        a = n.args[1] if len(n.args) > 1 else None
+                        if not (isinstance(a, ast.Attribute) and a.attr == lockname):
+                            continue
+                    if off is not None:
+                        a = n.args[1] if len(n.args) > 1 else None
+                        ok = (isinstance(a, ast.Constant) and a.value == off) or \
+                             (isinstance(a, ast.Name) and a.id == "LOCK_META_OFF")
+                        if not ok:
+                            continue
+                    hits.append(n.lineno)
+            return hits
+        acq = fns["_lock_acquire"]
+        s0 = lines("_lock_acquire", "lseek", off=0)
+        lk = lines("_lock_acquire", "locking", lockname="LK_NBLCK")
+        m10 = lines("_lock_acquire", "lseek", off=1024)
+        wr = lines("_lock_acquire", "write")
+        self.assertTrue(s0 and lk and m10 and wr)
+        self.assertLess(min(s0), min(lk))                      # 先歸零再鎖
+        self.assertLess(min(lk), min(m10))                     # 鎖到手才寫元資料(E1 陷阱)
+        self.assertLess(min(m10), min(wr))
+        rel0 = lines("_lock_release", "lseek", off=0)
+        unl = lines("_lock_release", "locking", lockname="LK_UNLCK")
+        self.assertTrue(rel0 and unl)
+        self.assertLess(min(rel0), min(unl))                   # 回鎖點才解(_probe C 教訓)
+        self.assertTrue(acq and fns["_lock_release"])
+
+    def test_host_reacquires_lock_per_tick(self):
+        path = launch.watch_paths(self.CFG)["lock"]
+        fd = launch._lock_acquire(path)                        # 他窗先行值守
+        self.fds.append(fd)
+        hw = self.mk_host()
+        self.assertFalse(hw.w.holds_lock)
+        note = hw.on_tick(None)
+        self.assertIn("待機", note)
+        self.assertIn(str(os.getpid()), note)                  # 「他窗值守 pid N」可讀
+        launch._lock_release(fd)
+        self.fds.remove(fd)
+        self.assertIn("開", hw.on_tick(None))                  # 待機每拍重試 -> 接手
+
+    def test_disable_releases_lock(self):
+        hw = self.mk_host()
+        self.assertIsNotNone(hw.lock_fd)
+        hw.w.disable()                                         # 條款3 餓死鏈堵點
+        fd = launch._lock_acquire(launch.watch_paths(self.CFG)["lock"])
+        try:
+            self.assertIsNotNone(fd)
+        finally:
+            launch._lock_release(fd)
+
+    # ---- halt 不對稱(D5') ----
+    def test_halt_written_on_real_kill(self):
+        class _Wall:                                     # halt ts=牆鐘展示(條款9 合法載主)
+            @staticmethod
+            def sleep(sec):
+                pass
+            @staticmethod
+            def time():
+                return 1234567890
+        launch.time = _Wall()
+        real_read = launch.read_pid
+        launch.read_pid = lambda: {"pid": 424242, "created": 7,
+                                   "target": "127.0.0.1:8088"}  # 預設 cfg 同 target
+        launch.pid_matches = lambda rec: True
+        seq = [True, False]                                    # 殺成功:下一探已死
+        launch.pid_alive = lambda pid: seq.pop(0) if seq else False
+        launch._taskkill = lambda pid, force=False: None
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = launch.do_stop(assume_yes=True)
+        finally:
+            launch.read_pid = real_read
+        self.assertEqual(rc, 0)
+        halt = launch.watch_paths(launch._cfg_or_default())["halt"]
+        self.assertTrue(os.path.exists(halt))                   # 殼 [K] 真殺 -> 意圖落檔
+
+    def test_halt_cleared_on_start_success(self):
+        halt_path = launch.watch_paths(self.CFG)["halt"]
+        self.assertTrue(launch.write_halt(self.CFG, 123))
+        self.assertTrue(os.path.exists(halt_path))
+        launch.subprocess = mock_mod()
+        launch.time = mock_time_mod()
+        launch.healthz_at = lambda cfg, timeout=2.0: (False, None, "refused")
+        launch.healthz_local = lambda port, timeout=2.0: True
+        launch.pid_alive = lambda pid: True
+        launch.port_owner_pid = lambda port: os.getpid()        # 自家子收檔路徑
+        rdir = tempfile.mkdtemp(prefix="wd-k2-r-")
+        io.open(os.path.join(rdir, "router.py"), "w", encoding="utf-8").close()
+        os.environ["STRATA_ROUTER_DIR"] = rdir
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = launch.do_start_core(cfg=self.CFG, now=lambda: 0.0)
+        finally:
+            shutil.rmtree(rdir, ignore_errors=True)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(halt_path))             # 成功 do_start 清 halt
+
+    # ---- 構造閘 ----
+    def test_make_watch_construction_gates(self):
+        os.environ.pop("RMON_NO_WATCH", None)
+        w = launch.make_watch(self.CFG, 2.0)
+        self.assertIsInstance(w, launch.HostWatch)
+        self.hosts.append(w)
+        os.environ["RMON_NO_WATCH"] = "1"
+        self.assertIsNone(launch.make_watch(self.CFG, 2.0))     # 逃生門
+        os.environ["RMON_NO_WATCH"] = "0"
+        w2 = launch.make_watch(self.CFG, 2.0)                   # 「0」=不關
+        self.assertIsInstance(w2, launch.HostWatch)
+        self.hosts.append(w2)
+        os.environ.pop("RMON_NO_WATCH", None)
+        self.assertIsNone(launch.make_watch(self.REMOTE, 2.0))  # arm 構造閘:遠端不武裝
+
+    # ---- 通知路:stderr+log,零 stdout(D9'/零 stdout 教義) ----
+    def test_arm_escape_line_once_zero_stdout(self):
+        err = io.StringIO()
+        hw = self.mk_host(err=err)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            hw.on_tick(None)
+            hw.on_tick(None)
+        self.assertEqual(buf.getvalue(), "")
+        self.assertIn("RMON_NO_WATCH", err.getvalue())
+        self.assertIn("重開窗", err.getvalue())
+        self.assertEqual(err.getvalue().count("RMON_NO_WATCH"), 1)  # 武裝句只一次
+        log = launch.watch_paths(self.CFG)["log"]
+        self.assertIn("武裝", io.open(log, encoding="utf-8").read())
+
+    def test_note_changes_log_to_watchdog_log_never_stdout(self):
+        hw = self.mk_host()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            hw.on_tick(None)
+            hw.on_tick("refused")                               # 無佐證+死訊 -> 收編詞
+            hw.on_tick(None)
+        self.assertEqual(buf.getvalue(), "")
+        log = io.open(launch.watch_paths(self.CFG)["log"], encoding="utf-8").read()
+        self.assertIn("只提醒", log)
+        self.assertIn("開", log)
+
+    # ---- 輪轉與降級(條款4;F 探針 D:Notepad 佔檔=PermissionError13 復現) ----
+    def test_rotation_uses_os_replace(self):
+        log = launch.watch_paths(self.CFG)["log"]
+        with io.open(log, "w", encoding="utf-8") as fh:
+            fh.write("x" * 300000)                              # 越過 256KB 帽
+        seen = []
+        real = os.replace
+        def spy(a, b, **kw):
+            seen.append((a, b))
+            return real(a, b, **kw)
+        launch.os.replace = spy
+        try:
+            hw = self.mk_host()
+            hw._write_log("輪轉測試")
+        finally:
+            launch.os.replace = real
+        self.assertIn((log, log + ".old"), seen)
+        self.assertTrue(os.path.exists(log + ".old"))
+        self.assertLess(os.path.getsize(log), 300000)
+
+    def test_rotation_blocked_degrades_not_disables(self):
+        log = launch.watch_paths(self.CFG)["log"]
+        with io.open(log, "w", encoding="utf-8") as fh:
+            fh.write("x" * 300000)
+        real = os.replace
+        def blocked(a, b, **kw):
+            raise PermissionError(5, "WinError 5 .old 被佔")
+        launch.os.replace = blocked
+        hw = self.mk_host()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                hw.on_tick(None)                                # 事件寫入撞牆
+                note = hw.on_tick(None)
+        finally:
+            launch.os.replace = real
+        self.assertIn("事件紀錄:不可用", note)                   # 降級態(條款4)
+        self.assertNotIn("已停用", note)                         # 不是自殺
+        for _ in range(40):                                     # 重試帽節流後自癒
+            note = hw.on_tick(None)
+        self.assertEqual(note, "開")
+        self.assertFalse(hw.w.log_broken)
+
+    # ---- spawn 縫:do_start_core tally 分類;值守永不 assume_yes ----
+    def test_spawn_seam_maps_tally_never_assume_yes(self):
+        hw = self.mk_host()
+        seen = {}
+        def fake_core(cfg, now, assume_yes=False, emit=print, tally=None):
+            seen["assume_yes"] = assume_yes
+            if tally is not None:
+                tally["outcome"] = "adopted"
+            return 0
+        launch.do_start_core = fake_core
+        try:
+            self.assertEqual(hw._spawn(), ("adopted", 0))
+        finally:
+            self.assertIs(seen["assume_yes"], False)            # D8'' 白文:值守零 assume_yes
+        def fake2(cfg, now, assume_yes=False, emit=print, tally=None):
+            if tally is not None:
+                tally["outcome"] = "failed"
+            return 2
+        launch.do_start_core = fake2                            # tearDown 還原
+        self.assertEqual(hw._spawn(), ("failed", 2))
+
+    # ---- adopted 收尾(刀2 接線語意補齊刀1) ----
+    def test_adopted_outcome_counts_and_stabilizes(self):
+        t = [0.0]
+        def now():
+            return t[0]
+        w = launch.Watch(self.CFG, 2.0, now=now)
+        w.read_rec = lambda: {"pid": 424242, "created": 9,
+                              "target": "127.0.0.1:9401"}
+        w.matches = lambda rec: False
+        w.halt_present = lambda: False
+        w.spawn = lambda: ("adopted", 0)                        # 起了子但別人贏
+        note = None
+        for _ in range(4):
+            t[0] += 2.0
+            note = w.on_tick("refused")
+        self.assertIn("重啟中", note)
+        t[0] += 2.0
+        w.on_tick("refused")
+        self.assertEqual(w.attempts, 1)                         # 真 spawn 過 = 佔額
+        for _ in range(301):                                    # 目標在跑 -> 穩定歸零可走
+            t[0] += 2.0
+            w.on_tick(None)
+        self.assertEqual(w.attempts, 0)
 
 
 if __name__ == "__main__":

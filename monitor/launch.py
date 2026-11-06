@@ -19,7 +19,9 @@
 import ctypes
 import ctypes.wintypes   # FILETIME/DWORD 屬子模組,只 import ctypes 拿不到(R1 自審latent)
 import glob
+import hashlib
 import json
+import msvcrt
 import os
 import re
 import subprocess
@@ -353,26 +355,33 @@ def _ask(prompt):
         return "n"
 
 
-def do_start_core(cfg, now, assume_yes=False, emit=print):
+def do_start_core(cfg, now, assume_yes=False, emit=print, tally=None):
     """[S]/值守共用的啟動核心(D8''/E-P2-1/F-P2-7):
     cfg = 呼叫方注入快照 -- 核心零重讀 monitor.json(值守凍幀期間藏不起 input());
     now = 注入時鐘(值守給 time.monotonic,時鐘跳變不製造無界凍窗/假失敗);
     emit = 展示參數化(選單 print;值守 stderr+log,零 stdout 教義)。
     蓋檔=kernel 埠主 oracle(D8''):只有 port 的 LISTEN 持有者確認是自家子
     (或表暫查不到但子仍活)才釘 pidfile -- 雙窗競態(E6)任何時序變量都別想
-    再把死 pid/別人贏家釘進血統檔。值守路徑永不 assume_yes(D8''白文)。"""
+    再把死 pid/別人贏家釘進血統檔。值守路徑永不 assume_yes(D8''白文)。
+    tally = 結果出參載體(刀2):HostWatch 用它把結局分成 already(不計不燒)/
+    spawned_ok/adopted/kept/failed 餵給 Watch._spawn_now;選單呼叫者不傳,零感。"""
+    def _done(rc, outcome):
+        if tally is not None:
+            tally["outcome"] = outcome
+        return rc
     if not os.path.exists(router_py()):
         emit("找不到 %s -- %s" % (router_py(), _NO_ROUTER_HINT))
-        return 2
+        return _done(2, "failed")
     alive, ver, kind = healthz_at(cfg)
     if alive:
+        clear_halt(cfg)                # D5':任何成功 do_start(含已在應捷徑=go 預路徑)清 halt
         emit("/healthz 已在應(v%s,目標 %s:%s),不重複啟動。" % (ver, cfg["host"], cfg["port"]))
-        return 0
+        return _done(0, "already")
     if not rmon._is_loopback_host(cfg["host"]) and not assume_yes:
         emit("注意:監控目標指向 %s:%s(遠端),但 [S] 會在「本機」起一個 router。" % (cfg["host"], cfg["port"]))
         if _ask("要在本機起 router 嗎? y/N: ") != "y":
             emit("保留原樣,沒起。")
-            return 0
+            return _done(0, "kept")    # 保留原樣 != 成功:不清 halt、不餵穩定累計
     os.makedirs(rmon.state_dir(), exist_ok=True)
     log = open(logfile(), "ab")
     # 與手動啟動對齊(2026-11-04 切版前實測發現):router 的 --config 沒有預設值,
@@ -388,7 +397,7 @@ def do_start_core(cfg, now, assume_yes=False, emit=print):
                              creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
     except OSError as exc:
         emit("起動失敗:%s" % exc)
-        return 2
+        return _done(2, "failed")
     finally:
         log.close()
     target = "%s:%s" % (cfg["host"], cfg["port"])
@@ -401,25 +410,27 @@ def do_start_core(cfg, now, assume_yes=False, emit=print):
             if not pid_alive(p.pid):
                 # E-P3-1 第三文案:不是「贏家收編」,是自家子上線後自己崩了
                 emit("自家子上線後退出了(port 已無人應):視同崩潰,未記 pid -- 看 %s。" % logfile())
-                return 2
+                return _done(2, "failed")
             owner = port_owner_pid(cfg["port"])
             if owner is not None and owner != p.pid:
                 emit("port %d 由 pid %s 持有(非本殼子進程):收編 -- 本殼不殺它、"
                      "也不會對它自動重啟;要本殼管它請先停掉真正持有者再 [S]。" % (cfg["port"], owner))
-                return 0
+                clear_halt(cfg)
+                return _done(0, "adopted")
             write_pid(p.pid, target=target)
             emit("上線了:v%s(本機 port %d;輸出導向 %s)"
                  % (healthz_at(cfg)[1] or "?", cfg["port"], logfile()))
-            return 0
+            clear_halt(cfg)
+            return _done(0, "spawned_ok")
         if not pid_alive(p.pid):
             break
     spent = int(now() - t0)
     if not pid_alive(p.pid):
         emit("進程已退出(%.0fs)-- 看 %s 前幾行(常見:port 被佔、router.json 格式)。" % (spent, logfile()))
-        return 2
+        return _done(2, "failed")
     write_pid(p.pid, target=target)   # 子仍在=身分事實,[K] 必須reachable(此檔三因子恆真)
     emit("進程還在但本機 /healthz %.0fs 沒回應 -- 看 %s;可用 [K] 停掉重試。" % (spent, logfile()))
-    return 2
+    return _done(2, "failed")
 
 
 def do_start(assume_yes=False):
@@ -519,8 +530,8 @@ class Watch:
             return
         self.attempts += 1                       # 真 spawn 起點計額度+起冷卻鐘(D''7)
         self._cooldown_until = t + WATCH_COOLDOWN[self.attempts - 1]
-        if outcome == "spawned_ok":
-            self._stable = WATCH_STABLE_RESET
+        if outcome in ("spawned_ok", "adopted"):
+            self._stable = WATCH_STABLE_RESET    # adopted=目標在跑(只是非自家子),穩定照走
 
     def _vote(self, kind, t):
         if kind is None or kind in ("http", "decode"):
@@ -583,6 +594,220 @@ class Watch:
             return "已停用(異常)"
 
 
+WATCH_LOG = "watchdog.log"
+LOCK_META_OFF = 1024
+
+
+def watch_tag(cfg):
+    """目標防指紋(sha1[:12],與 rmon cache 先例同構):鎖/halt 各掛 own target,
+    多目標各守各的對(日誌單檔共用 -- README 限界條款9)。"""
+    return hashlib.sha1(("%s:%s" % (cfg["host"], cfg["port"])).encode("utf-8")).hexdigest()[:12]
+
+
+def watch_paths(cfg):
+    d = rmon.state_dir()
+    tag = watch_tag(cfg)
+    return {"lock": os.path.join(d, "watch-%s.lock" % tag),
+            "halt": os.path.join(d, "watch-%s.halt" % tag),
+            "log": os.path.join(d, WATCH_LOG)}
+
+
+def _lock_acquire(path):
+    """值守單例鎖(D4'/條款3;語義三面全親測):seek(0) 鎖 byte0 用 LK_NBLCK
+    -- 非阻塞(拒采 LK_LOCK:病態探針未復現,且待機每拍重試制下非阻塞語意已足),
+    被搶 OSError(13) -> None。鎖到手才把元資料 pid 寫 offset 1024
+    (E1「先寫後鎖鎖錯位」陷阱:紀律 seek(0)->lock->seek(1024)->write,AST 鎖測罩)。
+    鎖區僅 1 byte:offset 1024 在鎖外,待機窗可直接讀「他窗值守 pid N」(探針 B)。
+    close 即 OS 自動釋放(探針 C'),故無殭屍清理器。"""
+    fd = None
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        os.lseek(fd, LOCK_META_OFF, os.SEEK_SET)
+        os.write(fd, ("%d" % os.getpid()).encode("ascii"))
+        return fd
+    except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)        # 沒鎖到=空手關檔,下拍重試乾淨
+            except OSError:
+                pass
+        return None
+
+
+def _lock_release(fd):
+    if fd is None:
+        return
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)   # 解鎖必回鎖點(探針 C:位點 1024 直接 UNLCK -> Errno13)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    try:
+        os.close(fd)                   # close 亦讓 OS 自動釋放,雙保險
+    except OSError:
+        pass
+
+
+def lock_owner_pid(path):
+    """待機詞「他窗值守 pid N」:讀 offset 1024(鎖區外,探針 B 實測可讀);
+    任何問題 -> None(footer 顯 'pid ?')。"""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_BINARY)
+        try:
+            os.lseek(fd, LOCK_META_OFF, os.SEEK_SET)
+            blob = os.read(fd, 16)
+        finally:
+            os.close(fd)
+        pid = int(blob.split()[0])
+        return pid if pid > 0 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def write_halt(cfg, pid):
+    """[K] 真殺成功 -> 停機意圖落檔(D5':無 TTL,只有成功 do_start 清)。
+    原子寫(比照 pidfile F-P2-5:值守每拍都在看這個檔)。"""
+    path = watch_paths(cfg)["halt"]
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"pid": int(pid), "ts": int(time.time()),
+                       "target": "%s:%s" % (cfg["host"], cfg["port"])}, fh)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def clear_halt(cfg):
+    """成功 do_start 清 halt(D5');清不動靜默 -- halt 是雙保險+意圖展示載體,
+    失敗不得反咬「啟動成功」主路徑(副作用路語意)。"""
+    try:
+        os.remove(watch_paths(cfg)["halt"])
+    except OSError:
+        pass
+
+
+WD_LOG_MAX = 256 * 1024
+WD_RETRY_EVERY = 16      # 降級態重試帽(條款4):每 16 拍贖一回,不逐拍撞牆
+
+
+class HostWatch:
+    """值守宿主(刀2):把 Watch 接到真檔案 -- 鎖(條款3:待機每拍重試、停用必釋鎖)、
+    halt(D5' 停機意圖)、watchdog.log(stderr+log 零 stdout;256KB os.replace 輪轉;
+    副作用路異常 -> 降級非停用,條款4 節流自癒),以及 spawn 縫接 do_start_core
+    (tally 出參分類,值守路徑永不 assume_yes D8''白文)。
+    rmon 只認 on_tick/cancel_pending 兩個方法(刀3 單鉤子),餘皆這裡私事。"""
+
+    def __init__(self, cfg, interval, out=None):
+        self.cfg = cfg
+        self.paths = watch_paths(cfg)
+        self.out = out if out is not None else sys.stderr
+        self.lock_fd = _lock_acquire(self.paths["lock"])
+        self.w = Watch(cfg, interval)
+        self.w.holds_lock = self.lock_fd is not None
+        self.w.halt_present = lambda: os.path.exists(self.paths["halt"])
+        self.w.other_lock_pid = lambda: lock_owner_pid(self.paths["lock"])
+        self.w.spawn = self._spawn
+        self.w.on_disable = self._on_disable
+        self._last_note = None
+        self._tick_no = 0
+        self._armed = False
+
+    def cancel_pending(self):
+        """等待拍間 q=使用者明確離上面板優先(D''1;刀3 接鍵)。"""
+        self.w.cancel_pending()
+
+    def _out(self, line):
+        try:
+            self.out.write(line + "\n")
+            self.out.flush()
+        except Exception:
+            pass                          # 通知流死不能拖垮決策路(面板要活著說話)
+
+    def _write_log(self, line):
+        path = self.paths["log"]
+        try:
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            if os.path.exists(path) and os.path.getsize(path) > WD_LOG_MAX:
+                # 必用 replace(D-P3-4:os.rename 遇既存 .old 在 Windows 拋錯 ->
+                # 第二次輪轉變自殺);.old 被 Notepad 佔 -> 本拍降級,稍後自癒
+                os.replace(path, path + ".old")
+            with open(path, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), line))
+            return True
+        except OSError:
+            return False                  # 副作用路:降級(條款4),絕不殺決策
+
+    def _notify(self, line):
+        self._out(line)
+        if not self._write_log(line):
+            self.w.log_broken = True
+
+    def _spawn(self):
+        tally = {}
+        rc = do_start_core(self.cfg, time.monotonic, assume_yes=False,
+                           emit=self._out, tally=tally)
+        outcome = tally.get("outcome", "failed")
+        if outcome in ("spawned_ok", "adopted", "already"):
+            return outcome, rc
+        return "failed", rc
+
+    def _on_disable(self):
+        _lock_release(self.lock_fd)       # 條款3:停用必釋鎖(活持鎖者停用餓死鏈堵點)
+        self.lock_fd = None
+        self.w.holds_lock = False
+        self._notify("值守已停用(決策路異常):鎖已釋放,其他窗可接手。")
+
+    def on_tick(self, kind):
+        self._tick_no += 1
+        if self.lock_fd is None:          # 待機窗每拍重試接手(條款3)
+            self.lock_fd = _lock_acquire(self.paths["lock"])
+            self.w.holds_lock = self.lock_fd is not None
+        if self.w.log_broken and self._tick_no % WD_RETRY_EVERY == 0:
+            if self._write_log("事件紀錄恢復"):
+                self.w.log_broken = False
+        note = self.w.on_tick(kind)
+        if not self._armed and self.w.holds_lock:
+            self._armed = True            # D9':首次武裝逃生門句(stderr+log 各一)
+            self._notify("窗開值守已武裝:只守 %s。不想值守:Set RMON_NO_WATCH=1 "
+                         "後重開窗(q→[G] 無效)。" % self.w.target)
+        if note != self._last_note:       # 狀態遷移才落一行(不逐拍刷 Noise)
+            if not self._write_log(note):
+                self.w.log_broken = True
+        self._last_note = note
+        return note
+
+
+def make_watch(cfg, interval):
+    """值守構造閘(arm 雙閘之一;觸發點另有自判,D'):None=本窗今夜無值守,面板照樣。
+    僅兩個理由:非 loopback(紅線)、RMON_NO_WATCH(逃生門,重開窗生效)。
+    構造本身炸(磁碟/權限)-> None + stderr 一句:值守可以缺席,面板必須說話(F1)。"""
+    if not rmon._is_loopback_host(cfg["host"]):
+        return None
+    flag = (os.environ.get("RMON_NO_WATCH") or "").strip().lower()
+    if flag not in ("", "0", "false", "no"):
+        return None
+    try:
+        return HostWatch(cfg, interval)
+    except Exception as exc:
+        try:
+            sys.stderr.write("值守無法武裝(棄權不重試,面板不受影響):%s\n" % exc)
+        except Exception:
+            pass
+        return None
+
+
 def do_stop(assume_yes=False):
     rec = read_pid()
     if rec is None:
@@ -621,6 +846,7 @@ def do_stop(assume_yes=False):
             break
     if not pid_alive(rec["pid"]):
         clear_pid()
+        write_halt(_cfg_or_default(), rec["pid"])   # D5':[K] 真殺成功=停機意圖落檔(無 TTL)
         print("已終端(pid %d)。" % rec["pid"])
         return 0
     print("連 /F 都殺不掉?查工作管理員。")
