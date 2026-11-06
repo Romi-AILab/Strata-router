@@ -25,7 +25,7 @@ import sys
 import time
 import unicodedata
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SCHEMA_KNOWN_MAX = (1, 2, 17)           # rmon 內建對照的 router schema 上限
 TERMS = ["sticky_hits", "new_placements", "migrations", "pinned", "last_resort",
          "overflow_placements", "overflow_rollbacks", "overflow_fizzles",
