@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import unittest
 
 try:                     # M2-A/P1-3:本套輸出大量 CJK(測詞、docstring、失敗 detail),
@@ -2280,6 +2281,137 @@ class TestWatchdogKnife2(unittest.TestCase):
             t[0] += 2.0
             w.on_tick(None)
         self.assertEqual(w.attempts, 0)
+
+
+class TestWatchdogKnife3(unittest.TestCase):
+    """刀3:do_live(watch=None) 單鉤子 + 值守態 footer byte-lock(框+追加兩路)。
+   比照 TestLiveFrameFlow 桩制:零 port、零真 console、零網路。"""
+
+    CFG = {"host": "-", "port": 0, "mode": "friend", "names": {}, "interval": 0.5}
+    FOOT_OFF = "q 離開 · r 立刻刷新 · 關窗就關窗(無值守承諾)"
+    HEAD = "q 離開 · r 立刻刷新 · 窗開值守:"
+    STATES = ["開", "重啟中1", "冷卻90s", "熔斷(q→[S])", "待機(他窗值守pid 4294967295)",
+              "只提醒(收編;端口空時q→[S]以殼參數重啟)", "手動停機", "已停用(異常)",
+              "事件紀錄:不可用"]
+
+    class FakeWatch:
+        def __init__(self, notes=None, raises=False):
+            self.notes = list(notes or ["開"])
+            self.kinds = []
+            self.cancelled = []
+            self.raises = raises
+
+        def on_tick(self, kind):
+            if self.raises:
+                raise RuntimeError("host boom")
+            self.kinds.append(kind)
+            return self.notes.pop(0) if self.notes else "開"
+
+        def cancel_pending(self):
+            self.cancelled.append(1)
+
+    def setUp(self):
+        self._old = {}
+        for name in ("_snapshot_state", "_term_size", "_live_wait", "_frame_probe"):
+            self._old[name] = getattr(rmon, name)
+        self._old_env = os.environ.get("RMON_NO_FRAME")
+        os.environ.pop("RMON_NO_FRAME", None)
+        rmon._snapshot_state = lambda cfg: ({"boxes": []}, None, None)
+        rmon._live_wait = lambda iv: "q"
+
+    def tearDown(self):
+        for name, val in self._old.items():
+            setattr(rmon, name, val)
+        if self._old_env is None:
+            os.environ.pop("RMON_NO_FRAME", None)
+        else:
+            os.environ["RMON_NO_FRAME"] = self._old_env
+
+    def _go(self, watch=None, probe=(False, False), size=(80, 24), waits=None,
+            snapshot=None, color=False):
+        rmon._frame_probe = lambda: probe
+        rmon._term_size = lambda: size
+        if snapshot is not None:
+            rmon._snapshot_state = snapshot
+        it = iter(waits or ["q"])
+        rmon._live_wait = lambda iv: next(it)
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = rmon.do_live(self.CFG, 0.5, color, watch=watch)
+        return rc, buf.getvalue(), err.getvalue()
+
+    def test_watch_none_both_paths_byte_identical(self):
+        # 未啟用逐字元教義:watch=None(含舊三參呼叫)兩條路一個位元不動
+        rc, out, err = self._go(watch=None)
+        expect = "".join(l + "\n" for l in
+                         rmon.render({"boxes": []}, self.CFG, color=False, dead=None))
+        expect += "\n" + self.FOOT_OFF + "\n"
+        self.assertEqual(out, expect)
+        rc, out, err = self._go(watch=None, probe=(True, True), size=(120, 40))
+        self.assertIn(self.FOOT_OFF, out)
+        self.assertNotIn(self.HEAD, out)
+
+    def test_watched_footer_append_path_exact(self):
+        rc, out, err = self._go(watch=self.FakeWatch(["開"]))
+        self.assertIn("\n" + self.HEAD + "開\n", out)
+        self.assertNotIn("關窗就關窗", out)          # 值守態不發無值守承諾
+
+    def test_watched_footer_frame_path_locked(self):
+        rc, out, err = self._go(watch=self.FakeWatch(["熔斷(q→[S])"]),
+                                probe=(True, True), size=(120, 40))
+        self.assertIn(self.HEAD + "熔斷(q→[S])", out)
+
+    def test_dead_kind_feeds_watch(self):
+        seq = [({"boxes": []}, None, None),
+               (None, rmon.Dead("refused", "x"), None)]
+        w = self.FakeWatch(["開", "開"])
+        rc, out, err = self._go(watch=w, waits=["", "q"], snapshot=lambda cfg: seq.pop(0))
+        self.assertEqual(w.kinds, [None, "refused"])     # 面板拍訊號=值守唯一探針(D7)
+
+    def test_watched_state_sequence_both_lines(self):
+        w = self.FakeWatch(["開", "重啟中1", "冷卻10s"])
+        rc, out, err = self._go(watch=w, waits=["", "", "q"])
+        for state in ("開", "重啟中1", "冷卻10s"):
+            self.assertIn("\n" + self.HEAD + state + "\n", out)
+        self.assertEqual(out.count(self.HEAD), 3)
+
+    def test_q_calls_cancel_pending(self):
+        w = self.FakeWatch()
+        rc, out, err = self._go(watch=w, waits=["q"])
+        self.assertEqual(w.cancelled, [1])               # 等待拍間 q=面板優先(D''1)
+        self.assertEqual(rc, 0)
+
+    def test_hook_exception_exits_watch_honestly(self):
+        w = self.FakeWatch(raises=True)
+        rc, out, err = self._go(watch=w, waits=["q"])
+        self.assertEqual(rc, 0)                          # 面板照跑(F1)
+        self.assertIn("值守鉤子異常", err)
+        self.assertIn(self.FOOT_OFF, out)                # footer 退回未值守承諾=如實
+        self.assertNotIn(self.HEAD, out)
+
+    def test_watched_footers_fit_80_display_cols(self):
+        def width(s):
+            wsum = 0
+            for ch in s:
+                wsum += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+            return wsum
+        for state in self.STATES:                        # 條款8 定稿詞全態:最長 <80
+            self.assertLessEqual(width(self.HEAD + state), 80, state)
+
+    def test_watch_duck_surface_ast(self):
+        """單鉤子紀律:rmon 對 watch 只准碰 on_tick/cancel_pending(刀2/刀4 換宿主
+        不換介面;源碼鎖,比照 frame 源碼鎖先例)。"""
+        src = open(os.path.join(rmon.my_dir(), "rmon.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "do_live")
+        touched = set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                    and n.value.id == "watch":
+                touched.add(n.attr)
+        self.assertTrue(touched <= {"on_tick", "cancel_pending"}, touched)
+        self.assertIn("on_tick", touched)
 
 
 if __name__ == "__main__":

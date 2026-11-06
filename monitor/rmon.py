@@ -879,10 +879,14 @@ def do_once(cfg, color):
     return 0 if dead is None else 2
 
 
-def do_live(cfg, interval, color):
+def do_live(cfg, interval, color, watch=None):
     """常駐面板。v0.2.0:VT 讀回確認的終端走「固定框原地重繪」;其餘環境逐字元
     回到 v0.1.4 追加(降級=最壞情況就是今天)。逃生門 `RMON_NO_FRAME=1`:能力
-    俱全也自願退回追加(含 v0.1.4 的每拍 2J 節奏)。"""
+    俱全也自願退回追加(含 v0.1.4 的每拍 2J 節奏)。
+    值守單鉤子(刀3,D3'/D''):watch=None(今日語意,footer 逐字元不動);非 None 時
+    每拍對面板快照訊號調 watch.on_tick(kind|None),回條并入 footer(框+追加兩路)。
+    rmon 對 watch 只認 on_tick/cancel_pending(源碼鎖罩);宿主爆炸只退出值守並誠實
+    宣告 -- 面板必须說話(F1),比照幀 fail-safe 的降級哲學。"""
     no_frame = bool(os.environ.get("RMON_NO_FRAME"))
     frame_on, vt_ok = _frame_probe()
     frame_on = frame_on and not no_frame
@@ -902,6 +906,17 @@ def do_live(cfg, interval, color):
     try:
         while True:
             model, dead, _ = _snapshot_state(cfg)
+            if watch is not None:
+                try:
+                    note = watch.on_tick(dead.kind if dead is not None else None)
+                except Exception:
+                    # rmon 側兜底(比照幀 fail-safe,D3'):宿主異常=值守退出並宣告,
+                    # 面板續跑;footer 自此退回未值守承諾(逐字元=如實,不裝還在守)
+                    _warn_stderr("(值守鉤子異常:值守就此退出,面板續跑;重開窗再武裝。)\n")
+                    watch = None
+                    foot = "q 離開 · r 立刻刷新 · 關窗就關窗(無值守承諾)"
+                else:
+                    foot = "q 離開 · r 立刻刷新 · 窗開值守:" + str(note)
             if frame_on:
                 cols, rows = _term_size()
                 L = render(model or {}, cfg, width=min(cols, 100), color=color, dead=dead)
@@ -934,6 +949,9 @@ def do_live(cfg, interval, color):
                 sys.stdout.write("\n" + foot + "\n")
                 sys.stdout.flush()
             if _live_wait(interval) == "q":
+                cancel = getattr(watch, "cancel_pending", None)
+                if cancel is not None:
+                    cancel()      # 等待拍間按 q=使用者離上面板優先(D''1 兩段式觸發)
                 return 0
     except KeyboardInterrupt:
         return 0

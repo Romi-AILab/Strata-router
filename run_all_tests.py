@@ -22,7 +22,7 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 203, rmon tests >= 157 (watchdog knife-2 era).
+Current floors: router smoke >= 203, rmon tests >= 166 (watchdog knife-3 era).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
 MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
-MIN_RMON = 157      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+MIN_RMON = 166      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
                     # + round-2 L2 locks 4 (EL-per-row, LF structure, no-2J-in-frame,
@@ -60,6 +60,11 @@ MIN_RMON = 157      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # log never stdout, os.replace rotation, blocked rotation
                     # degrades-not-disables + self-heal, tally mapping never
                     # assume_yes, adopted counts and stabilizes)
+                    # + watchdog knife-3 9 (do_live(watch=None) byte-identical both
+                    # paths, watched footer locked frame+append, Dead.kind feeds
+                    # watch, state sequence, q cancels pending, hook exception
+                    # exits watch honestly, 80-col footer width table, single-hook
+                    # duck surface AST lock)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.
