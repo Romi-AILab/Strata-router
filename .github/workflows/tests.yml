@@ -20,7 +20,10 @@ jobs:
       - run: python run_all_tests.py
   router-smoke:                      # the 3.8 floor lives on Windows; the matrix proves the version surface
     needs: gate-and-all
-    strategy: { fail-fast: false }
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.13"]      # quoted: YAML floats eat "3.10" forever after
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -29,13 +32,12 @@ jobs:
         with: { python-version: "${{ matrix.python }}" }
       - working-directory: router
         run: python smoke_test.py
-    matrix:
-      include:
-        - { python: "3.8" }
-        - { python: "3.13" }
   monitor-tests:                     # Windows-only by code reality (OSB/P1-2)
     needs: gate-and-all
-    strategy: { fail-fast: false }
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.13"]      # the only live proof of the 3.8-floor claim -- keep
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -44,10 +46,6 @@ jobs:
         with: { python-version: "${{ matrix.python }}" }
       - working-directory: monitor
         run: python tests_rmon.py
-    matrix:
-      include:
-        - { python: "3.8" }          # the only live proof of the 3.8-floor claim -- keep
-        - { python: "3.13" }
   linux-read-leg:                    # ubuntu leg: gate only, until smoke is proven on Linux/WSL once
     needs: gate-and-all
     runs-on: ubuntu-latest
