@@ -4,7 +4,8 @@
 > pure-stdlib passthrough proxy that steers Anthropic/OpenAI traffic across identical
 > local inference boxes (affinity first, least-queued second). `monitor/` is a
 > terminal-only live panel with a windowed watchdog. `router/` runs on any OS with
-> Python 3.8+; `monitor/` (`launch.py` + watchdog) is **Windows-only** — only the
+> Python 3.8+ (its smoke suite is certified on Windows; run it on yours to see);
+> `monitor/` (`launch.py` + watchdog) is **Windows-only** — only the
 > standalone `rmon.py` read-only panel runs elsewhere, untested there. One command
 > proves the repo: `python run_all_tests.py`. The red lines below are machine-enforced.
 
@@ -65,3 +66,7 @@ clone 後:`router/` 照
 `!-start.bat`(統一入口,委派 `monitor/launch.py go`;`monitor/!-start.bat` 保留,
 兩者等價)。兩包同一棵樹時面板自動找到 router;
 只要其中一包,複製那個子資料夾走也照常單獨運作。
+
+## 授權 (License)
+
+Apache License 2.0 —— 全文見 [LICENSE](LICENSE)。Copyright 2026 Romi-AILab。

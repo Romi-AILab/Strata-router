@@ -1893,6 +1893,22 @@ def main():
               "config file not found" in _cfgerr.lower()
               and "router.remote.example.json" in _cfgerr, _cfgerr[:200])
 
+        # OS-C/C-5: the same door had wider frames -- a directory, an empty
+        # file, or broken bytes died with a raw traceback (rc=1 but pre-bind,
+        # so INFO-grade; still the first thing a stranger typos). Unreadable
+        # must die BY NAME like the missing case: this check passes a
+        # directory as --config and forbids any traceback in the death.
+        try:
+            R.build_cfg(["--config", os.path.dirname(os.path.abspath(__file__))])
+            _cfgerr2 = ""
+        except SystemExit as _exc_cfg:
+            _cfgerr2 = str(_exc_cfg.code if _exc_cfg.code is not None else "")
+        except OSError as _exc_cfg:
+            _cfgerr2 = "OSError: %s" % _exc_cfg
+        check("an unreadable --config (a directory here) dies with a named error, never a traceback",
+              "config file not readable" in _cfgerr2.lower()
+              and "traceback" not in _cfgerr2.lower(), _cfgerr2[:200])
+
         # Review L1-3/L2: a PRISTINE placeholder config (global placeholder,
         # no keys file) already refuses boot with the NAMED placeholder error
         # -- the shared-fallback warning then piled a false "wrong key for a

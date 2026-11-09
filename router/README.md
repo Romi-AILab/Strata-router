@@ -24,8 +24,9 @@ the Store stub that opens the Store -- install Python from python.org (tick
 ## Start
 
 ```powershell
-# 0. no router.json yet? copy the shipped template first (it is git-ignored,
-#    so copying it out of the way of git is already solved), then edit it:
+# 0. no router.json yet? copy the shipped template first -- the destination
+#    router.json is the git-ignored one (the template itself is tracked), so
+#    the copy stays local by construction; then edit it:
 #    backends' ids/URLs, probe_model, prefixes -- real coordinates stay local
 copy router.remote.example.json router.json      # PowerShell; `cp` on POSIX
 
@@ -41,8 +42,15 @@ python router.py --config router.json
 ```
 
 A `--config` file that does not exist yet refuses to boot with a named error
-pointing back at this step -- or skip the file entirely with
-`--backend id=http://host:port` flags.
+pointing back at this step -- and so does one that cannot be a config (a
+directory, an empty or broken file, a JSON non-object): named error, no
+traceback. Or skip the file entirely with `--backend id=http://host:port`
+flags.
+
+One flag note before you grep this README for them: `--listen` and `--port`
+are `router.py`'s own bind overrides (config keys `listen`/`port`); `--host`
+appears later only as the **Strata box's** bind flag -- `router.py` has no
+`--host`.
 
 Run `--probe` before trusting any config -- and after the keys: on keyed
 boxes a keyless probe only proves the box can answer 401. The probe STREAMS,
@@ -581,7 +589,7 @@ the identity still closes over every request.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 203 checks; needs loopback
+python smoke_test.py     # 205 checks; needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the

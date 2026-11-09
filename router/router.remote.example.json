@@ -2,9 +2,9 @@
   "listen": "127.0.0.1",
   "port": 8088,
   "backends": [
-    { "id": "local", "url": "http://127.0.0.1:8081", "path_prefix": "", "probe_model": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
+    { "id": "local", "url": "http://127.0.0.1:8081", "path_prefix": "", "probe_model": "qwen3-8b-instruct-q4_k_m",
       "priority": 0, "max_inflight": 1, "require_idle": true, "backend_api_key": "REPLACE-WITH-THIS-BOX-KEY" },
-    { "id": "remote", "url": "http://peer-box.tsnet.invalid:8080", "path_prefix": "", "probe_model": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
+    { "id": "remote", "url": "http://peer-box.tsnet.invalid:8080", "path_prefix": "", "probe_model": "qwen3-8b-instruct-q4_k_m",
       "priority": 1, "max_inflight": 1, "require_idle": true, "backend_api_key": "REPLACE-WITH-PEER-BORROWER-KEY" }
   ],
   "path_prefix": "",

@@ -23,8 +23,9 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 204, rmon tests >= 203 (watchdog R2 fix-batch
-era; 204 adds the open-source L2 named-error lock for a missing --config).
+Current floors: router smoke >= 205, rmon tests >= 203 (watchdog R2 fix-batch
+era; 204 added the open-source named-error lock for a missing --config, 205
+the sibling lock for an unreadable one).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -42,8 +43,9 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
-MIN_SMOKE = 204     # router v1.2.17 era: 198 + five R6 regressions
+MIN_SMOKE = 205     # router v1.2.17 era: 198 + five R6 regressions
                     # + open-source L2: a missing --config must die by name
+                    # + open-source L2 round-2: so must an unreadable one
 MIN_RMON = 203      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)

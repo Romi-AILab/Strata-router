@@ -2342,13 +2342,27 @@ def build_cfg(argv):
     if a.config:
         try:
             with open(a.config, "r", encoding="utf-8") as fh:
-                cfg.update(json.load(fh))
+                loaded = json.load(fh)
+            if not isinstance(loaded, dict):
+                raise ValueError("top level must be a JSON object, not a %s"
+                                 % type(loaded).__name__)
+            cfg.update(loaded)
         except FileNotFoundError:
             raise SystemExit(
                 "config file not found: %s -- create it first (README 'Start' "
                 "step 0: copy router.remote.example.json to router.json and "
                 "edit it), or pass --backend id=URL flags instead of --config."
                 % a.config)
+        except (OSError, ValueError):
+            # the sibling frames of the same typo door (OS-C/C-5): every way
+            # a --config can fail to be a config dies BY NAME, pre-bind,
+            # traceback-free. OSError = a directory or an unreadable file
+            # (Windows raises PermissionError on open(directory)); ValueError
+            # = JSONDecodeError and UnicodeDecodeError.
+            raise SystemExit(
+                "config file not readable: %s -- it must be a UTF-8 JSON "
+                "object; start from router.remote.example.json (README "
+                "'Start' step 0)." % a.config)
     if a.backend:
         cfg["backends"] = parse_backend_specs(a.backend, a.path_prefix or cfg.get("path_prefix") or "")
     elif a.path_prefix:

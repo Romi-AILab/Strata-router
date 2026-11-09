@@ -52,6 +52,7 @@ EXPECTED_TRACKED = {
     ".gitattributes",
     ".gitignore",
     "README.md",
+    "LICENSE",              # Apache-2.0, signed Romi-AILab (owner call, 2026-11-09)
     "SECURITY.md",          # how to report, what the model already accepts (OS-B/P2-4)
     "CONTRIBUTING.md",
     "audit_package.py",
