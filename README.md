@@ -84,7 +84,8 @@ are git-ignored by design.
 ## How it works
 
 The router never invents a request body: it relays bytes and rewrites
-nothing except routing decisions. Each box is polled for its own queue depth
+nothing except routing decisions and an opt-in `--rewrite-model`.
+Each box is polled for its own queue depth
 (one cheap GET per second); affinity pins a session to the box it first hit,
 until the pin's TTL expires. Placement reads queue depth first, so an
 already-busy box never receives a second turn's worth of surprise. A box
@@ -103,8 +104,10 @@ Runs the packaging red-line gate (`audit_package.py`: whitelist set-equality,
 secret grep across worktree/index/HEAD, ignore assertions, `--selftest`
 canaries) then both suites, each held to a **minimum check count** — checks
 that silently vanish are worse than red tests, so fewer checks fails the
-run. Current floors: smoke **205**, rmon **203**. CI runs exactly these
-commands on Windows legs (Python 3.8 and 3.13 prove the floor claim).
+run. Current floors: smoke **205**, rmon **203**. CI runs these same gates
+and suites on Windows legs (the gate leg runs this very command on 3.13; the
+3.8/3.13 matrix legs run both suites directly — the live proof of the floor
+claim).
 
 ## Limitations (honest list)
 
