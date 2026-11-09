@@ -12,6 +12,18 @@ limiter. Needs **Python 3.8+**; on a fresh Windows 11 the `python` command is
 the Store stub that opens the Store -- install Python from python.org (tick
 *Add to PATH*) or type every command below as `py -3 router.py ...`.
 
+## Contents
+
+- [The design, in four rules](#the-design-in-four-rules)
+- [Start](#start)
+- [Configuration reference](#configuration-reference)
+- [Wire the clients](#wire-the-clients)
+- [Read this before you debug "it stopped after N minutes"](#read-this-before-you-debug-it-stopped-after-n-minutes)
+- [Ops](#ops)
+- [Tiered placement: local first, the peer only when it is verifiably idle](#tiered-placement-local-first-the-peer-only-when-it-is-verifiably-idle)
+- [Limits](#limits)
+- [Tests](#tests)
+
 ## The design, in four rules
 
 | # | Rule | Why |
@@ -49,8 +61,9 @@ flags.
 
 One flag note before you grep this README for them: `--listen` and `--port`
 are `router.py`'s own bind overrides (config keys `listen`/`port`); `--host`
-appears later only as the **Strata box's** bind flag -- `router.py` has no
-`--host`.
+and `--queue-timeout` appear later only as **Strata box** flags --
+`router.py` has neither (its closest knobs are `--read-timeout`, which never
+cancels a queued request, and `--connect-timeout`).
 
 Run `--probe` before trusting any config -- and after the keys: on keyed
 boxes a keyless probe only proves the box can answer 401. The probe STREAMS,
@@ -86,6 +99,42 @@ then cancels the in-slot turn within ~1 s and the parked one at its next beat
 re-asked (whether Claude Code retries a cut stream is its own retry policy --
 do not count on it). Affinity also lives in memory, so roughly half the live
 conversations re-read their prompt once on the new process.
+
+## Configuration reference
+
+Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
+`--config` takes any key below). Actions (`--set-key`, `--probe`,
+`--version`) do their job and exit.
+
+| Flag | Config key | Default | Meaning |
+|------|-----------|---------|---------|
+| `--config FILE` | — | — | JSON file with any keys below. |
+| `--backend ID=URL[,/prefix]` | `backends` | `[]` | One entry per box, repeat per box. |
+| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards. |
+| `--port N` | `port` | `8088` | The router's own port. |
+| `--path-prefix /P` | `path_prefix` | `""` | Prefix prepended to every backend path (e.g. `/anthropic`). |
+| `--keys-file FILE` | `keys_file` | `""` | Backend-id→key sidecar; defaults to `router.keys.json` next to `--config` (git-ignored). |
+| `--set-key ID` | — | — | Hidden prompt, DPAPI-stores that box's key, exits. |
+| `--probe` | — | — | Verdict table per box, exits. |
+| `--version` | — | — | Prints the version, exits. |
+| `--sticky-ttl SEC` | `sticky_ttl` | `21600` | How long a lane's pin survives before re-placement. |
+| `--connect-timeout SEC` | `connect_timeout` | `5.0` | Time to get a TCP connection to a box. |
+| `--read-timeout SEC` | `read_timeout` | `3600.0` (`0` = never) | Cap on waiting for response bytes; `0` never times out a request parked in a queue. |
+| `--max-connect-failures N` | `max_connect_failures` | `3` | Connect failures that park a box (busy never counts). |
+| `--down-backoff SEC` | `down_backoff` | `20.0` | How long a parked box stays parked. |
+| `--status-interval SEC` | `status_interval` | `1.0` | Queue-depth poll rate per box. |
+| `--max-body-mb N` | `max_body_mb` | `512` | Request body cap. |
+| `--rewrite-model FROM=TO` | `rewrite_model` | `{}` | The only body rewrite allowed; repeatable. |
+| `--no-expose-affinity` | `expose_affinity` (inverted) | `true` | Keep lane pins out of the status views. |
+| `--log-level LVL` | `log_level` | `INFO` | |
+
+Config-only keys (no flag): `sticky_max` (`20000`, pin-table cap),
+`status_timeout` (`3.0` s), `status_paths` (`["/v1/status", "/metrics"]`),
+`backend_api_key` (`""` per backend -- prefer `--set-key` over a key in the
+file), `control_token` (`""`, optional gate for `x-strata-pin` requests),
+`tls_insecure` (`False`, https backends only: skip cert verification).
+Tiering keys (`priority`, `max_inflight`, `require_idle`) live per backend --
+see *Tiered placement* below.
 
 ## Wire the clients
 
@@ -287,8 +336,8 @@ it is free), give each backend three extra keys:
 
 ```json
 "backends": [
-  { "id": "local",  "url": "http://127.0.0.1:8080",           "priority": 0, "max_inflight": 1, "require_idle": true },
-  { "id": "remote", "url": "http://peer-box.tsnet.invalid:8081", "priority": 1, "max_inflight": 1, "require_idle": true }
+  { "id": "local",  "url": "http://127.0.0.1:8081",           "priority": 0, "max_inflight": 1, "require_idle": true },
+  { "id": "remote", "url": "http://peer-box.tsnet.invalid:8080", "priority": 1, "max_inflight": 1, "require_idle": true }
 ]
 ```
 
@@ -410,8 +459,8 @@ re-stored byte-faithful).
 
 ```json
 "backends": [
-  { "id": "local",  "url": "http://127.0.0.1:8080",           "priority": 0, "max_inflight": 1, "require_idle": true, "backend_api_key": "OWN-BOX-KEY" },
-  { "id": "remote", "url": "http://peer-box.tsnet.invalid:8081", "priority": 1, "max_inflight": 1, "require_idle": true, "backend_api_key": "PEER-BORROWER-KEY" }
+  { "id": "local",  "url": "http://127.0.0.1:8081",           "priority": 0, "max_inflight": 1, "require_idle": true, "backend_api_key": "OWN-BOX-KEY" },
+  { "id": "remote", "url": "http://peer-box.tsnet.invalid:8080", "priority": 1, "max_inflight": 1, "require_idle": true, "backend_api_key": "PEER-BORROWER-KEY" }
 ]
 ```
 
