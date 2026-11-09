@@ -52,8 +52,13 @@ EXPECTED_TRACKED = {
     ".gitattributes",
     ".gitignore",
     "README.md",
+    "SECURITY.md",          # how to report, what the model already accepts (OS-B/P2-4)
+    "CONTRIBUTING.md",
     "audit_package.py",
     "run_all_tests.py",
+    ".github/pull_request_template.md",
+    ".github/ISSUE_TEMPLATE/problem-report.md",
+    ".github/workflows/tests.yml",   # CI runs exactly these gate commands
     "router/README.md",
     "router/router.py",
     "router/router.remote.example.json",
@@ -75,6 +80,8 @@ MUST_IGNORE = [
     "router/router.json",
     "router/router.keys.json",
     "router/router.keys.json.new.99999",
+    "router/router.keys.json.lock",   # --set-key byte-range lock sits next
+                                      # to the keyring (router.py path+".lock")
     "monitor/monitor.json",
     "router/router.log",
     "router/__pycache__/router.cpython-313.pyc",
@@ -119,13 +126,26 @@ _TSNET = re.compile(r"\.ts\.net", re.IGNORECASE)
 # pasted logs and config snippets. (Described, never spelled: any literal
 # form in this file's prose would trip this very scan.)
 _USERSDIR = re.compile(r"[A-Za-z]:[/\\]+Users[/\\]", re.IGNORECASE)
-# This development machine's identity must never ride the mirror. The
-# literals are split so the gate's OWN source cannot trip its own scanner
-# (adjacent string-literal concatenation happens at compile time -- the
-# compiled pattern is whole even though no single source line is). Note
-# (M2-A/N4): the same split hides the pattern from external plaintext
-# greps -- deliberate here, but keep it in mind when auditing this tool.
-_USER = re.compile(r"SH_" r"Yun|sheng" r"yun", re.IGNORECASE)
+# This development machine's identity must never ride the mirror -- but a
+# PUBLIC gate must not carry the owner's username in its own source either:
+# that is the very leak this gate hunts, and the old split-literal pattern
+# was hiding it from greps while sitting in plain sight for any reader
+# (open-source L2 / OSA-P2-1). Owner-side tripwires are injected from the
+# environment instead: set RMON_AUDIT_USER to a regex (a literal string
+# still works -- it falls back to a quoted match) and the scan grows one
+# more pattern; unset -- CI, friend mirrors -- the gate stays generic.
+# The generic machine-identity shape stays covered by _USERSDIR above.
+def _identity_patterns():
+    raw = os.environ.get("RMON_AUDIT_USER", "").strip()
+    if not raw:
+        return []
+    try:
+        return [("machine username (RMON_AUDIT_USER)",
+                 re.compile(raw, re.IGNORECASE))]
+    except re.error:
+        return [("machine username (RMON_AUDIT_USER, literal)",
+                 re.compile(re.escape(raw), re.IGNORECASE))]
+
 
 PATTERNS = [
     ("tailscale/CGNAT address", _TAILSCALE),
@@ -135,8 +155,7 @@ PATTERNS = [
     ("long hex token", _HEXLONG),
     ("tailscale magic-dns name", _TSNET),
     ("user-home path", _USERSDIR),
-    ("machine username", _USER),
-]
+] + _identity_patterns()
 
 FAILS = []
 
@@ -268,6 +287,29 @@ def run_selftest():
             fail("selftest: false positive on %s: %s" % (label, hits))
         else:
             ok("quiet: %s stays clean" % label)
+    # OSA-P2-1 wiring teeth: the owner-side identity tripwire is env-injected
+    # (never baked into this file), so the plumbing gets its own synthetic
+    # proof -- with a throwaway value set the pattern must come alive, and
+    # unset it must be absent: a generic mirror ships no owner fingerprint.
+    probe = "Zzz" + "7Ident"
+    saved = os.environ.pop("RMON_AUDIT_USER", None)
+    try:
+        os.environ["RMON_AUDIT_USER"] = probe
+        pats = _identity_patterns()
+        fired = any(pat.search("text " + probe + " here") for _lab, pat in pats)
+        if len(pats) == 1 and fired and "RMON_AUDIT_USER" in pats[0][0]:
+            ok("teeth: RMON_AUDIT_USER injection yields a live pattern")
+        else:
+            fail("selftest: RMON_AUDIT_USER identity wiring is dead")
+        os.environ.pop("RMON_AUDIT_USER", None)
+        if _identity_patterns():
+            fail("selftest: identity pattern exists with env unset -- the "
+                 "public mirror must stay generic")
+        else:
+            ok("quiet: no identity pattern without the env var")
+    finally:
+        if saved is not None:
+            os.environ["RMON_AUDIT_USER"] = saved
 
 
 def main(argv):

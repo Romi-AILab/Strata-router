@@ -50,7 +50,7 @@ import router as R  # noqa: E402  -- direct import for startup-validation unit c
 # RED LINE, and it is load-bearing: a router booted WITHOUT --config anchors
 # the keys-file default to the CURRENT DIRECTORY. Smoke may be launched from
 # anywhere (repo root, router/, any friend folder) and any of those cwds can
-# be a real deployment whose router.keys.json holds the real keys -- every
+# be a live deployment whose router.keys.json is its working keyring -- every
 # subprocess boot and every in-process apply_keys(cfg, None) below would
 # silently READ that file. Anchor all of it in a private temp dir first.
 # (Wording per M2-B/P3-3; the chdir itself is untouched and stays load-bearing.)
@@ -1574,15 +1574,25 @@ def main():
             # must move NOT ONE stream_error (the old code's own probes landed
             # in that branch; the new code can only land in the two abort
             # branches, neither of which charges the box).
+            # The probe rides "slow-stream" and waits for the first RELAYED
+            # byte before RST-ing (open-source fix batch): firing the RST
+            # right after sendall left "mid-relay" to the race, and a piped
+            # stdout (run_all_tests captures) shifts that race -- the storm
+            # then completed relays instead of aborting them and booked zero
+            # aborts. First byte in hand = the box answered AND the relay is
+            # live; the router's next write to the dead socket then fails by
+            # construction, in console AND pipe modes alike.
             _qb0 = stats(LIE_ROUTER)["backends"][0]["stats"]
             for _qi in range(25):
                 try:
                     _qc = socket.create_connection(("127.0.0.1", LIE_ROUTER), 5)
-                    _qjb = json.dumps({"model": "test-model",
+                    _qc.settimeout(10)
+                    _qjb = json.dumps({"model": "slow-stream",
                                        "messages": [{"role": "user", "content": "q2f1-%d" % _qi}]}).encode()
                     _qc.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
                                 b"content-type: application/json\r\ncontent-length: %d\r\n\r\n"
                                 % (LIE_ROUTER, len(_qjb)) + _qjb)
+                    _qc.recv(1)          # blocks till the relay is verifiably live
                     _qc.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                     _qc.close()          # RST while the answer is mid-relay
                 except OSError:
@@ -1867,6 +1877,21 @@ def main():
         except SystemExit:
             refused = True
         check("a bad config refuses to serve instead of silently failing open", refused)
+
+        # Open-source readiness L2 (OSB/P2-1): the stranger journey's FIRST
+        # command is `--config router.json`, typed before step 0 ever created
+        # that file. A raw FileNotFoundError wall must not be the project's
+        # introduction -- boot names the file and points at the example.
+        try:
+            R.build_cfg(["--config", "no-such-router-box.json"])
+            _cfgerr = ""
+        except SystemExit as _exc_cfg:
+            _cfgerr = str(_exc_cfg.code if _exc_cfg.code is not None else "")
+        except FileNotFoundError as _exc_cfg:
+            _cfgerr = "FileNotFoundError: %s" % _exc_cfg
+        check("a missing --config dies with a named error and the example hint",
+              "config file not found" in _cfgerr.lower()
+              and "router.remote.example.json" in _cfgerr, _cfgerr[:200])
 
         # Review L1-3/L2: a PRISTINE placeholder config (global placeholder,
         # no keys file) already refuses boot with the NAMED placeholder error

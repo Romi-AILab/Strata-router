@@ -1,0 +1,5 @@
+- [ ] `python run_all_tests.py` → ALL GREEN (state OS + `python -V`)
+- [ ] If files were added/removed: `EXPECTED_TRACKED` updated in this commit
+- [ ] Test floors unchanged, or deliberately lowered here with a reason
+- [ ] `python audit_package.py` clean (index AND HEAD views)
+- [ ] README promise text updated to match any behavior change

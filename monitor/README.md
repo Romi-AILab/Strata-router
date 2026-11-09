@@ -1,5 +1,9 @@
 # Strata Monitor(rmon v0.3.0)
 
+> (English: **Windows** terminal live panel + windowed watchdog for Strata-router.
+> Quick start: copy this folder anywhere, `copy monitor.json.example monitor.json`,
+> fill `host`/`port`, double-click `!-start.bat`. Full spec below; tests: `python tests_rmon.py`.)
+
 Strata router 的**一條龍終端**:雙擊啟動 → 服務自動上線 → **同一個視窗**即時顯示
 遠端閒不閒置、算力夠不夠、兩台混合每秒實際吐多少 token。體驗基準是 cc-switch /
 Strata 原生監控:**即時、無打擾、全在 terminal**;也不開網頁(v0.1.1 起 HTML 介面已整套移除)。
@@ -191,7 +195,7 @@ legacy cmd 用素色,要色加 `--color`(真的會開該終端的 VT 輸出位�
 本包對 `:8088` 與生產零假設:測試走 temp dir 與記憶體資料;**例外是金絲雀**
 (見下),其餘不佔任何 port。
 測試亦**不賴佈局**:把這個資料夾單獨拷到任何地方,`tests_rmon.py` 照全綠
-(M2-B/P2-1 修掉了唯一一條暗賴 monorepo `../router` 存在的測)。
+(曾有一條測暗賴 monorepo `../router` 存在,已修掉;現在套件的純拷貝實跑即證明)。
 
 - 值守的測試紅:`launch.py`+`rmon.py` 生產源**零** `assume_yes=True` 呼叫者
   (`do_start_core` 那個參數是測試縫,由源碼掃描鎖死);鎖紀律 `msvcrt.LK_NBLCK`/

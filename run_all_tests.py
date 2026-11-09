@@ -5,8 +5,9 @@
 Order matters: the gate SELFTEST first (a gate without teeth certifies
 nothing -- M2-A/P1-1), then the packaging red lines (they decide whether
 this repo may be pushed at all), then each package's own suite. Ports:
-only smoke_test.py binds fixed ports (9177-9199); tests_rmon.py is
-zero-port AND layout-free -- a plain copy of monitor/ alone must go green
+smoke_test.py binds fixed 9177-9199; tests_rmon.py stays inside loopback
+canary ports 9311-9318 (self-cleaning, never 9177-9199) and is layout-free
+-- a plain copy of monitor/ alone must go green
 (M2-B/P2-1 fixed the one test that leaned on the monorepo's ../router).
 
 FAIL-SAFE DOCTRINE (M2-A/P1-3, triggered once on this very machine's
@@ -22,7 +23,8 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 203, rmon tests >= 203 (watchdog R2 fix-batch era).
+Current floors: router smoke >= 204, rmon tests >= 203 (watchdog R2 fix-batch
+era; 204 adds the open-source L2 named-error lock for a missing --config).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -40,7 +42,8 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
-MIN_SMOKE = 203     # router v1.2.17 era: 198 + five R6 regressions
+MIN_SMOKE = 204     # router v1.2.17 era: 198 + five R6 regressions
+                    # + open-source L2: a missing --config must die by name
 MIN_RMON = 203      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
@@ -135,8 +138,26 @@ def run_suite(name, argv, cwd, pattern, floor, floor_word):
             verdict = ln
     tail = next((ln for ln in reversed(lines) if ln.strip()), "")   # old strip() semantics
     if r.returncode != 0:
-        FAILS.append("%s: exit %d (%s)" % (name, r.returncode, tail[:120]))
-        print("  FAIL  %s -- %s" % (name, tail[:200]))
+        # The old FAIL tail printed the literal last line of stdout+stderr --
+        # for smoke that is ALWAYS a benign _vsm refusal line while the real
+        # evidence (the "FAILED: label -- detail" lines on stdout) stayed
+        # captured and invisible: a red whose name is hidden certifies nothing
+        # (same doctrine as R2A/P3-5, now applied to the FAIL path too).
+        evi = [ln.strip() for ln in lines
+               if ln.strip().startswith("FAILED:") or ln.strip().startswith("FAIL: ")]
+        why = "; ".join(e[len("FAILED:") if e.startswith("FAILED:")
+                          else len("FAIL:"):].strip()[:150] for e in evi[:8])
+        FAILS.append("%s: exit %d (%s)" % (name, r.returncode, why or tail[:120]))
+        print("  FAIL  %s -- exit %d (%d red line(s) surfaced)" % (name, r.returncode, len(evi)))
+        for e in evi[:8]:
+            print("        " + e[:200])
+        if evi:
+            more = len(evi) - 8
+            if more > 0:
+                print("        ... %d more red line(s) above were trimmed" % more)
+        else:
+            print("        no FAILED/FAIL line parsed; tail:")
+            print("\n".join(("        " + ln) for ln in lines[-12:]))
         return
     if n < floor:
         FAILS.append("%s: RED LINE -- %d %s < floor %d (a suite silently shrank)"

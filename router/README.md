@@ -24,6 +24,11 @@ the Store stub that opens the Store -- install Python from python.org (tick
 ## Start
 
 ```powershell
+# 0. no router.json yet? copy the shipped template first (it is git-ignored,
+#    so copying it out of the way of git is already solved), then edit it:
+#    backends' ids/URLs, probe_model, prefixes -- real coordinates stay local
+copy router.remote.example.json router.json      # PowerShell; `cp` on POSIX
+
 # 1. on key-required boxes, fill the keys FIRST (hidden prompt, never echoed)
 python router.py --set-key local  --config router.json
 python router.py --set-key remote --config router.json   # the borrower key
@@ -34,6 +39,10 @@ python router.py --probe --config router.json
 # 3. run it
 python router.py --config router.json
 ```
+
+A `--config` file that does not exist yet refuses to boot with a named error
+pointing back at this step -- or skip the file entirely with
+`--backend id=http://host:port` flags.
 
 Run `--probe` before trusting any config -- and after the keys: on keyed
 boxes a keyless probe only proves the box can answer 401. The probe STREAMS,
@@ -302,7 +311,7 @@ What that gets you:
   ghost subtraction is directional too, and honestly bounded only per ghost:
   ONE aborted turn subtracts genuine foreign load for at most the grace
   window (~12 s), but a SUSTAINED ESC storm (aborts arriving faster than the
-  window drains -- stress P2 measured ~0.1-0.5/s as enough) keeps courtesy
+  window drains -- the pre-release stress round measured ~0.1-0.5/s as enough) keeps courtesy
   blind for as long as it keeps arriving. That storm can only ever hide the
   courtesy gate -- it cannot forge an idle verdict or exile a lane; briefly
   borrowing a busy friend during someone's kill-storm is the accepted cost of
@@ -311,7 +320,7 @@ What that gets you:
   The debt is booked only where it is owed: when the box ANSWERED and it was
   the router's own write to the caller that failed (a mid-relay RST lands
   there), the request is done on the box -- that books as an abort, never as
-  a timeout-shaped ghost-debt (v1.2.13, stress Q2).
+  a timeout-shaped ghost-debt (v1.2.13, pre-release stress round).
   The window has arithmetic to respect too: the subtraction only helps while
   the box still counts our corpse, so the real margin is
   `ghost_grace (~12 s) minus the box's keep-alive beat (~10 s)` -- change the
@@ -417,7 +426,9 @@ key. An existing plaintext file migrates itself on the next boot -- same
 entries, encrypted. A blob moved to another account or machine deliberately
 refuses to open: keys were never meant to travel), and `router.json` itself
 stays safe to show, edit or paste into an issue. Delete the file to wipe the
-keys.
+keys. Outside Windows there is no DPAPI: the keys file stays plaintext JSON
+there (still created `0600`) -- treat it as the secret it is, same red line:
+never git, never chat, never a cloud drive.
 Alternative ports: name an environment variable per backend
 (`"backend_api_key_env": "STRATA_KEY_REMOTE"` -- export it in a private window;
 `setx` echoes the key into the command line and stores it in the registry, so
@@ -559,7 +570,7 @@ the identity still closes over every request.
   one lane (same session scope + same stable prefix = same key). They are
   served correctly, just from one box -- and two interleaved conversations
   sharing one conversation cache re-read more than one conversation would.
-  One consequence to know (stress P2): the overflow re-home is keyed to the
+  One consequence to know (measured in the pre-release stress round): the overflow re-home is keyed to the
   lane, so when colliding conversations share a lane, ONE branch's overflow
   re-home moves the SHARED lane -- both conversations migrate together to the
   borrowed box, permanently (and can flip back if the homes alternate).
@@ -641,7 +652,7 @@ backend lock (probed by asking the lock from inside a patched log call);
 4096-cap evictions must tick `overflow_evictions`; a non-string keys-file
 value must be refused boot; and `--set-key` must rewrite atomically with
 untouched siblings byte-faithful.
-The 2x2 stress round (v1.2.12) adds the protocol edges the red team walked:
+The adversarial stress round (v1.2.12) adds the protocol edges that review walked:
 an absolute-form request target dies at a named 400 (never relayed into the
 box's request line); the rebinding 403 must REACH a 2 MB sender (the refusal
 survives a timed graceful drain instead of being eaten by a Windows RST);
@@ -660,7 +671,7 @@ with an identical prefix part ways); and the `last_resort` counter is honest
 in both directions -- a reservation race at a LIVE box books as
 placed+borrow, while a genuine all-down cooldown forwards (never rejects)
 and books the named `last_resort`.
-The round's second wave (v1.2.13, stress Q1+Q2) closed what the first wave
+The round's second wave (v1.2.13) closed what the first wave
 left open, and made the error taxonomy honest about WHO vanished: a reason
 phrase carrying CR/LF never reaches the caller's status line (the standard
 phrase relays instead -- a lying box's forged header riding the STATUS LINE,

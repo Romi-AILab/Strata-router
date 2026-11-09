@@ -1,0 +1,60 @@
+# CI runs exactly the commands this repo already uses to certify itself.
+# Ports: smoke binds fixed 9177-9199, the monitor canaries 9311-9318 -- safe
+# on ephemeral GitHub-hosted runners; do NOT point this workflow at a shared
+# or self-hosted runner (port collisions lie in both directions).
+name: tests
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions: { contents: read }
+jobs:
+  gate-and-all:                      # the repo's own one-command proof of OK
+    runs-on: windows-latest
+    timeout-minutes: 30              # smoke wall-time unmeasured on CI; tighten after first runs
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.13" }
+      - run: python audit_package.py --selftest
+      - run: python audit_package.py
+      - run: python run_all_tests.py
+  router-smoke:                      # the 3.8 floor lives on Windows; the matrix proves the version surface
+    needs: gate-and-all
+    strategy: { fail-fast: false }
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: "${{ matrix.python }}" }
+      - working-directory: router
+        run: python smoke_test.py
+    matrix:
+      include:
+        - { python: "3.8" }
+        - { python: "3.13" }
+  monitor-tests:                     # Windows-only by code reality (OSB/P1-2)
+    needs: gate-and-all
+    strategy: { fail-fast: false }
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: "${{ matrix.python }}" }
+      - working-directory: monitor
+        run: python tests_rmon.py
+    matrix:
+      include:
+        - { python: "3.8" }          # the only live proof of the 3.8-floor claim -- keep
+        - { python: "3.13" }
+  linux-read-leg:                    # ubuntu leg: gate only, until smoke is proven on Linux/WSL once
+    needs: gate-and-all
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.13" }
+      - run: python audit_package.py
+      # add here, once proven locally: a router smoke_test.py run on ubuntu

@@ -25,3 +25,20 @@ __pycache__/
 # ship monitor/monitor.json.example instead
 monitor.json
 rmon-cache-*.json
+
+# --- open-source hygiene (open-source L2 round-1) ---
+# the --set-key byte-range lock sits next to the keyring (router.py path+".lock");
+# rotated logs keep one .old generation; .env is the universal token honeypot.
+*.keys.json.lock
+*.log.old
+.env
+# state artifacts default to %LOCALAPPDATA% (outside the repo); an
+# RMON_STATE_DIR pointed into the checkout must not expose them either:
+router.pid.json*
+watch-*.lock
+watch-*.halt
+# local junk that must never meet `git add .`
+.venv/
+venv/
+.DS_Store
+Thumbs.db

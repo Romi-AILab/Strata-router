@@ -1,5 +1,13 @@
 # Strata —— router + monitor 單 repo 雙包
 
+> **TL;DR (English):** two sibling packages in one repo. `router/` is a single-file,
+> pure-stdlib passthrough proxy that steers Anthropic/OpenAI traffic across identical
+> local inference boxes (affinity first, least-queued second). `monitor/` is a
+> terminal-only live panel with a windowed watchdog. `router/` runs on any OS with
+> Python 3.8+; `monitor/` (`launch.py` + watchdog) is **Windows-only** — only the
+> standalone `rmon.py` read-only panel runs elsewhere, untested there. One command
+> proves the repo: `python run_all_tests.py`. The red lines below are machine-enforced.
+
 同一個 repo 裡的**兩個平級包裝**,仍是**兩支獨立程序、各自版本**:
 
 | 目錄 | 是什麼 | 版本來源 | 說明 |
@@ -28,7 +36,7 @@ python run_all_tests.py
 ## 資安紅線(整個 repo 的結構性約束)
 
 - **機器-local 永不進 git**:`router/router.json`(真實箱位)、`*.keys.json`
-  (DPAPI 金鑰)、`monitor/monitor.json`(監控目標座標)、`*.log`。
+  (DPAPI 金鑰,含 `*.keys.json.lock` 鎖檔)、`monitor/monitor.json`(監控目標座標)、`*.log`。
   `.gitignore` 把它們全擋,`audit_package.py` 每次驗「擋著的事實」。範本用
   `router/router.remote.example.json` 與 `monitor/monitor.json.example`。
 - 金鑰進出的唯一門是 `router/router.py --set-key`(DPAPI 加密落盤)。
@@ -42,11 +50,17 @@ python run_all_tests.py
 - monitor 升級:`monitor/rmon.py` 的 `VERSION` → tag `rmon-X.Y.Z`(`v*` 序列是 router 專用,
   兩包各自發車互不撞號);router 帳目終態增減時同步
   `rmon.py` 的 `TERMS` 與 `SCHEMA_KNOWN_MAX`(見 monitor README 的同步儀式)。
-- 合併前歷史完整保留(`git log --follow router/router.py` 追得回去)。
+- 歷史從這裡起算:兩包的歷史都從本樹內的初始 commit 開始(`git log --follow router/router.py`
+  從 `v1.2.13` 的初始 commit 追得回去;更早的獨立 repo 歷史不在此樹,版本/tag 序列本身連續)。
+- 修批標籤:L2 修訂批的 tag 在原版本 tag 後加 `-fixN`(`vX.Y.Z-fixN` / `rmon-X.Y.Z-fixN`),
+  不改 `VERSION` 常數——tag 凍結的是那段程式碼的快照,`VERSION` 是套件的發行版本。
 
 ## 給朋友(鏡像/自用)
 
-需要 Python 3.8+,純 stdlib。clone 後:`router/` 照
+需要 Python 3.8+,純 stdlib。**平台**:`router/` 跨 OS 可跑;`monitor/` 的
+一條龍與值守是 **Windows**(`launch.py` 依賴 Windows 控制台 API 與 DPAPI),
+POSIX 下只剩 `rmon.py` 單檔唯讀面板可跑(有 nt 守衛,但測試 suite 只在 Windows 背書)。
+clone 後:`router/` 照
 [router/README.md](router/README.md) 快速開始;整組一條龍就雙擊 repo 根目錄的
 `!-start.bat`(統一入口,委派 `monitor/launch.py go`;`monitor/!-start.bat` 保留,
 兩者等價)。兩包同一棵樹時面板自動找到 router;

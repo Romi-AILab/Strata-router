@@ -72,7 +72,7 @@ is the ceiling (see README.md).
 
 Usage
 -----
-    python router.py --backend a=http://127.0.0.1:8080 --backend b=http://192.168.1.24:8080
+    python router.py --backend a=http://127.0.0.1:8080 --backend b=http://192.0.2.24:8080
     python router.py --probe            # inspect each box, verify paths, exit
     python router.py --config router.json
 
@@ -2340,8 +2340,15 @@ def build_cfg(argv):
         raise SystemExit(0)     # file must not hide the version
     cfg = dict(DEFAULTS)
     if a.config:
-        with open(a.config, "r", encoding="utf-8") as fh:
-            cfg.update(json.load(fh))
+        try:
+            with open(a.config, "r", encoding="utf-8") as fh:
+                cfg.update(json.load(fh))
+        except FileNotFoundError:
+            raise SystemExit(
+                "config file not found: %s -- create it first (README 'Start' "
+                "step 0: copy router.remote.example.json to router.json and "
+                "edit it), or pass --backend id=URL flags instead of --config."
+                % a.config)
     if a.backend:
         cfg["backends"] = parse_backend_specs(a.backend, a.path_prefix or cfg.get("path_prefix") or "")
     elif a.path_prefix:
@@ -2768,7 +2775,7 @@ def make_pool(cfg):
     if not specs:
         raise SystemExit(
             "no backends configured. Example: python router.py "
-            "--backend a=http://127.0.0.1:8080 --backend b=http://192.168.1.24:8080"
+            "--backend a=http://127.0.0.1:8080 --backend b=http://192.0.2.24:8080"
         )
     backends = []
     for i, spec in enumerate(specs):
