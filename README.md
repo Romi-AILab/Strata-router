@@ -1,6 +1,7 @@
 # Strata
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![CI](https://github.com/Romi-AILab/Strata-router/actions/workflows/tests.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-stdlib--only-brightgreen)
 ![Router](https://img.shields.io/badge/router-cross--platform-green)
