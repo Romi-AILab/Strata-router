@@ -5,3 +5,6 @@
 # sources stay LF everywhere (their blobs already are).
 *.bat text eol=crlf
 *.py  text eol=lf
+# LICENSE's byte-exact claim is a release property (RR round-1/I2): the
+# canonical-text comparison must hold in every friend's worktree too.
+LICENSE text eol=lf

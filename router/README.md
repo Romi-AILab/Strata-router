@@ -82,7 +82,14 @@ so bind the box broadly (`--host 0.0.0.0`) and let the FIREWALL do the
 scoping -- open the serving port only to the peer's Tailscale IP:
 `New-NetFirewallRule -DisplayName "Strata peer" -Direction Inbound -Protocol TCP
 -LocalPort 8081 -RemoteAddress <peer-tailnet-IP> -InterfaceAlias Tailscale
--Action Allow -Profile Any` (use your Strata's port). When Strata first binds
+-Action Allow -Profile Any` (use your Strata's port). One port doctrine to
+pin before you mirror files between boxes: the `remote` URL carries the
+PEER's tailnet-serving port, which need not equal yours -- the shipped
+template deliberately assumes asymmetric boxes (local serves `8081`, the
+peer serves `8080`), so each side's firewall `-LocalPort` must match the
+port THAT box serves. Want a symmetric mirror (both boxes copy one file
+verbatim)? Make all three spots agree on ONE serving port: both `local`
+entries, both `remote` entries, and both firewall rules. When Strata first binds
 `0.0.0.0` Windows raises its allow/deny popup -- press **Cancel**: the popup's
 machine-wide allow rule is something a later scoped rule can never narrow (an
 Allow never scopes another Allow), so one curious click silently leaves the
