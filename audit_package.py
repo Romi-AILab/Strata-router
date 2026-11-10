@@ -55,6 +55,7 @@ EXPECTED_TRACKED = {
     "LICENSE",              # Apache-2.0, signed Romi-AILab (owner call, 2026-11-09)
     "SECURITY.md",          # how to report, what the model already accepts (OS-B/P2-4)
     "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",   # Contributor Covenant 2.1, canonical body; only delta = contact line filled with the private-advisory page (same channel as SECURITY.md)
     "audit_package.py",
     "run_all_tests.py",
     ".github/pull_request_template.md",
