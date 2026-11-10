@@ -1908,6 +1908,31 @@ def main():
               "with the value never echoed",
               _sent not in _sj and _sj.count("must be a JSON string") >= 2, _sj[:200])
 
+        # pre-1.2.18 round-2 (OS-O F-1 + adjudication reclass of F-3): a NON-STRING
+        # listen died AFTER a lying "listening on http://None" INFO with a raw
+        # gaierror traceback -- and int 0 collapses the rebinding guard's falsy
+        # branch back to loopback-name trust while glibc parses "0" as INADDR_ANY:
+        # the exact fail-open fix5 closed, re-opened on Linux via a JSON number.
+        _tparts = []
+        for _badln in (0, None, False):
+            _t = dict(R.DEFAULTS)
+            _t["listen"] = _badln
+            _t["backends"] = [{"id": "a", "url": "http://127.0.0.1:1", "priority": 0}]
+            _tparts += ["%s: %s" % pk for pk in R.validate_cfg(_t, R.make_pool(_t), strict=False)]
+        _tprob = " ".join(_tparts)
+        check("a non-string listen (0/null/false) is refused BY TYPE pre-bind -- no "
+              "bind-time traceback, no lying 'listening' INFO (probe side)",
+              _tprob.count("listen: must be a JSON string") >= 3, _tprob[:200])
+        try:
+            _t2 = dict(R.DEFAULTS)
+            _t2["listen"] = 0
+            _t2["backends"] = [{"id": "a", "url": "http://127.0.0.1:1", "priority": 0}]
+            R.validate_cfg(_t2, R.make_pool(_t2), strict=True)
+            _refused_t = False
+        except SystemExit:
+            _refused_t = True
+        check("strict boot refuses a non-string listen too (guard-collapse fail-open lock)", _refused_t)
+
         # Open-source readiness L2 (OSB/P2-1): the stranger journey's FIRST
         # command is `--config router.json`, typed before step 0 ever created
         # that file. A raw FileNotFoundError wall must not be the project's

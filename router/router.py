@@ -2952,16 +2952,27 @@ def validate_cfg(cfg, pool, strict=True):
     # comment says so). Fail closed by name instead of silently serving the world.
     # An ABSENT key means the DEFAULTS value -- build_cfg merges DEFAULTS before
     # calling -- so only an EXPLICIT empty listen is the fail-open this guard can't see.
-    _ln = str(cfg["listen"]) if "listen" in cfg else str(DEFAULTS["listen"])
-    if ":" in _ln:
-        problems.append(("listen", "must be an IPv4 address or hostname (this stdlib server is AF_INET "
-                                   "only, IPv6 cannot bind); use 127.0.0.1"))
-    if not _ln.strip():
-        problems.append(("listen", "must not be empty: an empty listen binds EVERY interface "
-                                   "(0.0.0.0) while the rebinding guard still trusts Host: "
-                                   "localhost, which any remote caller can send -- that leaves "
-                                   "an unauthenticated key-injecting port on the network; "
-                                   "write \"0.0.0.0\" deliberately to serve all interfaces"))
+    # pre-1.2.18 R2 (OS-O F-1/F-3): a non-string listen dies at the same door, BY TYPE
+    # NAME. Passed through, str() pretends, then bind gaierrors AFTER a lying
+    # "listening on http://None" INFO; int 0 is worse -- glibc parses "0" as
+    # INADDR_ANY (binds every interface on Linux) while the guard's falsy branch
+    # (str(0 or "")) still trusts Host: localhost: the family fix5 just closed.
+    _ln_raw = cfg.get("listen", DEFAULTS["listen"])
+    _ln = _ln_raw if isinstance(_ln_raw, str) else None
+    if _ln is None:
+        problems.append(("listen", "must be a JSON string, got %s -- it cannot name a bind "
+                                   "target; write \"127.0.0.1\", or \"0.0.0.0\" deliberately"
+                                   % (type(_ln_raw).__name__,)))
+    else:
+        if ":" in _ln:
+            problems.append(("listen", "must be an IPv4 address or hostname (this stdlib server is AF_INET "
+                                       "only, IPv6 cannot bind); use 127.0.0.1"))
+        if not _ln.strip():
+            problems.append(("listen", "must not be empty: an empty listen binds EVERY interface "
+                                       "(0.0.0.0) while the rebinding guard still trusts Host: "
+                                       "localhost, which any remote caller can send -- that leaves "
+                                       "an unauthenticated key-injecting port on the network; "
+                                       "write \"0.0.0.0\" deliberately to serve all interfaces"))
     sp = cfg.get("status_paths")
     if sp is not None and (not isinstance(sp, (list, tuple)) or not sp
                            or not all(isinstance(x, str) and x.startswith("/") for x in sp)):
@@ -2969,7 +2980,8 @@ def validate_cfg(cfg, pool, strict=True):
                                          "-- a bare string would poll one CHARACTER at a time" % (sp,)))
     # pre-1.2.18 M/TP-P2: the old `or "127.0.0.1"` made an empty listen look loopback and
     # muted this warning on the one value that binds everything -- empty warns too.
-    if _ln.strip() not in ("127.0.0.1", "localhost", "::1"):
+    # A non-string listen is refused above; it never gets a warning naming a phantom Host.
+    if _ln is not None and _ln.strip() not in ("127.0.0.1", "localhost", "::1"):
         LOG.warning(
             "listen=%s is NOT loopback: this router has no auth of its own and injects "
             "backend keys for callers that send none. Firewall this port to known peers now. "

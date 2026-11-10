@@ -23,10 +23,11 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 208 (204 added the open-source named-error
+Current floors: router smoke >= 210 (204 added the open-source named-error
 lock for a missing --config, 205 the sibling lock for an unreadable one,
 206-208 the fail-closed pair refusing an empty listen plus the never-echo
-lock for malformed inline keys -- pre-1.2.18 solo-review round-1),
+lock for malformed inline keys, 209-210 the same BY-TYPE door for a
+non-string listen -- pre-1.2.18 solo-review rounds 1-2),
 rmon tests >= 204 (watchdog R2 fix-batch era + the IO-encoding hygiene
 guard -- the first real-CI-red batch, cp1252 lesson).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
@@ -46,13 +47,17 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable or "python"
-MIN_SMOKE = 208     # router v1.2.17 era: 198 + five R6 regressions
+MIN_SMOKE = 210     # router v1.2.17 era: 198 + five R6 regressions
                     # + open-source L2: a missing --config must die by name
                     # + open-source L2 round-2: so must an unreadable one
                     # + pre-1.2.18 round-1: empty listen refused by name in
                     #   probe and strict (it bound 0.0.0.0 behind a guard that
                     #   trusts Host: localhost), and a malformed inline key
                     #   never echoes its value -- type name only
+                    # + pre-1.2.18 round-2: a non-string listen is refused BY
+                    #   TYPE pre-bind (int 0 re-opened the guard-collapse
+                    #   fail-open on glibc; null/false died in a traceback
+                    #   after a lying "listening" INFO)
 MIN_RMON = 204      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
