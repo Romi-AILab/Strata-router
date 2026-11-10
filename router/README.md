@@ -83,8 +83,10 @@ scoping -- open the serving port only to the peer's Tailscale IP:
 `New-NetFirewallRule -DisplayName "Strata peer" -Direction Inbound -Protocol TCP
 -LocalPort 8081 -RemoteAddress <peer-tailnet-IP> -InterfaceAlias Tailscale
 -Action Allow -Profile Any` (use your Strata's port). One port doctrine to
-pin before you mirror files between boxes: the `remote` URL carries the
-PEER's tailnet-serving port, which need not equal yours -- the shipped
+pin before you mirror files between boxes: each box's `local` entry
+declares its own serving port, and the `remote` URL carries the PEER's
+tailnet-serving port -- which need not equal yours, so your `remote` port
+must equal the port the peer's `local` entry declares. The shipped
 template deliberately assumes asymmetric boxes (local serves `8081`, the
 peer serves `8080`), so each side's firewall `-LocalPort` must match the
 port THAT box serves. Want a symmetric mirror (both boxes copy one file
@@ -433,8 +435,12 @@ What that gets you:
 
 ### Mirror deployment (two friends, two boxes, one shared file)
 
-The router carries no knowledge of which machine is "yours". Both sides run the
-same `router.py`; only `router.json` differs, by swapping priorities:
+The router carries no knowledge of which machine is "yours". Both sides run
+the same `router.py` and share ONE `router.json` template, filled in as
+mirror images -- each side declares its OWN box under `local` and the
+peer's under `remote`, with `local` at priority 0 on both boxes (the
+priorities never swap, the boxes do) and ports per the one-port doctrine
+above:
 
 * your side: `local = your Strata (priority 0)`, `remote = peer's Strata (priority 1)`
 * their side: `local = their Strata (priority 0)`, `remote = your Strata (priority 1)`

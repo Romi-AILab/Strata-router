@@ -171,8 +171,8 @@ Copyright 2026 Romi-AILab.
 - 金鑰進出的唯一門是 `router/router.py --set-key`(DPAPI 加密落盤)。
 - 朋友鏡像應得的檔案集合 = `audit_package.py` 的白名單,**集合等式**,不多不少。
 - **行尾**:`.gitattributes` 把 `!-start.bat` 鎖定為 checkout 必 CRLF(cmd 的
-  硬要求)、`.py` 必 LF——朋友拿到什麼形態是 repo 的性質,不取決於各人机器的
-  `core.autocrlf`。
+  硬要求)、`.py` 與 `LICENSE` 必 LF——朋友拿到什麼形態是 repo 的性質,不取決
+  於各人机器的 `core.autocrlf`。
 
 **版本與發行列車**:router 升級改 `router/router.py` 的 `VERSION` → tag
 `vX.Y.Z`;monitor 升級改 `monitor/rmon.py` 的 `VERSION` → tag `rmon-X.Y.Z`
