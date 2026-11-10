@@ -1878,6 +1878,36 @@ def main():
             refused = True
         check("a bad config refuses to serve instead of silently failing open", refused)
 
+        # pre-v1.2.18 round-1 face M (P2 + narrow TPs): an empty listen "" booted
+        # and bound EVERY interface (netstat-proven) while the rebinding guard
+        # went on trusting Host: localhost -- a silent fail-open on a router that
+        # injects keys; and a malformed-SHAPE inline key echoed its raw value
+        # into every problems sink (both boot branches, sentinel-proven). Both
+        # must die at the door: empty listen refused BY NAME, key values never
+        # echoed -- only the type name is safe to print for key-shaped fields.
+        _sent = "SENTINEL-KEY-SHAPE-9f13"
+        _empty = dict(R.DEFAULTS)
+        _empty["listen"] = ""
+        _empty["backends"] = [{"id": "a", "url": "http://127.0.0.1:1", "priority": 0}]
+        _eprob = " ".join("%s: %s" % pk for pk in R.validate_cfg(_empty, R.make_pool(_empty), strict=False))
+        check("an empty listen is refused BY NAME (a bare '' would bind every interface "
+              "behind a loopback-trusting guard)",
+              "listen" in _eprob and "interface" in _eprob.lower(), _eprob[:160])
+        try:
+            R.validate_cfg(_empty, R.make_pool(_empty), strict=True)
+            _refused_empty = False
+        except SystemExit:
+            _refused_empty = True
+        check("an empty listen alone refuses to serve in strict boot (fail-open lock)", _refused_empty)
+        _shape = dict(R.DEFAULTS)
+        _shape["backends"] = [{"id": "a", "url": "http://127.0.0.1:1", "priority": 0,
+                               "backend_api_key": [_sent]}]
+        _shape["control_token"] = {"nested": _sent}
+        _sj = " ".join("%s: %s" % pk for pk in R.validate_cfg(_shape, R.make_pool(_shape), strict=False))
+        check("a malformed-shape inline backend_api_key/control_token is refused BY TYPE "
+              "with the value never echoed",
+              _sent not in _sj and _sj.count("must be a JSON string") >= 2, _sj[:200])
+
         # Open-source readiness L2 (OSB/P2-1): the stranger journey's FIRST
         # command is `--config router.json`, typed before step 0 ever created
         # that file. A raw FileNotFoundError wall must not be the project's

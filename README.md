@@ -105,7 +105,7 @@ Runs the packaging red-line gate (`audit_package.py`: whitelist set-equality,
 secret grep across worktree/index/HEAD, ignore assertions, `--selftest`
 canaries) then both suites, each held to a **minimum check count** — checks
 that silently vanish are worse than red tests, so fewer checks fails the
-run. Current floors: smoke **205**, rmon **204**. CI runs these same gates
+run. Current floors: smoke **208**, rmon **204**. CI runs these same gates
 and suites on Windows legs (the gate leg runs this very command on 3.13; the
 3.8/3.13 matrix legs run both suites directly — the live proof of the floor
 claim).

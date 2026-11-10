@@ -2869,9 +2869,12 @@ def validate_cfg(cfg, pool, strict=True):
         if raw is not None and not isinstance(raw, str):
             # str() would boot `true`/123 as the WORKING key "True"/"123":
             # the keys file refused this shape since v1.2.11 -- the inline
-            # config door gets the same doctrine (stress P1/F8).
+            # config door gets the same doctrine (stress P1/F8). The VALUE
+            # is never echoed (pre-1.2.18 M/TP-P3): a key-shaped field may
+            # hold a real secret even when its shape is wrong.
             problems.append((b.id + ".backend_api_key",
-                             "must be a JSON string, got %r -- a non-string never boots, not even as a cast" % (raw,)))
+                             "must be a JSON string, got %s -- value not echoed; a non-string never boots, not even as a cast"
+                             % (type(raw).__name__,)))
         try:
             kb = b.api_key.encode("latin-1")
         except UnicodeEncodeError:
@@ -2904,8 +2907,10 @@ def validate_cfg(cfg, pool, strict=True):
     for _name in ("backend_api_key", "control_token"):
         _raw = cfg.get(_name)
         if _raw is not None and not isinstance(_raw, str):
-            # same inline-door doctrine as the per-backend key above (P1/F8)
-            problems.append((_name, "must be a JSON string, got %r -- a non-string never boots, not even as a cast" % (_raw,)))
+            # same inline-door doctrine as the per-backend key above (P1/F8);
+            # value never echoed -- see the M/TP-P3 note there
+            problems.append((_name, "must be a JSON string, got %s -- value not echoed; a non-string never boots, not even as a cast"
+                             % (type(_raw).__name__,)))
     _rules = cfg.get("rewrite_model") or {}
     if _rules and not isinstance(_rules, dict):
         problems.append(("rewrite_model", "must be an object of \"old model\": \"new model\" rules, got %r" % (_rules,)))
@@ -2941,21 +2946,36 @@ def validate_cfg(cfg, pool, strict=True):
     for k in cfg:
         if k not in DEFAULTS and not k.startswith("_"):
             LOG.warning("config: unknown top-level key %r is IGNORED", k)
-    if ":" in str(cfg.get("listen") or ""):
+    # pre-1.2.18 M/TP-P2: an empty listen binds EVERY interface (0.0.0.0) while the
+    # rebinding guard keeps trusting Host: localhost -- and any remote caller can send
+    # that header freely (loopback names prove nothing off-loopback, the guard's own
+    # comment says so). Fail closed by name instead of silently serving the world.
+    # An ABSENT key means the DEFAULTS value -- build_cfg merges DEFAULTS before
+    # calling -- so only an EXPLICIT empty listen is the fail-open this guard can't see.
+    _ln = str(cfg["listen"]) if "listen" in cfg else str(DEFAULTS["listen"])
+    if ":" in _ln:
         problems.append(("listen", "must be an IPv4 address or hostname (this stdlib server is AF_INET "
                                    "only, IPv6 cannot bind); use 127.0.0.1"))
+    if not _ln.strip():
+        problems.append(("listen", "must not be empty: an empty listen binds EVERY interface "
+                                   "(0.0.0.0) while the rebinding guard still trusts Host: "
+                                   "localhost, which any remote caller can send -- that leaves "
+                                   "an unauthenticated key-injecting port on the network; "
+                                   "write \"0.0.0.0\" deliberately to serve all interfaces"))
     sp = cfg.get("status_paths")
     if sp is not None and (not isinstance(sp, (list, tuple)) or not sp
                            or not all(isinstance(x, str) and x.startswith("/") for x in sp)):
         problems.append(("status_paths", "must be a non-empty list of paths starting with '/', got %r "
                                          "-- a bare string would poll one CHARACTER at a time" % (sp,)))
-    if str(cfg.get("listen") or "127.0.0.1") not in ("127.0.0.1", "localhost", "::1"):
+    # pre-1.2.18 M/TP-P2: the old `or "127.0.0.1"` made an empty listen look loopback and
+    # muted this warning on the one value that binds everything -- empty warns too.
+    if _ln.strip() not in ("127.0.0.1", "localhost", "::1"):
         LOG.warning(
             "listen=%s is NOT loopback: this router has no auth of its own and injects "
             "backend keys for callers that send none. Firewall this port to known peers now. "
             "The rebinding guard admits ONLY Host: %s (loopback names prove nothing off-loopback) "
             "-- and gate the control surface: --set-key control.",
-            cfg.get("listen"), cfg.get("listen"),
+            _ln, _ln,
         )
     if problems and strict:
         for k, why in problems:
