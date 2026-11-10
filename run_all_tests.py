@@ -23,9 +23,10 @@ shrink -- a check that silently vanished because a path moved or a file was
 a parse failure, or a count below the floor FAILS this runner. When a check
 is deliberately retired, lower the floor IN THE SAME COMMIT and say why.
 
-Current floors: router smoke >= 205, rmon tests >= 203 (watchdog R2 fix-batch
-era; 204 added the open-source named-error lock for a missing --config, 205
-the sibling lock for an unreadable one).
+Current floors: router smoke >= 205 (204 added the open-source named-error
+lock for a missing --config, 205 the sibling lock for an unreadable one),
+rmon tests >= 204 (watchdog R2 fix-batch era + the IO-encoding hygiene
+guard -- the first real-CI-red batch, cp1252 lesson).
 The root-entry check (0c) is not a suite: it guards the owner's double-click.
 """
 from __future__ import annotations
@@ -46,7 +47,7 @@ PY = sys.executable or "python"
 MIN_SMOKE = 205     # router v1.2.17 era: 198 + five R6 regressions
                     # + open-source L2: a missing --config must die by name
                     # + open-source L2 round-2: so must an unreadable one
-MIN_RMON = 203      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
+MIN_RMON = 204      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # + NO_COLOR 1 + round-1 L2 locks 5 (self-heal ESC[J, shrink
                     # clamp, VT-arbiter x2, 2J cadence; clip mid-cut rides an old test)
                     # + round-2 L2 locks 4 (EL-per-row, LF structure, no-2J-in-frame,
@@ -102,6 +103,10 @@ MIN_RMON = 203      # rmon v0.2.0 era: 96 + frame engine 8 + live frame flow 7
                     # stable legs, HostWatch->Watch wiring identity, already
                     # clears the streak but not the counts, sleep-gate boundary
                     # formula, restart + disable diagnostics reach stderr AND log)
+                    # + CI/cp1252 batch 1: AST guard that text-mode write opens
+                    # carrying non-ASCII literals must declare encoding= (the
+                    # stdout side was already fail-safed below; file encoding was
+                    # the half the console-codepage blind spot left open)
 
 # Children of this runner always emit UTF-8 (errors replaced), whatever the
 # console's codepage is -- see FAIL-SAFE DOCTRINE above.

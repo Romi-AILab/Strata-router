@@ -2823,7 +2823,7 @@ class TestWatchdogL2A(unittest.TestCase):
         def fake_popen(*a, **k):
             return _P()
         rpy = os.path.join(self.state, "router.py")
-        with open(rpy, "w") as fh:
+        with open(rpy, "w", encoding="utf-8") as fh:   # CI/cp1252: text writes declare encoding
             fh.write("# 存在即可(零執行)\n")
         self.setp(launch, "router_py", lambda: rpy)
         self.setp(launch, "router_dir", lambda: self.state)
@@ -3439,6 +3439,57 @@ class TestWatchdogR2A(unittest.TestCase):
         self.assertIn("延補: 手動停機", log)                     # D''4 累積重試帽
         self.assertIn("延補: 事件紀錄:不可用", log)
         self.assertNotIn("不可用", hw.on_tick(None))             # footer 隨即清乾淨
+
+
+class TestIOEncodingHygiene(unittest.TestCase):
+    # 第一次真 CI 紅(2026-11-09, run 42724079052):tests_rmon 以 text-mode
+    # open(..., "w") 寫 CJK 註解,未宣告 encoding -- 本機 UTF-8/Big5 控制台全綠,
+    # CI runner 的 ANSI codepage(cp1252)直接 UnicodeEncodeError。教訓:文字模式
+    # 寫入的編碼必須在源碼說清楚,不交給執行機心情。守門:同一 with 本體裡
+    # 「text-mode 寫入 open 無 encoding= 且 write 字面量含非 ASCII」= 違規。
+    def test_text_writes_declare_encoding(self):
+        def _ascii_only_write(body):
+            for stmt in body:
+                for sub in ast.walk(stmt):
+                    if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                            and sub.func.attr in ("write", "writelines")):
+                        for arg in sub.args:
+                            for c in ast.walk(arg):
+                                if (isinstance(c, ast.Constant) and isinstance(c.value, str)
+                                        and any(ord(ch) > 127 for ch in c.value)):
+                                    return False
+            return True
+
+        offenders = []
+        for fname in ("tests_rmon.py", "rmon.py", "launch.py"):
+            with open(os.path.join(HERE, fname), encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=fname)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.With):
+                    continue
+                bad = False
+                for item in node.items:
+                    ce = item.context_expr
+                    if not (isinstance(ce, ast.Call) and isinstance(ce.func, ast.Name)
+                            and ce.func.id == "open"):
+                        continue
+                    mode = "r"
+                    if len(ce.args) >= 2 and isinstance(ce.args[1], ast.Constant):
+                        mode = str(ce.args[1].value)
+                    has_enc = False
+                    for kw in ce.keywords:
+                        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                            mode = str(kw.value.value)
+                        elif kw.arg == "encoding":
+                            has_enc = True
+                    bad = (not has_enc and "b" not in mode
+                           and any(c in mode for c in "wa+"))
+                    if bad:
+                        break
+                if bad and not _ascii_only_write(node.body):
+                    offenders.append("%s:%d" % (fname, node.lineno))
+        self.assertEqual(offenders, [],
+                         "text-mode write open 無 encoding= 卻寫非 ASCII:%s" % offenders)
 
 
 if __name__ == "__main__":
