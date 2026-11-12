@@ -28,7 +28,7 @@ the Store stub that opens the Store -- install Python from python.org (tick
 
 | # | Rule | Why |
 |---|------|-----|
-| 1 | **Passthrough only.** Nothing parses the body except an optional `model` rewrite. | Translation is where thinking-block signatures, `tool_use`, `stop_reason`, `cache_control` and SSE event names break. |
+| 1 | **Passthrough only.** The body is forwarded unchanged -- the only rewrite is the opt-in `model` rename. The lane picker does *read* body fields (session scope + stable prefix) to pick a box, read-only: nothing it reads is changed or interpreted for forwarding. | Translation is where thinking-block signatures, `tool_use`, `stop_reason`, `cache_control` and SSE event names break. |
 | 2 | **Never returns 429, never queues here.** Requests go straight into the backend FIFO. | The queue must live next to the real slots. A second admission queue in a proxy only invents 429s and hides backpressure. |
 | 3 | **Affinity first, least-queued second.** Each conversation *lane* is pinned to one box; only brand-new lanes are placed, onto the shallowest queue. A pinned lane whose box is at capacity **overflows** to an open box and stays there. Optionally tiered (`priority` / `max_inflight` / `require_idle`): local first, a borrowed peer only while verifiably idle -- see *Tiered placement* below. | With `parallel` off, a box holds one conversation's cache. Round-robin makes every turn re-read its prompt on a cold box -- two boxes then become slower than one. |
 | 4 | **Health = connection failure only.** 429 / `queue_wait_timeout` / slow first byte / 5xx never eject a box. | Busy is not dead. Ejecting a box because it is loaded halves your capacity exactly when you need it. |
@@ -636,6 +636,20 @@ the identity still closes over every request.
   404s at the shim), and real Strata implements it natively, so this is a
   direct-wire (`ANTHROPIC_BASE_URL` at the router) rescue for non-Strata
   backends.
+* **Anthropic-hosted server tools (the search / fetch / code-execution
+  family -- the Messages API tool reference's `Execution` column is the
+  authority on which tools qualify) run on Anthropic's infrastructure, not
+  in a relay.** If such a tool definition reaches this router it is relayed
+  like any other field (Rule 1); no local box executes it, and none can be
+  made to: on a chain with no Anthropic-family endpoint, hosted search has
+  nowhere to be restored. Reach honesty, same shape as `count_tokens` just
+  above: a converting shim upstream can drop or rewrite these definitions
+  before they get here -- so a built-in web search that silently answers
+  nothing lost its tool before this router ever saw it. Where the
+  capability actually lives: a client-executed search tool (e.g. a local
+  web-search MCP server), or disabling the built-in search for that
+  provider so the model stops calling a tool nobody runs. Full verdict and
+  evidence: [DECISIONS.md](../DECISIONS.md).
 * Two branches of one session whose FIRST message is textually identical share
   one lane (same session scope + same stable prefix = same key). They are
   served correctly, just from one box -- and two interleaved conversations

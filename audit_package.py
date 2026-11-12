@@ -56,6 +56,7 @@ EXPECTED_TRACKED = {
     "SECURITY.md",          # how to report, what the model already accepts (OS-B/P2-4)
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",   # Contributor Covenant 2.1, canonical body; only delta = contact line filled with the private-advisory page (same channel as SECURITY.md)
+    "DECISIONS.md",         # research verdicts that close a question for good (v1.2.18: hosted web search = no in-router recovery); prose-only, gate-scanned like every tracked file
     "audit_package.py",
     "run_all_tests.py",
     ".github/pull_request_template.md",
