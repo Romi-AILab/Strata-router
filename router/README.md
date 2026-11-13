@@ -280,6 +280,13 @@ reveal box endpoints and metrics to every local process, so treat
 Per-request response headers say what happened: `x-strata-backend`,
 `x-strata-affinity`, `x-strata-placement` (`sticky` / `placed` / `overflow` /
 `migrated` / `pinned` / `last_resort`). `--no-expose-affinity` hides them.
+With `smart.smart_preview` on, a `/v1/messages/count_tokens` preview still
+answers from a real box and reports one of those same words byte-for-byte --
+but a preview is not a conversation turn: it never writes the lane's home,
+never overflows or re-homes it, and it books the `preview_passes` terminal
+instead of `sticky_hits`/`new_placements`/`migrations`. With the flag off a
+preview behaves exactly as it always has; `x-strata-pin` on a preview is an
+operator command and keeps the full pin behavior.
 
 The router injects your backend keys for callers that send none, so it knows
 its callers: it answers only requests whose `Host` is a loopback name (or the
@@ -583,11 +590,15 @@ from `/stats` alone even after an operator touched a lane; the one other way
 the ledger can lag is LRU-evicting pending overflow tokens past 4096 concurrent
 parked re-homes, a flood shape this deployment cannot reach without first
 exhausting its threads -- and since v1.2.11 even that is COUNTED
-(`overflow_evictions`, and a non-zero value there is worth an eyeball), so a counter that stops
-explaining requests is itself the alarm. Since v1.2.16 keyless GET/HEAD proxies
+(`overflow_evictions`). The identity is arithmetic, not prose to trust: compute
+`requests` minus the sum of the terminal counters, and any leftover -- whoever
+made it -- is the alarm. Since v1.2.16 keyless GET/HEAD proxies
 (monitor probes at `/v1/models` and friends) book their own terminal
-`passthrough_gets` -- `new_placements` counts real new conversations only, and
-the identity still closes over every request.
+`passthrough_gets` -- `new_placements` counts real new conversations only.
+And since `smart.smart_preview`, the sum has a twelfth term, `preview_passes`
+-- a preview answers from a real box and pays its own terminal instead of
+placing; the counter stays zero while the flag sleeps, so the formula's shape
+never changed, only grew a term.
 
 ## Limits
 

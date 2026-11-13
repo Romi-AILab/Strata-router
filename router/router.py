@@ -657,6 +657,7 @@ class Pool:
         self.smart_cap_read = bool(self.sm_cfg.get("smart_cap_read"))
         self.smart_shadow = bool(self.sm_cfg.get("smart_shadow"))
         self.smart_place = bool(self.sm_cfg.get("smart_place"))
+        self.smart_preview = bool(self.sm_cfg.get("smart_preview"))
         # lane + shadow bookkeeping (S2 state list): ALL in-memory, ALL
         # restart-zero (D13: losing samples only delays the shipping gate --
         # zero safety loss, and nothing re-derives identity from it)
@@ -1081,7 +1082,7 @@ class Pool:
             return len(dead)
 
     # ---- selection --------------------------------------------------------
-    def pick(self, affinity_key, pin=None, passthrough=False, body_len=0):
+    def pick(self, affinity_key, pin=None, passthrough=False, body_len=0, preview=False):
         """Return (backend, reason, reserved, overflow_token). Never returns
         None: queueing beats failing. `reserved` is False only on the
         last-resort forward, where the cooldown refused the slot but we send
@@ -1098,9 +1099,17 @@ class Pool:
         runs there" -- but it does NOT override require_idle: a borrowed peer's
         courtesy is not the operator's to waive. An unknown or unavailable pin
         falls back to normal placement instead of failing the task.
+
+        preview: a /v1/messages/count_tokens request. With smart_preview ON it
+        answers from a real box and reports its placement byte-for-byte, but
+        it is NOT a conversation turn: no home written, no exile, no overflow
+        stash, no lane roll -- it books preview_passes, its own terminal,
+        instead of sticky_hits/new_placements/migrations (S7). A pin on a
+        preview is an operator command and keeps today's full pin behavior.
         """
         with self.lock:
             self.metrics["requests"] += 1
+        _pv = preview and self.smart_preview
 
         if pin:
             want = self.by_id.get(pin)
@@ -1124,16 +1133,22 @@ class Pool:
             want = self._affinity_get(affinity_key)
             home = self.by_id.get(want) if want else None
             if home is not None and home.take_sticky():
-                with self.lock:
-                    self.metrics["sticky_hits"] += 1
-                if self.smart_shadow and affinity_key:
-                    # L2: the mover's question, asked observationally --
-                    # records samples, changes NOTHING about this request
-                    try:
-                        self._shadow_note_turn(affinity_key, home, body_len)
-                    except Exception:
-                        LOG.debug("shadow decision failed for %s -- serving continues",
-                                  short(affinity_key), exc_info=True)
+                if _pv:
+                    # the lane is home, the preview just passes through it --
+                    # not a turn: no sticky tick, no shadow roll (S7)
+                    with self.lock:
+                        self.metrics["preview_passes"] += 1
+                else:
+                    with self.lock:
+                        self.metrics["sticky_hits"] += 1
+                    if self.smart_shadow and affinity_key:
+                        # L2: the mover's question, asked observationally --
+                        # records samples, changes NOTHING about this request
+                        try:
+                            self._shadow_note_turn(affinity_key, home, body_len)
+                        except Exception:
+                            LOG.debug("shadow decision failed for %s -- serving continues",
+                                      short(affinity_key), exc_info=True)
                 return home, "sticky", True, None
 
         if home is not None:
@@ -1151,31 +1166,36 @@ class Pool:
                 # re-home is NOT committed until the target answers (see
                 # overflow_commit/rollback -- a dead-but-fresh peer must not
                 # steal the lane with a 502).
-                alt, reserved = self._place(exclude={home.id}, no_trial=True,
-                                            body_len=body_len, r_hat=self._r_hat_for(affinity_key))
-                if alt is home:
-                    # single-box pool whose gate re-opened in the microsecond
-                    # since take_sticky refused: that IS the sticky take.
-                    if reserved:
+                # A preview never overflows a lane: tokenizing warms no cache,
+                # and no token count may be the event that exiles a
+                # conversation (S7 -- the same doctrine :2336 already applies
+                # to the commit side). Its answer just queues at home.
+                if not _pv:
+                    alt, reserved = self._place(exclude={home.id}, no_trial=True,
+                                                body_len=body_len, r_hat=self._r_hat_for(affinity_key))
+                    if alt is home:
+                        # single-box pool whose gate re-opened in the microsecond
+                        # since take_sticky refused: that IS the sticky take.
+                        if reserved:
+                            with self.lock:
+                                self.metrics["sticky_hits"] += 1
+                            return home, "sticky", True, None
+                    if alt is not None and reserved:
                         with self.lock:
-                            self.metrics["sticky_hits"] += 1
-                        return home, "sticky", True, None
-                if alt is not None and reserved:
-                    with self.lock:
-                        self._overflow_token += 1
-                        token = self._overflow_token
-                        self._stash_pending(token, (affinity_key, home.id, alt.id))
-                    LOG.info("lane %s overflow %s -> %s (home at capacity/gate closed; re-home on first byte)",
-                             short(affinity_key), home.id, alt.id)
-                    return alt, "overflow", True, token
-                # nowhere else takes it either: home's FIFO still beats a cold
-                # peer or a failure (rule 2 -- the gate redirects, never rejects)
+                            self._overflow_token += 1
+                            token = self._overflow_token
+                            self._stash_pending(token, (affinity_key, home.id, alt.id))
+                        LOG.info("lane %s overflow %s -> %s (home at capacity/gate closed; re-home on first byte)",
+                                 short(affinity_key), home.id, alt.id)
+                        return alt, "overflow", True, token
+                    # nowhere else takes it either: home's FIFO still beats a cold
+                    # peer or a failure (rule 2 -- the gate redirects, never rejects)
                 if home.begin():
                     self._note_gate_bypass(home)   # queueing at a home whose
                     # own require_idle gate is closed is exactly the borrowed
                     # work the metric exists to reveal -- never invisible
                     with self.lock:
-                        self.metrics["sticky_hits"] += 1
+                        self.metrics["preview_passes" if _pv else "sticky_hits"] += 1
                     return home, "sticky", True, None
                 # raced into DOWN between the two attempts: fall through to
                 # the migration path below
@@ -1190,15 +1210,18 @@ class Pool:
                     self._note_gate_bypass(alt)
             if alt is not None and reserved:
                 with self.lock:
-                    self.metrics["migrations"] += 1
-                with home.lock:
-                    home.stats["migrations_from"] += 1
-                dropped = self._affinity_drop_backend(home.id)
-                LOG.warning(
-                    "affinity %s migrating %s -> %s (dropped %d keys); one cold prompt re-read expected",
-                    short(affinity_key), home.id, alt.id, dropped,
-                )
-                self._affinity_put(affinity_key, alt.id, "sticky")
+                    self.metrics["preview_passes" if _pv else "migrations"] += 1
+                if not _pv:
+                    # a preview may not re-home a lane, drop its home or
+                    # count a migration -- the conversation was never here (S7)
+                    with home.lock:
+                        home.stats["migrations_from"] += 1
+                    dropped = self._affinity_drop_backend(home.id)
+                    LOG.warning(
+                        "affinity %s migrating %s -> %s (dropped %d keys); one cold prompt re-read expected",
+                        short(affinity_key), home.id, alt.id, dropped,
+                    )
+                    self._affinity_put(affinity_key, alt.id, "sticky")
                 return alt, "migrated", True, None
         else:
             # New conversation: put it on the shallowest ACCEPTING queue and
@@ -1211,10 +1234,13 @@ class Pool:
                 if reserved:
                     self._note_gate_bypass(alt)
             if alt is not None and reserved:
-                if affinity_key:
+                if affinity_key and not _pv:
                     self._affinity_put(affinity_key, alt.id, "sticky")
                 with self.lock:
-                    self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
+                    if _pv:
+                        self.metrics["preview_passes"] += 1
+                    else:
+                        self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
                 return alt, "placed", True, None
 
         # Every reservation path lost the race or was refused. Give each
@@ -1247,8 +1273,11 @@ class Pool:
                 # either way; the ledger sum is untouched.
                 self._note_gate_bypass(be)
                 with self.lock:
-                    self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
-                if affinity_key:
+                    if _pv:
+                        self.metrics["preview_passes"] += 1
+                    else:
+                        self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
+                if affinity_key and not _pv:
                     self._affinity_put(affinity_key, be.id, "sticky")   # "placed" means homed
                 LOG.info("new placement found every gate closed mid-race; queued at live %s", be.id)
                 return be, "placed", True, None
@@ -2259,14 +2288,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"error": {"message": "strata-router: x-strata-pin refused -- control token required (x-strata-control)"}})
             self.close_connection = True
             return
+        is_count_tokens = bare.endswith(COUNT_TOKENS_SUFFIX)
         backend, reason, reserved, ovf_token = self.pool.pick(
             key, pin=pin, passthrough=(key is None and method in ("GET", "HEAD")),
-            body_len=len(body or b""))
+            body_len=len(body or b""), preview=is_count_tokens)
         was_overflow = reason == "overflow"   # its pending entry must settle EXACTLY once
         # before this request ends: commit (it answered), rollback (target died
         # pre-send) or fizzle (ended any other way). ovf_settled tracks that.
         ovf_settled = False
-        is_count_tokens = bare.endswith(COUNT_TOKENS_SUFFIX)
 
         started = time.monotonic()
         ttfb = None

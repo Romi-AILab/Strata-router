@@ -2531,8 +2531,8 @@ def main():
                                           "pinned", "last_resort", "overflow_placements",
                                           "overflow_rollbacks", "overflow_fizzles",
                                           "overflow_evictions", "operator_cancelled",
-                                          "passthrough_gets"))
-        check("v1.2.16: the closed identity holds over all 11 terminals (requests == SUM)",
+                                          "passthrough_gets", "preview_passes"))
+        check("v1.2.16: the closed identity holds over all 12 terminals (requests == SUM; preview_passes is 0 with the flag off)",
               _tt == _mm["requests"], "requests=%s terminals=%s" % (_mm["requests"], _tt))
 
         _pc = {"model": "test-model", "max_tokens": 16,
@@ -3209,8 +3209,9 @@ def main():
         print("")
         print("S5) smart L3 -- placement walks J inside the tier; ties keep today's floor (S3)")
 
-        def _ube(bid, serving=0.0, tbar=100.0, mi=8, cap=None, debt=0):
-            b = R.Backend(bid, "http://127.0.0.1:9", cfg={"max_inflight": mi})
+        def _ube(bid, serving=0.0, tbar=100.0, mi=8, cap=None, debt=0, ri=False):
+            b = R.Backend(bid, "http://127.0.0.1:9",
+                          cfg={"max_inflight": mi, "require_idle": ri})
             b.ever_reported = True
             b.reported = {"serving": serving, "queued": 0.0}
             b.status_ts = time.monotonic()
@@ -3308,6 +3309,88 @@ def main():
                 _proc_s1.terminate()
             _sp_a.kill()
             _sp_b.kill()
+        # ---- smart placement C6: L4 smart_preview -- a preview passes, it never homes ----
+        print("")
+        print("S6) smart L4 -- the preview ledger tells the truth (preview_passes, §7)")
+        _pvA, _pvB = _ube("VA"), _ube("VB")
+        _pvp = R.Pool([_pvA, _pvB], {"smart": {"smart_preview": True}})
+        _pvp._affinity_put("lane-a", "VA", "sticky")
+        _b, _rs, _res, _tk = _pvp.pick("lane-a", preview=True)
+        check("S6: preview at a homed lane routes home, ticks ZERO sticky_hits -- preview_passes pays instead (§7)",
+              _rs == "sticky" and _b.id == "VA" and _pvp.metrics["sticky_hits"] == 0
+              and _pvp.metrics["preview_passes"] == 1, "%s pv=%s" % (_rs, _pvp.metrics["preview_passes"]))
+        _b2, _rs2, _res2, _ = _pvp.pick("lane-fresh", preview=True)
+        check("S6: preview finds a box but writes NO home and ticks no new_placements -- 跳寫家",
+              _res2 and _pvp._affinity_get("lane-fresh") is None
+              and _pvp.metrics["new_placements"] == 0 and _pvp.metrics["preview_passes"] == 2,
+              "%s res=%s row=%s" % (_rs2, _res2, _pvp._affinity_get("lane-fresh")))
+        _pvA.state = R.DOWN
+        _b3, _rs3, _, _ = _pvp.pick("lane-a", preview=True)
+        check("S6: preview at a DEAD home exiles nothing -- the lane keeps its row, no drop, no migrations tick",
+              _pvA.state == R.DOWN and _pvp._affinity_get("lane-a") == "VA"
+              and _pvp.metrics["migrations"] == 0 and _pvp.metrics["preview_passes"] == 3,
+              "row=%s mig=%s" % (_pvp._affinity_get("lane-a"), _pvp.metrics["migrations"]))
+        _pvo = R.Pool([_ube("HO", serving=1.0, ri=True), _ube("HO2")], {"smart": {"smart_preview": True}})
+        _pvo._affinity_put("lane-o", "HO", "sticky")
+        _b4, _rs4, _, _tk4 = _pvo.pick("lane-o", preview=True)
+        check("S6: a preview NEVER overflows a lane -- no provisional re-home stashed, a token count exiles nobody",
+              _tk4 is None and len(_pvo._overflow_pending) == 0 and _pvo._affinity_get("lane-o") == "HO",
+              "tk=%s pend=%s" % (_tk4, len(_pvo._overflow_pending)))
+        _pvs = R.Pool([_pvsh := _ube("SH", serving=8.0, cap=8), _ube("ST")],
+                      {"smart": {"smart_shadow": True, "smart_preview": True, "kappa_hat": 0.01}})
+        _pvsh.sm["cong_streak"] = 2
+        _pvs._affinity_put("lane-s", "SH", "sticky")
+        _pvs.pick("lane-s", preview=True)
+        check("S6: a preview is not a conversation turn -- no lane state, no shadow sample on a congested home",
+              "lane-s" not in _pvs._lane and not _pvs._shadow_open, str(list(_pvs._lane)))
+        _ofo = R.Pool([_ube("OC"), _ube("OD")], {})
+        _ofo.pick("off-lane", preview=True)
+        check("S6: OFF -- preview is byte-for-byte today's request: home written, new_placements ticked, preview_passes untouched (§13-8)",
+              _ofo._affinity_get("off-lane") is not None and _ofo.metrics["new_placements"] == 1
+              and _ofo.metrics["preview_passes"] == 0)
+        _pv_a = FakeStrata(9171, "pa", hold=0.1)
+        _pv_b = FakeStrata(9170, "pb", hold=0.1)
+        _pv_a.start()
+        _pv_b.start()
+        with open("smart_preview_probe.json", "w") as _ff:
+            json.dump({"listen": "127.0.0.1", "port": 9172, "status_interval": 0.5,
+                       "backends": [{"id": "pa", "url": "http://127.0.0.1:9171"},
+                                    {"id": "pb", "url": "http://127.0.0.1:9170"}],
+                       "smart": {"smart_preview": True}}, _ff)
+        _proc_pv = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_preview_probe.json",
+                                     "--log-level", "WARNING"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S6: a legal preview boot comes up green",
+                  wait_for(lambda: get(9172, "/healthz")[0] == 200, 25))
+            _hm = call(9172, "/v1/messages", conv("pvhome"), timeout=30)
+            _hp = call(9172, "/v1/messages/count_tokens", conv("pvhome"), timeout=30)
+            check("S6: live preview answers from HOME with byte-identical placement headers (placed/sticky words, no new header)",
+                  _hm[0] == 200 and _hp[0] == 200
+                  and _hm[1].get("x-strata-placement") == "placed"
+                  and _hp[1].get("x-strata-placement") == "sticky"
+                  and _hp[1].get("x-strata-backend") == _hm[1].get("x-strata-backend"),
+                  "%s/%s @%s/%s" % (_hm[1].get("x-strata-placement"), _hp[1].get("x-strata-placement"),
+                                    _hm[1].get("x-strata-backend"), _hp[1].get("x-strata-backend")))
+            _f1 = call(9172, "/v1/messages/count_tokens", conv("pvfresh"), timeout=30)
+            _f2 = call(9172, "/v1/messages", conv("pvfresh"), timeout=30)
+            check("S6: live fresh preview places but homes nothing -- the conversation still PLACES when it arrives",
+                  _f1[0] == 200 and _f1[1].get("x-strata-placement") == "placed"
+                  and _f2[1].get("x-strata-placement") == "placed",
+                  "%s/%s" % (_f1[1].get("x-strata-placement"), _f2[1].get("x-strata-placement")))
+            _pr = stats(9172)["router"]
+            _psum = sum(_pr.get(k, 0) for k in
+                        ("sticky_hits", "new_placements", "migrations", "pinned", "last_resort",
+                         "overflow_placements", "overflow_rollbacks", "overflow_fizzles",
+                         "overflow_evictions", "operator_cancelled", "passthrough_gets",
+                         "preview_passes"))
+            check("S6: the closed identity RE-DERIVES with preview_passes as terminal #12 (requests == SUM)",
+                  _psum == _pr["requests"] and _pr.get("preview_passes", 0) >= 2,
+                  "requests=%s sum=%s pv=%s" % (_pr["requests"], _psum, _pr.get("preview_passes")))
+        finally:
+            _proc_pv.terminate()
+            _pv_a.kill()
+            _pv_b.kill()
     finally:
         proc.terminate()
         try:
