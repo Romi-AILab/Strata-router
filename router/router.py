@@ -495,7 +495,9 @@ class Backend:
                 # ledger (L2+); this reads what IS on record -- state plus the
                 # hard-error share of the box's own requests
                 "failure_pressure": self._failure_pressure_locked(),
-                "estimator_mode": "J" if (self.cfg.get("smart") or {}).get("smart_place") else "today",
+                "estimator_mode": ("J" if (self.cfg.get("smart") or {}).get("smart_place")
+                                   else "shadow" if (self.cfg.get("smart") or {}).get("smart_shadow")
+                                   else "today"),
                 "inflation": (round(self.sm["t_bar_window"] / self.sm["t_bar_used"], 3)
                               if self.sm["t_bar_window"] and self.sm["t_bar_used"] else None),
                 "stats": dict(self.stats),
@@ -542,45 +544,48 @@ class Backend:
         self.sm["tick_n"] += 1
         stale = (not self.ever_reported) or (now - self.status_ts) > self._stale_after()
         self.sm["feed_blind"] = stale
-        # window T-bar: difference of the class-filtered cumulative counters
-        # (V3-09-1) -- n_min counts FILTERED completions, not raw requests
-        ds = self.sm["streams_s"] - self.sm["win_streams"]
-        dd = self.sm["dur_sum_s"] - self.sm["win_dur"]
-        self.sm["win_streams"] = self.sm["streams_s"]
-        self.sm["win_dur"] = self.sm["dur_sum_s"]
-        hist = self.sm["t_bar_hist"]
-        if ds >= max(1, int(sm.get("n_min") or 20)):
-            mean = dd / ds
-            self.sm["t_bar_window"] = mean
-            self.sm["degraded"] = False
-            hist.append((now, mean))
-        else:
-            self.sm["t_bar_window"] = None
-            self.sm["degraded"] = True
-        keep = float(sm.get("t_bar_base_window_s") or 86400.0)
-        while hist and (now - hist[0][0] > keep or len(hist) > 4096):
-            hist.pop(0)
-        # T̄_base: rolling min of recorded window values (24h). O11 stays true
-        # and documented: a quiet-hours service component can pull this BELOW
-        # daytime service time -- the clamp bites the placement side; the
-        # shipping gate only weighs the move side.
-        self.sm["t_bar_base"] = min(v for _t, v in hist) if hist else None
-        w, base = self.sm["t_bar_window"], self.sm["t_bar_base"]
-        if w is None:
-            self.sm["t_bar_used"] = None      # DEFAULT-T-bar path: clamp-EXEMPT (E6-3)
-        elif base is None:
-            self.sm["t_bar_used"] = w         # cold start: clamp waived one cycle (E6-3)
-        else:
-            self.sm["t_bar_used"] = min(w, float(sm.get("t_bar_clamp_factor") or 3.0) * base)
+        # window T-bar (S2/V3-09-1): a window is N poll ticks (window_n,
+        # default 10) and the difference fires on its boundary -- between
+        # boundaries the window value HOLDS (a half-window mean would flap).
+        # n_min counts FILTERED completions, not raw requests (V3-09-2).
+        if self.sm["tick_n"] % max(1, int(sm.get("window_n") or 10)) == 0:
+            ds = self.sm["streams_s"] - self.sm["win_streams"]
+            dd = self.sm["dur_sum_s"] - self.sm["win_dur"]
+            self.sm["win_streams"] = self.sm["streams_s"]
+            self.sm["win_dur"] = self.sm["dur_sum_s"]
+            hist = self.sm["t_bar_hist"]
+            if ds >= max(1, int(sm.get("n_min") or 20)):
+                mean = dd / ds
+                self.sm["t_bar_window"] = mean
+                self.sm["degraded"] = False
+                hist.append((now, mean))
+            else:
+                self.sm["t_bar_window"] = None
+                self.sm["degraded"] = True
+            keep = float(sm.get("t_bar_base_window_s") or 86400.0)
+            while hist and (now - hist[0][0] > keep or len(hist) > 4096):
+                hist.pop(0)
+            # T̄_base: rolling min of recorded window values (24h). O11 stays
+            # true and documented: a quiet-hours service component can pull
+            # this BELOW daytime service time -- the clamp bites the placement
+            # side; the shipping gate only weighs the move side (D5).
+            self.sm["t_bar_base"] = min(v for _t, v in hist) if hist else None
+            w, base = self.sm["t_bar_window"], self.sm["t_bar_base"]
+            if w is None:
+                # DEFAULT-T-bar (F4): named, clamp-EXEMPT (E6-3) -- the honest
+                # number for "too few filtered samples to have an opinion"
+                self.sm["t_bar_used"] = float(sm.get("default_t_bar") or 120.0)
+            elif base is None:
+                self.sm["t_bar_used"] = w     # cold start: clamp waived one cycle (E6-3)
+            else:
+                self.sm["t_bar_used"] = min(w, float(sm.get("t_bar_clamp_factor") or 3.0) * base)
         # cong_streak: own-signal congestion L̂ >= k_b, FRESH polls only --
         # a stale feed FREEZES the streak (V3-09-3: a stale-reset streak would
         # make the move trigger "never fires" behind a blind feed)
         if not stale:
-            caps = [v for v in (self.max_inflight, self.cap_slots) if v is not None]
-            if caps:      # both None: k_b undefined, honest freeze (S-1 territory)
-                k_b = max(1, min(caps))
-                l_hat = max(float(self.reported.get("serving") or 0.0)
-                            + float(self.reported.get("queued") or 0.0), float(self.inflight))
+            k_b = _k_b_of(self)
+            l_hat = _l_hat_of(self, now)
+            if k_b is not None and l_hat is not None:
                 self.sm["L_hat"] = l_hat
                 self.sm["cong_streak"] = self.sm["cong_streak"] + 1 if l_hat >= k_b else 0
         if sm.get("smart_obs") and \
@@ -650,6 +655,16 @@ class Pool:
                        else dict(DEFAULTS["smart"]))
         self.smart_any = any(self.sm_cfg.get(f) for f in SMART_FLAGS)
         self.smart_cap_read = bool(self.sm_cfg.get("smart_cap_read"))
+        self.smart_shadow = bool(self.sm_cfg.get("smart_shadow"))
+        self.smart_place = bool(self.sm_cfg.get("smart_place"))
+        # lane + shadow bookkeeping (S2 state list): ALL in-memory, ALL
+        # restart-zero (D13: losing samples only delays the shipping gate --
+        # zero safety loss, and nothing re-derives identity from it)
+        self._lane = OrderedDict()      # key -> {"turns", "R_hat", "last_move"}
+        self._shadow_open = {}          # key -> open would-move sample
+        self._shadow_cyc = {}           # bucket -> {cycle, samples, resolved, loss, unresolved}
+        self._shadow_done = []          # completed cycle dicts, oldest first
+        self._shadow_bucket = None
 
     def note_completion(self, backend, method, bare, duration, key):
         """Class-filtered success accumulator (design S2/S13-14): ONLY
@@ -664,6 +679,195 @@ class Pool:
         with backend.lock:
             backend.sm["streams_s"] += 1
             backend.sm["dur_sum_s"] += float(duration)
+        if self.smart_shadow and key:
+            smp = self._shadow_open.get(key)
+            if smp is not None and backend.id == smp["home"]:
+                smp["durs"].append(float(duration))
+
+    # ---- smart engine (design S2/S3/S9; every entry point flag-gated) ----
+    def _lane_touch(self, key):
+        st = self._lane.get(key)
+        if st is None:
+            st = {"turns": 0, "last_move": 0.0,
+                  "R_hat": float(self.sm_cfg.get("r_hat_init") or 4.0)}
+            self._lane[key] = st
+            while len(self._lane) > 20000:
+                self._lane.popitem(last=False)   # bounded like affinity's table
+        st["turns"] += 1
+        # R̂ (O3, the weakest multiplier, honestly so): a lane is expected to
+        # keep going at least as long as it has -- init floors new lanes,
+        # observed turns raise the estimate, clamp bounds it (r_hat_min/max).
+        st["R_hat"] = max(float(self.sm_cfg.get("r_hat_min") or 1.0),
+                          min(float(self.sm_cfg.get("r_hat_max") or 64.0),
+                              max(st["turns"], st["R_hat"])))
+        return st
+
+    def _j_parts(self, be, now, body_len, r_hat):
+        """One currency, three terms (S2): J = R̂xŴ + Ĉ + X.
+        Ŵ = max(0, L̂-k_b+[L̂>=k_b])/max(1,k_b) x T̄_used -- expected drain wait
+        for a NEW arrival; Ĉ = (len(body)/4) x κ̂ -- the cold-refill cost the
+        move would pay at the target (κ̂ is a CONSERVATIVE default: box-level
+        cold/warm deltas are unmeasurable here, V3-09-7/O2, and a too-cheap Ĉ
+        loosens both directions at once -- §15);
+        X = w_cour x max(0, L̂_ext) x T̄_used/k_b -- courtesy for the load the
+        box carries for OTHERS (never pays itself, S19-4).
+        ANY input missing (stale feed, undeclared cap, no T̄ yet) = None:
+        F1/F5 say None is an input, not an invitation to guess."""
+        k = _k_b_of(be)
+        l = _l_hat_of(be, now)
+        t = be.sm["t_bar_used"]
+        if k is None or l is None or t is None:
+            return None
+        rep = float(be.reported.get("serving") or 0.0) + float(be.reported.get("queued") or 0.0)
+        w_hat = max(0.0, l - k + (1.0 if l >= k else 0.0)) / k * t
+        c_hat = (max(0.0, float(body_len)) / 4.0) * float(self.sm_cfg.get("kappa_hat") or 0.001)
+        debt = sum(1 for x in be._ghost_debt if x > now)
+        x_cour = float(self.sm_cfg.get("w_cour") or 1.0) * max(0.0, rep - be.inflight - debt) * t / k
+        return {"W": w_hat, "C": c_hat, "X": x_cour, "J": r_hat * w_hat + c_hat + x_cour}
+
+    def _smart_order(self, cands, now, body_len, r_hat, require_window=False):
+        """J order for one placement/decision round (S3). Returns None = the
+        round falls back to TODAY's order: J seconds and load_score ordinals
+        are different currencies and never mix inside one round (E6-2), and
+        ONE candidate with missing inputs degrades the WHOLE round (F1/F5).
+        SUSPECT leaves the candidate face while any HEALTHY remains (F11);
+        all-SUSPECT is today's order too. Ties -- exact at the default
+        k_eps=0, or inside the relative band k_eps x min(J1,J2) -- fall to
+        load_score, whose own jitter (:440, untouched) is the final tie-break:
+        this is the fan-out floor (S3/V3-02), not a coin flip."""
+        if not cands:
+            return None
+        if all(b.state == SUSPECT for b in cands):
+            return None
+        if any(b.state != SUSPECT for b in cands):
+            cands = [b for b in cands if b.state != SUSPECT]
+        if require_window:
+            cands = [b for b in cands if b.sm["t_bar_window"] is not None]
+        scored = []
+        for b in cands:
+            p = self._j_parts(b, now, body_len, r_hat)
+            if p is None:
+                return None
+            scored.append((p["J"], b))
+        scored.sort(key=lambda t: t[0])
+        keps = float(self.sm_cfg.get("k_eps") or 0.0)
+        out = []
+        i = 0
+        while i < len(scored):
+            j = i + 1
+            while j < len(scored) and (scored[j][0] - scored[i][0]) <= keps * max(scored[i][0], 1e-9):
+                j += 1
+            band = [b for _v, b in scored[i:j]]
+            band.sort(key=lambda b: b.load_score())
+            out.extend(band)
+            i = j
+        return out
+
+    def _new_cycle(self, b):
+        return {"cycle": b, "samples": 0, "resolved": 0, "loss": 0, "unresolved": 0}
+
+    def _shadow_roll(self, now):
+        """Cycle bookkeeping (poller-called, S-2 zero resident threads): the
+        bucket is the release gate's period; crossing it closes the old cycle
+        and settles its open samples. Forward-only: the monotonic clock never
+        rewinds, and neither do the buckets."""
+        cyc = float(self.sm_cfg.get("shadow_cycle_s") or 604800.0)
+        b = int(now // cyc)
+        if self._shadow_bucket is None:
+            self._shadow_bucket = b
+            self._shadow_cyc.setdefault(b, self._new_cycle(b))
+            return
+        if b <= self._shadow_bucket:
+            return
+        self._shadow_done.append(self._shadow_cyc.get(self._shadow_bucket)
+                                 or self._new_cycle(self._shadow_bucket))
+        while len(self._shadow_done) > 32:
+            self._shadow_done.pop(0)
+        for s in [x for x in self._shadow_open.values() if x["bucket"] != b]:
+            self._shadow_settle(s)
+        self._shadow_bucket = b
+        self._shadow_cyc.setdefault(b, self._new_cycle(b))
+        while len(self._shadow_cyc) > 64:
+            _oldb = min(self._shadow_cyc)
+            if _oldb == b:
+                break
+            self._shadow_cyc.pop(_oldb)
+
+    def _shadow_settle(self, s):
+        self._shadow_open.pop(s["key"], None)
+        c = self._shadow_cyc.get(s["bucket"])
+        if c is None:
+            return
+        if not s["durs"]:
+            c["unresolved"] += 1
+            self.metrics["shadow_unresolved"] += 1
+            return
+        _d = sorted(s["durs"])
+        _n = len(_d)
+        med = _d[_n // 2] if _n % 2 else 0.5 * (_d[_n // 2 - 1] + _d[_n // 2])
+        c["resolved"] += 1
+        # D14/E5: the verdict is observation vs observation -- the lane's REAL
+        # home durations (median, long-tail resistant) against the target's
+        # PRE-CLAMP raw window + the move's own cold cost. Estimator outputs
+        # are banned from the gate's scale (SP-J-04: the gate must not be
+        # calibrated by the thing it gates). loss = staying home was cheaper.
+        if med - (s["target_raw"] + s["c_hat"]) < 0:
+            c["loss"] += 1
+            self.metrics["shadow_loss_moves"] += 1
+
+    def _shadow_note_turn(self, affinity_key, home, body_len):
+        """Sticky hit at home: roll the lane, and ask the mover's question
+        OBSERVATIONALLY (L2 never moves anything -- S9)."""
+        st = self._lane_touch(affinity_key)
+        now = time.monotonic()
+        if home.sm["cong_streak"] < 2:      # S4-1 trigger: own signal, 2 fresh polls
+            return
+        ph = self._j_parts(home, now, body_len, st["R_hat"])
+        if ph is None:
+            return
+        cands = [b for b in self.backends if b is not home and b.state == HEALTHY]
+        order = self._smart_order(cands, now, body_len, st["R_hat"], require_window=True)
+        if not order:
+            return
+        tgt = order[0]
+        pt = self._j_parts(tgt, now, body_len, st["R_hat"])
+        if pt is None or not tgt.accepts_placement():   # un-ticked probe (S13-17)
+            return
+        # S4-2 net inequality -- the FULL L5 predicate, evaluated blind:
+        # a sample opens exactly where the mover would have moved.
+        k_gain = float(self.sm_cfg.get("k_gain") or 2.0)
+        if not (st["R_hat"] * (ph["W"] - pt["W"]) > k_gain * pt["C"]):
+            return
+        old = self._shadow_open.get(affinity_key)
+        if old is not None:
+            self._shadow_settle(old)       # a superseded sample settles on its facts
+        self._shadow_roll(now)
+        b = self._shadow_bucket
+        c = self._shadow_cyc.setdefault(b, self._new_cycle(b))
+        c["samples"] += 1
+        self.metrics["shadow_would_moves"] += 1
+        self._shadow_open[affinity_key] = {"key": affinity_key, "home": home.id,
+                                           "target": tgt.id,
+                                           "target_raw": tgt.sm["t_bar_window"],
+                                           "c_hat": pt["C"], "durs": [], "bucket": b}
+        LOG.info("SHADOW lane=%s would-move %s -> %s (W_home=%.1fs W_tgt=%.1fs C_tgt=%.1fs)",
+                 short(affinity_key), home.id, tgt.id, ph["W"], pt["W"], pt["C"])
+
+    def _release_gate_open(self):
+        """S9 data gate: L5 ships only on OBSERVED evidence -- the last
+        release_gate_shadow_cycles completed cycles each show ZERO loss, and
+        the global resolved pool is at least release_gate_min_would_moves
+        (E5: zero samples never ships, 禁空轉). Selection bias is on record
+        (D9-2): would-move lanes are biased-busy and target same-window
+        traffic biased-light -- the scale reads OPTIMISTIC, shadow-period
+        calibration knob stays beside it."""
+        n = max(1, int(self.sm_cfg.get("release_gate_shadow_cycles") or 2))
+        mn = max(1, int(self.sm_cfg.get("release_gate_min_would_moves") or 20))
+        if len(self._shadow_done) < n:
+            return False
+        if sum(c["resolved"] for c in self._shadow_done) < mn:
+            return False
+        return all(c["loss"] == 0 for c in self._shadow_done[-n:])
 
     def _stash_pending(self, token, entry):
         """Book a pending overflow (CALLER HOLDS self.lock). The 4096 cap is a
@@ -859,7 +1063,7 @@ class Pool:
             return len(dead)
 
     # ---- selection --------------------------------------------------------
-    def pick(self, affinity_key, pin=None, passthrough=False):
+    def pick(self, affinity_key, pin=None, passthrough=False, body_len=0):
         """Return (backend, reason, reserved, overflow_token). Never returns
         None: queueing beats failing. `reserved` is False only on the
         last-resort forward, where the cooldown refused the slot but we send
@@ -904,6 +1108,14 @@ class Pool:
             if home is not None and home.take_sticky():
                 with self.lock:
                     self.metrics["sticky_hits"] += 1
+                if self.smart_shadow and affinity_key:
+                    # L2: the mover's question, asked observationally --
+                    # records samples, changes NOTHING about this request
+                    try:
+                        self._shadow_note_turn(affinity_key, home, body_len)
+                    except Exception:
+                        LOG.debug("shadow decision failed for %s -- serving continues",
+                                  short(affinity_key), exc_info=True)
                 return home, "sticky", True, None
 
         if home is not None:
@@ -1073,6 +1285,10 @@ class Pool:
             # home but not yet earned a re-home (each settles within its own
             # request's lifetime -- a number that GROWS is the landmine signal)
             out["overflow_pending"] = len(self._overflow_pending)
+            # the release gate and its evidence (S9): an operator deciding
+            # whether smart_move may ship reads THIS, not a log grep
+            out["release_gate_open"] = self._release_gate_open()
+            out["shadow_cycles"] = list(self._shadow_done)[-4:]
             return out
 
 
@@ -1316,6 +1532,26 @@ def _parse_prometheus(payload):
     return out if out["serving"] is not None or out["queued"] is not None else None
 
 
+def _k_b_of(be):
+    """k_b = max(1, min(max_inflight, cap_slots)); a missing cap falls to the
+    other; NOTHING declared is None = missing input (S-1 refuses that shape at
+    boot for place/move; shadow and OBS simply see None). ONE definition --
+    the tick's cong_streak and the J engine must never disagree about where
+    "full" is."""
+    caps = [v for v in (be.max_inflight, be.cap_slots) if v is not None]
+    return max(1, min(caps)) if caps else None
+
+
+def _l_hat_of(be, now):
+    """L̂ = max(reported_fresh, inflight) (V2-02); a stale feed is a MISSING
+    input (None), never a stale number -- the same freshness gate load_score
+    uses (:377-380 semantics), so cong and J cannot disagree about sight."""
+    if not be.ever_reported or (now - be.status_ts) > be._stale_after():
+        return None
+    return max(float(be.reported.get("serving") or 0.0)
+               + float(be.reported.get("queued") or 0.0), float(be.inflight))
+
+
 def _read_cap_slots(body):
     """L1 (design S8): the ONE whitelisted capacity key, read by exact path
     ONLY. concurrency.serving is Strata's declared serving capacity, and the
@@ -1376,6 +1612,8 @@ class StatusPoller(threading.Thread):
                         obs = be._smart_tick_locked(self.pool.sm_cfg, time.monotonic())
                     if obs:
                         LOG.info("%s", obs)
+            if self.pool.smart_shadow:
+                self.pool._shadow_roll(time.monotonic())
             self.stop_evt.wait(max(0.2, float(self.cfg.get("status_interval") or 1.0)))
 
     def _poll(self, be):
@@ -1985,7 +2223,8 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         backend, reason, reserved, ovf_token = self.pool.pick(
-            key, pin=pin, passthrough=(key is None and method in ("GET", "HEAD")))
+            key, pin=pin, passthrough=(key is None and method in ("GET", "HEAD")),
+            body_len=len(body or b""))
         was_overflow = reason == "overflow"   # its pending entry must settle EXACTLY once
         # before this request ends: commit (it answered), rollback (target died
         # pre-send) or fizzle (ended any other way). ovf_settled tracks that.

@@ -2779,7 +2779,7 @@ def main():
         print("S1) smart scaffold -- config, accumulator, OBS (design v4.1)")
         _sp_be = R.Backend("sp1", "http://127.0.0.1:9", cfg={"max_inflight": 4})
         _sp_be2 = R.Backend("sp2", "http://127.0.0.1:9", cfg={"max_inflight": 4})
-        _sp_pool = R.Pool([_sp_be, _sp_be2], {"smart": {"smart_obs": True}})
+        _sp_pool = R.Pool([_sp_be, _sp_be2], {"smart": {"smart_obs": True, "window_n": 1}})
         _sp_off = R.Pool([R.Backend("sp3", "http://127.0.0.1:9", cfg={})], {})
         check("S1: smart counters exist on the ledger, zero at birth (moves are diagnostics only)",
               all(_sp_pool.metrics[k] == 0 for k in
@@ -2825,9 +2825,9 @@ def main():
               and abs(_sp_be.sm["t_bar_used"] - 30.0) < 1e-6 and abs(_sp_be.sm["t_bar_base"] - 10.0) < 1e-6,
               "w=%s used=%s base=%s" % (_sp_be.sm["t_bar_window"], _sp_be.sm["t_bar_used"], _sp_be.sm["t_bar_base"]))
         _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 2.0)
-        check("S1: streams_s < n_min -- window None + degraded (DEFAULT_T̄ path, clamp-exempt E6③)",
+        check("S1: streams_s < n_min -- window None + degraded, T_bar_used = named DEFAULT_T̄ (F4; clamp-exempt E6③)",
               _sp_be.sm["t_bar_window"] is None and _sp_be.sm["degraded"] is True
-              and _sp_be.sm["t_bar_used"] is None,
+              and _sp_be.sm["t_bar_used"] == 120.0,
               "w=%s deg=%s used=%s" % (_sp_be.sm["t_bar_window"], _sp_be.sm["degraded"], _sp_be.sm["t_bar_used"]))
         _sp_be.reported = {"serving": 4.0, "queued": 0.0}
         _sp_be.status_ts = _sp_t + 2.9
@@ -3012,6 +3012,199 @@ def main():
         check("S3: /stats publishes the origin distribution (who owns the table, right now)",
               _od != "ABSENT" and _od.get("pin") == 1 and _od.get("sticky") == 2
               and _od.get("transient") == 1, str(_od))
+        # ---- smart placement C4: J engine + window discipline + shadow ledger + release gate ----
+        print("")
+        print("S4) smart L2 -- J engine + would-move ledger + release gate (design S2/S3/S9/E5/D9/D14)")
+
+        def _jbox(jid, mi=4, tbar=100.0, serving=0.0, cap=None):
+            b = R.Backend(jid, "http://127.0.0.1:9", cfg={"max_inflight": mi})
+            if cap is not None:
+                b.cap_slots = cap
+            b.ever_reported = True
+            b.reported = {"serving": serving, "queued": 0.0}
+            b.status_ts = time.monotonic()
+            b.sm["t_bar_used"] = tbar
+            b.sm["t_bar_window"] = tbar
+            return b
+
+        class _LSpy(R.Backend):
+            def load_score(self):
+                return _LSpy.scores.get(self.id, 0.0)
+
+        _LSpy.scores = {}
+        _jcfg = {"smart": {"smart_shadow": True, "window_n": 1, "kappa_hat": 0.01,
+                           "w_cour": 1.0, "k_gain": 2.0, "shadow_cycle_s": 60.0}}
+        _jp = R.Pool([], _jcfg)
+        check("S4: k_b = min(mi, cap_slots) with honest None when nothing is declared (S2)",
+              R._k_b_of(_jbox("jb")) == 4 and R._k_b_of(_jbox("jc", mi=9, cap=2)) == 2
+              and R._k_b_of(R.Backend("jx", "http://127.0.0.1:9", cfg={})) is None)
+        _pw0 = _jp._j_parts(_jbox("w0", serving=0.0), time.monotonic(), 0, 4.0)
+        _pw1 = _jp._j_parts(_jbox("w1", serving=4.0), time.monotonic(), 0, 4.0)
+        _pw2 = _jp._j_parts(_jbox("w2", serving=8.0), time.monotonic(), 0, 4.0)
+        check("S4: Ŵ = max(0, L-k+[L>=k])/max(1,k) x T̄ -- zero under k_b, +1 entry AT the boundary (S2)",
+              _pw0["W"] == 0.0 and abs(_pw1["W"] - 0.25 * 100.0) < 1e-9
+              and abs(_pw2["W"] - 1.25 * 100.0) < 1e-9,
+              "W=%s/%s/%s" % (_pw0["W"], _pw1["W"], _pw2["W"]))
+        _jw = _jbox("jw", serving=2.0)
+        _pjw = _jp._j_parts(_jw, time.monotonic(), 8000, 4.0)
+        check("S4: J = R̂xŴ + Ĉ + X exactly -- Ĉ=len(body)/4 x κ̂, X = external load x T̄/k (one currency, S2)",
+              abs(_pjw["C"] - 20.0) < 1e-9 and abs(_pjw["X"] - 50.0) < 1e-9
+              and abs(_pjw["J"] - (4.0 * _pjw["W"] + 20.0 + 50.0)) < 1e-9, str(_pjw))
+        _jstale = R.Backend("jstale", "http://127.0.0.1:9", cfg={"max_inflight": 4})
+        _jstale.ever_reported = True
+        _jstale.reported = {"serving": 2.0, "queued": 0.0}
+        _jstale.status_ts = time.monotonic() - 999.0
+        _jstale.sm["t_bar_used"] = 50.0
+        check("S4: stale feed / no k_b / no T̄ are MISSING inputs -- J says None, never guesses (F1/F5)",
+              _jp._j_parts(_jstale, time.monotonic(), 0, 4.0) is None
+              and _jp._j_parts(_jbox("jmi", mi=None), time.monotonic(), 0, 4.0) is None)
+        _jtie_a, _jtie_b = _jbox("ta"), _jbox("tb", serving=2.0)   # J=20 vs J=70
+        _jtie_a.status_ts = _jtie_b.status_ts = time.monotonic()
+        _jp0k = R.Pool([], {"smart": {"smart_place": True, "kappa_hat": 0.01, "w_cour": 1.0}})
+        _LSpy.scores = {"A": 99.0, "B": 1.0}
+        _a = _LSpy("A", "http://127.0.0.1:9", cfg={"max_inflight": 4})
+        _a.ever_reported = True; _a.reported = {"serving": 0.0, "queued": 0.0}
+        _a.status_ts = time.monotonic(); _a.sm["t_bar_used"] = 100.0; _a.sm["t_bar_window"] = 100.0
+        _b = _LSpy("B", "http://127.0.0.1:9", cfg={"max_inflight": 4})
+        _b.ever_reported = True; _b.reported = {"serving": 2.0, "queued": 0.0}
+        _b.status_ts = time.monotonic(); _b.sm["t_bar_used"] = 100.0; _b.sm["t_bar_window"] = 100.0
+        _ord_default = _jp0k._smart_order([_b, _a], time.monotonic(), 8000, 4.0)
+        check("S4: k_eps=0 (default) -- J orders outright; only EXACT ties fall to load_score (S3 band head)",
+              _ord_default and [x.id for x in _ord_default] == ["A", "B"],
+              str([x.id for x in _ord_default] if _ord_default else _ord_default))
+        _jp3k = R.Pool([], {"smart": {"smart_place": True, "k_eps": 3.0, "kappa_hat": 0.01, "w_cour": 1.0}})
+        _ord_band = _jp3k._smart_order([_a, _b], time.monotonic(), 8000, 4.0)
+        check("S4: k_eps relative band -- inside the band load_score orders, NOT raw J and NOT a draw (E6①)",
+              _ord_band and [x.id for x in _ord_band] == ["B", "A"],
+              str([x.id for x in _ord_band] if _ord_band else _ord_band))
+        _ord_degraded = _jp0k._smart_order([_a, _b, _jstale], time.monotonic(), 8000, 4.0)
+        check("S4: ONE candidate with missing inputs degrades the WHOLE round to today's order (E6② round-level)",
+              _ord_degraded is None)
+        _jsu = _LSpy("S", "http://127.0.0.1:9", cfg={"max_inflight": 4})
+        _jsu.ever_reported = True; _jsu.reported = {"serving": 0.0, "queued": 0.0}
+        _jsu.status_ts = time.monotonic(); _jsu.sm["t_bar_used"] = 1.0; _jsu.sm["t_bar_window"] = 1.0
+        _jsu.state = R.SUSPECT
+        _ord_susp = _jp3k._smart_order([_a, _b, _jsu], time.monotonic(), 8000, 4.0)
+        check("S4: SUSPECT leaves the J candidate face while a HEALTHY remains; all-SUSPECT = today (F11)",
+              _ord_susp is not None and all(x.id != "S" for x in _ord_susp)
+              and _jp3k._smart_order([_jsu], time.monotonic(), 8000, 4.0) is None,
+              str([x.id for x in _ord_susp] if _ord_susp is not None else None))
+        # -- window discipline: N ticks per window, the window HOLDS in between (S2/V3-09①) --
+        _wp = R.Pool([], {"smart": {"smart_obs": True}})
+        _wb = R.Backend("wb", "http://127.0.0.1:9", cfg={})
+        _wb.ever_reported = True
+        _wb.reported = {"serving": 0.0, "queued": 0.0}
+        _wt = time.monotonic() + 5000.0
+        _wb.status_ts = _wt
+        _wb.sm["streams_s"] = 25
+        _wb.sm["dur_sum_s"] = 250.0
+        for _i in range(9):
+            _wb._smart_tick_locked(_wp.sm_cfg, _wt + 0.001 * _i)
+        check("S4: 25 samples but the window diffs on N=10 boundaries only -- before the first boundary "
+              "T̄ is None (no opinion yet), so J stays silent and the round falls back honestly",
+              _wb.sm["t_bar_window"] is None and _wb.sm["t_bar_used"] is None,
+              str((_wb.sm["t_bar_window"], _wb.sm["t_bar_used"])))
+        _wb._smart_tick_locked(_wp.sm_cfg, _wt + 0.0095)
+        check("S4: tick #10 opens the window -- mean over FILTERED completions",
+              _wb.sm["t_bar_window"] is not None and abs(_wb.sm["t_bar_window"] - 10.0) < 1e-9
+              and _wb.sm["degraded"] is False and _wb.sm["t_bar_used"] == 10.0,
+              str((_wb.sm["t_bar_window"], _wb.sm["t_bar_used"])))
+        _wb.sm["streams_s"] += 5
+        _wb.sm["dur_sum_s"] += 450.0
+        for _i in range(11, 20):
+            _wb._smart_tick_locked(_wp.sm_cfg, _wt + 0.001 * _i)
+        check("S4: between windows the window HOLDS -- no half-window mean, no flapping (S2)",
+              abs(_wb.sm["t_bar_window"] - 10.0) < 1e-9, str(_wb.sm["t_bar_window"]))
+        _wb._smart_tick_locked(_wp.sm_cfg, _wt + 0.0195)
+        check("S4: next window had only 5 FILTERED samples -- back to DEFAULT_T̄=120 + degraded (F4)",
+              _wb.sm["t_bar_window"] is None and _wb.sm["degraded"] is True
+              and _wb.sm["t_bar_used"] == 120.0, str((_wb.sm["t_bar_window"], _wb.sm["t_bar_used"])))
+        # -- shadow ledger: the mover's WOULD-BE measured on observations only (E5) --
+        _sh_home = _jbox("sh", serving=8.0)
+        _sh_home.sm["t_bar_used"] = 300.0
+        _sh_home.sm["t_bar_window"] = 300.0
+        _sh_home.sm["cong_streak"] = 2
+        _sh_tgt = _jbox("st", serving=0.0)
+        _sh_tgt.sm["t_bar_used"] = 30.0
+        _sh_tgt.sm["t_bar_window"] = 30.0
+        _shp = R.Pool([_sh_home, _sh_tgt], _jcfg)
+        _shp._affinity_put("sl", "sh", "sticky")
+        _rs = _shp.pick("sl", body_len=8000)
+        check("S4: congested home + idle target + net inequality -- a would-move SAMPLE opens; the lane does NOT move (L2)",
+              _rs[1] == "sticky" and _rs[0].id == "sh"
+              and _shp.metrics["shadow_would_moves"] == 1 and "sl" in _shp._shadow_open,
+              "%s wm=%s open=%s" % (_rs[1], _shp.metrics["shadow_would_moves"], list(_shp._shadow_open)))
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 50.0, "sl")
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 70.0, "sl")
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 9.0, "other-lane")
+        _cyc0 = _shp._shadow_bucket
+        _shp._shadow_roll((_cyc0 + 1) * 60.0 + 1.0)
+        _c = _shp._shadow_cyc[_cyc0]
+        check("S4: cycle close settles the sample -- MEDIAN of the lane's real home durations vs raw target window + Ĉ (D14/E5)",
+              _c["samples"] == 1 and _c["resolved"] == 1 and _c["loss"] == 0
+              and _shp.metrics["shadow_loss_moves"] == 0 and _c["unresolved"] == 0,
+              str(_c))
+        _sh_home.sm["cong_streak"] = 2
+        _sh_home.inflight = 0
+        _shp.pick("sl", body_len=8000)
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 10.0, "sl")
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 14.0, "sl")
+        _cyc1 = _shp._shadow_bucket
+        _shp._shadow_roll((_cyc1 + 1) * 60.0 + 1.0)
+        _c2 = _shp._shadow_cyc[_cyc1]
+        check("S4: home median 12 < target 30 + Ĉ 20 -- that would-move counts as a LOSS (the gate's currency)",
+              _c2["resolved"] == 1 and _c2["loss"] == 1 and _shp.metrics["shadow_loss_moves"] == 1,
+              str(_c2))
+        _shp._affinity_put("orphan", "sh", "sticky")
+        _shp.pick("orphan", body_len=8000)
+        _cyc2 = _shp._shadow_bucket
+        _shp._shadow_roll((_cyc2 + 1) * 60.0 + 1.0)
+        check("S4: a would-move with NO post-decision turn resolves UNRESOLVED -- honest count, never silently dropped (D13)",
+              _shp._shadow_cyc[_cyc2]["unresolved"] == 1
+              and _shp.metrics["shadow_unresolved"] == 1 and "orphan" not in _shp._shadow_open,
+              str(_shp._shadow_cyc[_cyc2]))
+        _sh_tgt.sm["t_bar_window"] = None
+        _before_wm = _shp.metrics["shadow_would_moves"]
+        _sh_home.sm["cong_streak"] = 2
+        _sh_home.inflight = 0
+        _shp._affinity_put("deg", "sh", "sticky")
+        _shp.pick("deg", body_len=8000)
+        check("S4: target window below n_min (degraded) -- the sample is EXCLUDED, not guessed around (D9①)",
+              _shp.metrics["shadow_would_moves"] == _before_wm and "deg" not in _shp._shadow_open)
+        _off_home = _jbox("oh", serving=8.0)
+        _off_home.sm["cong_streak"] = 2
+        _offp = R.Pool([_off_home, _jbox("ot")], {})
+        _offp._affinity_put("ol", "oh", "sticky")
+        _offp.pick("ol", body_len=8000)
+        check("S4: shadow OFF -- no lane state, no sample, no decision: the ledger stays byte-silent (§9)",
+              not _offp._shadow_open and not _offp._lane
+              and _offp.metrics["shadow_would_moves"] == 0)
+        _st = {"k": None}
+        for _i in range(70):
+            _st["k"] = _shp._lane_touch("rlane")
+        check("S4: R̂ rolls with observed turns, clamped [1,64] with init 4 for unseen lanes (O3 honest)",
+              _shp._lane_touch("fresh")["R_hat"] == 4.0 and _st["k"]["turns"] == 70
+              and _st["k"]["R_hat"] == 64.0, str(_st["k"]))
+        _gp = R.Pool([], {"smart": {"smart_shadow": True, "release_gate_shadow_cycles": 2,
+                                    "release_gate_min_would_moves": 20}})
+        check("S4: release gate starts CLOSED -- zero completed cycles means zero evidence, and zero samples never ships (E5)",
+              _gp._release_gate_open() is False)
+        _gp._shadow_done = [{"cycle": 1, "samples": 5, "resolved": 5, "loss": 0, "unresolved": 0},
+                            {"cycle": 2, "samples": 12, "resolved": 12, "loss": 0, "unresolved": 0}]
+        check("S4: 17 resolved < min_would_moves=20 -- gate STAYS locked (禁空轉)", _gp._release_gate_open() is False)
+        _gp._shadow_done[1]["samples"] = _gp._shadow_done[1]["resolved"] = 16
+        check("S4: two loss-free cycles and 21 resolved -- gate OPEN (§9 data gate)",
+              _gp._release_gate_open() is True)
+        _gp._shadow_done[-1]["loss"] = 1
+        check("S4: one loss in the last two cycles -- gate closed again (虧搬率 must be ZERO, not low)",
+              _gp._release_gate_open() is False)
+        del _gp._shadow_done[-1]
+        check("S4: fewer than release_gate_shadow_cycles completed cycles -- closed regardless of pool size",
+              _gp._release_gate_open() is False)
+        _gst = _gp.status()
+        check("S4: OBS exposes the gate and the cycle panel to /stats (S11)",
+              _gst["release_gate_open"] is False and _gst["shadow_cycles"][-1]["samples"] == 5,
+              str(_gst.get("shadow_cycles")))
     finally:
         proc.terminate()
         try:
