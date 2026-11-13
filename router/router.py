@@ -702,6 +702,13 @@ class Pool:
                               max(st["turns"], st["R_hat"])))
         return st
 
+    def _r_hat_for(self, affinity_key):
+        """The lane's own expected remaining turns for a J round; a lane with
+        no recorded state yet is a new lane -- init, the same floor _lane_touch
+        seats fresh lanes at (O3)."""
+        st = self._lane.get(affinity_key) if affinity_key else None
+        return st["R_hat"] if st else float(self.sm_cfg.get("r_hat_init") or 4.0)
+
     def _j_parts(self, be, now, body_len, r_hat):
         """One currency, three terms (S2): J = R̂xŴ + Ĉ + X.
         Ŵ = max(0, L̂-k_b+[L̂>=k_b])/max(1,k_b) x T̄_used -- expected drain wait
@@ -725,26 +732,36 @@ class Pool:
         x_cour = float(self.sm_cfg.get("w_cour") or 1.0) * max(0.0, rep - be.inflight - debt) * t / k
         return {"W": w_hat, "C": c_hat, "X": x_cour, "J": r_hat * w_hat + c_hat + x_cour}
 
-    def _smart_order(self, cands, now, body_len, r_hat, require_window=False):
+    def _smart_order(self, cands, now, body_len, r_hat, require_window=False, tail_excluded=False):
         """J order for one placement/decision round (S3). Returns None = the
         round falls back to TODAY's order: J seconds and load_score ordinals
         are different currencies and never mix inside one round (E6-2), and
         ONE candidate with missing inputs degrades the WHOLE round (F1/F5).
         SUSPECT leaves the candidate face while any HEALTHY remains (F11);
-        all-SUSPECT is today's order too. Ties -- exact at the default
-        k_eps=0, or inside the relative band k_eps x min(J1,J2) -- fall to
-        load_score, whose own jitter (:440, untouched) is the final tie-break:
-        this is the fan-out floor (S3/V3-02), not a coin flip."""
+        all-SUSPECT is today's order too. DOWN boxes are never scored (their
+        feed is their own problem, and scoring one could poison an honest
+        round with a None that shouldn't apply) and pin the TAIL whatever:
+        the half-open trial belongs behind a live queue, a J number must
+        never make a dead box look cheap ahead of a working one.
+        tail_excluded (drain callers): keep SUSPECT in the list too, at the
+        tail -- begin() is legal on them, dropping them would lose a real
+        trial-forward candidate. Ties -- exact at the default k_eps=0, or
+        inside the relative band k_eps x min(J1,J2) -- fall to load_score,
+        whose own jitter (:440, untouched) is the final tie-break: this is
+        the fan-out floor (S3/V3-02), not a coin flip."""
         if not cands:
             return None
         if all(b.state == SUSPECT for b in cands):
             return None
-        if any(b.state != SUSPECT for b in cands):
-            cands = [b for b in cands if b.state != SUSPECT]
+        tail = [b for b in cands if b.state == DOWN or (tail_excluded and b.state == SUSPECT)]
+        _tid = {id(b) for b in tail}
+        live = [b for b in cands if id(b) not in _tid and b.state != SUSPECT]
         if require_window:
-            cands = [b for b in cands if b.sm["t_bar_window"] is not None]
+            live = [b for b in live if b.sm["t_bar_window"] is not None]
+        if not live:
+            return None
         scored = []
-        for b in cands:
+        for b in live:
             p = self._j_parts(b, now, body_len, r_hat)
             if p is None:
                 return None
@@ -761,6 +778,7 @@ class Pool:
             band.sort(key=lambda b: b.load_score())
             out.extend(band)
             i = j
+        out.extend(sorted(tail, key=lambda b: b.load_score()))
         return out
 
     def _new_cycle(self, b):
@@ -1133,7 +1151,8 @@ class Pool:
                 # re-home is NOT committed until the target answers (see
                 # overflow_commit/rollback -- a dead-but-fresh peer must not
                 # steal the lane with a 502).
-                alt, reserved = self._place(exclude={home.id}, no_trial=True)
+                alt, reserved = self._place(exclude={home.id}, no_trial=True,
+                                            body_len=body_len, r_hat=self._r_hat_for(affinity_key))
                 if alt is home:
                     # single-box pool whose gate re-opened in the microsecond
                     # since take_sticky refused: that IS the sticky take.
@@ -1163,7 +1182,8 @@ class Pool:
             # The conversation has a home box but it is unreachable or cooling
             # down: move the conversation rather than fail it, and remember the
             # move so later turns do not ping-pong back to the dead box.
-            alt, reserved = self._place(exclude={home.id})
+            alt, reserved = self._place(exclude={home.id}, body_len=body_len,
+                                        r_hat=self._r_hat_for(affinity_key))
             if alt is not None and not reserved:
                 reserved = alt.begin()     # queue-anyway box (nothing accepted)
                 if reserved:
@@ -1185,7 +1205,7 @@ class Pool:
             # pin it there. The reservation happens inside _place, atomically
             # with the gate check -- concurrent first turns cannot both take
             # the last slot of a capped box.
-            alt, reserved = self._place()
+            alt, reserved = self._place(body_len=body_len, r_hat=self._r_hat_for(affinity_key))
             if alt is not None and not reserved:
                 reserved = alt.begin()     # queue-anyway box (nothing accepted)
                 if reserved:
@@ -1204,13 +1224,17 @@ class Pool:
         # into anyway) instead of leaving the choice to load_score's random
         # tie-break -- an honest diagnostic beats a coin flip (stress Q2/F2).
         be = None
-        for cand in sorted(self.backends, key=lambda b: b.load_score()):
+        _dseq = (self._smart_order(list(self.backends), time.monotonic(), body_len,
+                                   self._r_hat_for(affinity_key), tail_excluded=True)
+                 if self.smart_place else None)
+        for cand in (_dseq if _dseq is not None
+                     else sorted(self.backends, key=lambda b: b.load_score())):
             if cand.begin():
                 be = cand
                 break
         reserved = be is not None
         if be is None:
-            be = min(self.backends, key=lambda b: b.load_score())
+            be = _dseq[0] if _dseq is not None else min(self.backends, key=lambda b: b.load_score())
         if reserved:
             with be.lock:
                 alive = be.state != DOWN
@@ -1233,7 +1257,7 @@ class Pool:
         LOG.warning("every backend is cooling down; last-resort forward to %s", be.id)
         return be, "last_resort", reserved, None
 
-    def _place(self, exclude=None, no_trial=False):
+    def _place(self, exclude=None, no_trial=False, body_len=0, r_hat=None):
         """Tiered placement with atomic reserve: returns (backend, reserved).
         Tiers are tried in ascending `priority`; inside a tier boxes are tried
         by ascending score and the first that passes its gate AND takes the
@@ -1242,6 +1266,12 @@ class Pool:
         queue -- returned UNRESERVED so the caller decides (waiting in the
         primary box's FIFO beats borrowing a busy peer or failing; the gate
         redirects, it never rejects, rule 2 stays intact).
+
+        With smart_place ON, INSIDE a tier the walk follows J (_smart_order:
+        its None = this round degrades to the load_score walk; ties keep the
+        load_score floor), and the queue-anyway head is the J-cheapest box of
+        the first healthy tier too -- drain follows the same currency as
+        admission. OFF is byte-for-byte today's tier+load_score walk.
 
         no_trial: skip DOWN boxes entirely -- they may not even take the
         half-open trial. For overflow, where the caller has a live home to
@@ -1254,17 +1284,24 @@ class Pool:
             cands = list(self.backends)
         if not cands:
             return None, False
+        _rh = float(r_hat) if r_hat is not None else float(self.sm_cfg.get("r_hat_init") or 4.0)
+        now = time.monotonic()
         fallback = None
         for prio in sorted({b.priority for b in cands}):
             tier = [b for b in cands if b.priority == prio]
             usable = [b for b in tier if b.load_state_ok() and (b.state != DOWN or not no_trial)]
             if not usable:
                 continue
-            for b in sorted(usable, key=lambda b: b.load_score()):
+            _ord = self._smart_order(usable, now, body_len, _rh) if self.smart_place else None
+            for b in (_ord if _ord is not None else sorted(usable, key=lambda b: b.load_score())):
                 if b.try_place():
                     return b, True
             if fallback is None:
                 fallback = usable
+        if fallback is not None and self.smart_place:
+            _fq = self._smart_order(fallback, now, body_len, _rh)
+            if _fq:
+                return _fq[0], False
         return min(fallback or cands, key=lambda b: b.load_score()), False
 
     def status(self):

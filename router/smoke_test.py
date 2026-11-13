@@ -3205,6 +3205,109 @@ def main():
         check("S4: OBS exposes the gate and the cycle panel to /stats (S11)",
               _gst["release_gate_open"] is False and _gst["shadow_cycles"][-1]["samples"] == 5,
               str(_gst.get("shadow_cycles")))
+        # ---- smart placement C5: L3 smart_place -- the placement face walks J ----
+        print("")
+        print("S5) smart L3 -- placement walks J inside the tier; ties keep today's floor (S3)")
+
+        def _ube(bid, serving=0.0, tbar=100.0, mi=8, cap=None, debt=0):
+            b = R.Backend(bid, "http://127.0.0.1:9", cfg={"max_inflight": mi})
+            b.ever_reported = True
+            b.reported = {"serving": serving, "queued": 0.0}
+            b.status_ts = time.monotonic()
+            b.cap_slots = cap
+            b.sm["t_bar_used"] = tbar
+            b.sm["t_bar_window"] = tbar
+            if debt:
+                b._ghost_debt = [time.monotonic() + 60.0] * debt
+            return b
+
+        # Identical VISIBLE load on both boxes (reported 4.0, inflight 0) --
+        # today's order sees a tie and spreads on the jitter floor. J sees the
+        # difference: UA is an 8-slot promise over a 100s window (X=4x100/8=50,
+        # J=70); UB declared 4 slots, rides exactly its boundary (W entry term
+        # x 1s window), and four ghost debts forgive its courtesy (X=0, J=21).
+        _uA, _uB = _ube("UA", serving=4.0), _ube("UB", serving=4.0, tbar=1.0, cap=4, debt=4)
+        _upool = R.Pool([_uA, _uB], {"smart": {"smart_place": True, "kappa_hat": 0.01, "w_cour": 1.0}})
+        _oA, _oB = _ube("OA", serving=4.0), _ube("OB", serving=4.0, tbar=1.0, cap=4, debt=4)
+        _uoff = R.Pool([_oA, _oB], {})
+        _upicks, _opicks = [], []
+        for _i in range(20):
+            for _b in (_uA, _uB, _oA, _oB):
+                _b.inflight = 0
+            _upicks.append(_upool._place(body_len=8000)[0].id)
+            _opicks.append(_uoff._place()[0].id)
+        check("S5: smart_place ON -- J reads what load_score cannot see (declared cap, T̄, ghost debt): J=21 beats J=70 every single time",
+              set(_upicks) == {"UB"}, str(sorted(set(_upicks))))
+        check("S5: OFF, the same pair stays today's tie -- the fan-out floor still spreads on load_score's jitter (no regression)",
+              {"OA", "OB"} == set(_opicks), str(sorted(set(_opicks))))
+        _udown = _ube("UD", serving=0.0, tbar=1.0)
+        _udown.state = R.DOWN
+        _ord_down = _upool._smart_order([_udown, _ube("UB2", serving=0.0)], time.monotonic(), 0, 4.0)
+        check("S5: a DOWN box sorts LAST in a J round whatever its J says -- the trial stays behind the living",
+              [x.id for x in _ord_down] == ["UB2", "UD"], str([x.id for x in _ord_down]))
+        _uqA, _uqB = _ube("QA", serving=10.0, mi=2), _ube("QB", serving=2.0, mi=2)
+        _uqA.inflight = _uqB.inflight = 2
+        _uqp = R.Pool([_uqA, _uqB], {"smart": {"smart_place": True, "kappa_hat": 0.01, "w_cour": 1.0}})
+        _q_be, _q_res = _uqp._place(body_len=8000)
+        check("S5: queue-anyway fallback queues at the J-cheapest box, not the load_score-earliest (drain face)",
+              _q_res is False and _q_be.id == "QB", "%s res=%s" % (_q_be.id, _q_res))
+        # -- HTTP: one real boot with the flag ON: spread floor under the J-tie form + S-1's real door --
+        _sp_a = FakeStrata(9175, "sa", hold=0.15)
+        _sp_b = FakeStrata(9174, "sb", hold=0.15)
+        _sp_a.start()
+        _sp_b.start()
+        with open("smart_place_probe.json", "w") as _ff:
+            json.dump({"listen": "127.0.0.1", "port": 9176, "status_interval": 0.2,
+                       "backends": [{"id": "sa", "url": "http://127.0.0.1:9175", "max_inflight": 8,
+                                     "require_idle": True},
+                                    {"id": "sb", "url": "http://127.0.0.1:9174", "max_inflight": 8,
+                                     "require_idle": True}],
+                       "smart": {"smart_obs": True, "smart_place": True, "n_min": 1}}, _ff)
+        with open("smart_s1_probe.json", "w") as _ff:
+            json.dump({"listen": "127.0.0.1", "port": 9173,
+                       "backends": [{"id": "sa", "url": "http://127.0.0.1:9175", "max_inflight": 8},
+                                    {"id": "sb", "url": "http://127.0.0.1:9174"}],
+                       "smart": {"smart_place": True}}, _ff)
+        _proc_sp = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_place_probe.json",
+                                     "--log-level", "WARNING"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _proc_s1 = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_s1_probe.json"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S5: S-1's real door -- smart_place ON with an undeclared max_inflight dies at boot, non-zero (§13-9)",
+                  wait_for(lambda: _proc_s1.poll() is not None, 15)
+                  and _proc_s1.returncode not in (0, None),
+                  "rc=%s" % _proc_s1.returncode)
+            check("S5: a legal smart boot comes up green",
+                  wait_for(lambda: get(9176, "/healthz")[0] == 200, 25))
+            # warm the boxes so a real T-bar window opens somewhere: sequential
+            # lanes on require_idle ties spread by jitter, windows open on the
+            # next 10-tick boundary (and honestly decay -- S4 pinned that, the
+            # live panel must show the OPENING, racing the decay is the flake)
+            for _i in range(4):
+                call(9176, "/v1/messages", conv("warm%d" % _i), timeout=30)
+            check("S5: the OBS panel is ALIVE on a smart boot -- a real T-bar window opens under traffic (S11)",
+                  wait_for(lambda: any(
+                      stats(9176)["backends"][i]["t_bar_window_s"] is not None
+                      for i in range(2)), 30))
+            _sp_codes = []
+            for _i in range(8):
+                st, _h, _bd, _w = call(9176, "/v1/messages", conv("spread%d" % _i), timeout=60)
+                _sp_codes.append(st)
+            _st2 = stats(9176)
+            _od2 = _st2["router"].get("affinity_origin", {})
+            check("S5: fan-out floor under the J-tie form -- 8 same-shape lanes all placed, all homed sticky (§13-15)",
+                  all(_c == 200 for _c in _sp_codes) and _od2.get("sticky", 0) >= 8,
+                  "codes=%s origins=%s" % (sorted(set(_sp_codes)), _od2))
+            check("S5: ON boot reports estimator_mode=J in every box's OBS row",
+                  all(b["estimator_mode"] == "J" for b in _st2["backends"]),
+                  str([b["estimator_mode"] for b in _st2["backends"]]))
+        finally:
+            _proc_sp.terminate()
+            if _proc_s1.poll() is None:
+                _proc_s1.terminate()
+            _sp_a.kill()
+            _sp_b.kill()
     finally:
         proc.terminate()
         try:
