@@ -649,6 +649,7 @@ class Pool:
         self.sm_cfg = (dict(DEFAULTS["smart"], **_sm_raw) if isinstance(_sm_raw, dict)
                        else dict(DEFAULTS["smart"]))
         self.smart_any = any(self.sm_cfg.get(f) for f in SMART_FLAGS)
+        self.smart_cap_read = bool(self.sm_cfg.get("smart_cap_read"))
 
     def note_completion(self, backend, method, bare, duration, key):
         """Class-filtered success accumulator (design S2/S13-14): ONLY
@@ -1299,6 +1300,34 @@ def _parse_prometheus(payload):
     return out if out["serving"] is not None or out["queued"] is not None else None
 
 
+def _read_cap_slots(body):
+    """L1 (design S8): the ONE whitelisted capacity key, read by exact path
+    ONLY. concurrency.serving is Strata's declared serving capacity, and the
+    ONLY number in that payload the smart scaffold is allowed to want: a walk
+    that "finds a capacity-like number" is exactly how a capacity becomes a
+    load number wearing the wrong costume (the v1.2.16 decoy family) -- this
+    reader never walks, and its result feeds ONLY Backend.cap_slots, never a
+    score or a gate. Shape rules: int or integral float in [1, 1e6]; bool is
+    refused with the truthy family; NaN/inf/strings/objects refused; a box
+    claiming a million serving slots has a broken metric, and an unbounded
+    k_b is the same attractive lie S-1 refuses at boot."""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    sec = obj.get("concurrency")
+    if not isinstance(sec, dict):
+        return None
+    v = sec.get("serving")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if not math.isfinite(v) or v < 1 or v > 1_000_000 or int(v) != v:
+        return None
+    return int(v)
+
+
 class StatusPoller(threading.Thread):
     """Reads each box's own load endpoint so placement sees real queue depth
     instead of guessing. Strata publishes /v1/status (activity.in_flight =
@@ -1384,6 +1413,11 @@ class StatusPoller(threading.Thread):
                         # not the owner's load (see GHOST_GRACE_S)
                         debt = sum(1 for t in be._ghost_debt if t > be.status_ts)
                         be.ext_streak = be.ext_streak + 1 if total > be.inflight + debt else 0
+                        if self.pool.smart_cap_read:
+                            # L1, fresh-commits-only: an unreachable or silent
+                            # box FREEZES its last declared cap rather than
+                            # losing it (the cap is a promise, not a sample)
+                            be.cap_slots = _read_cap_slots(body)
                     return
                 with be.lock:
                     be.status_error = sub + ": 200 but no load field recognised"

@@ -2896,6 +2896,81 @@ def main():
         _sp_pbD = R.validate_cfg({"smart": {"k_gainn": 3}}, _sp_pD, strict=False)
         check("S1: an unknown smart.* knob is not a problem (warn+ignore doctrine) -- never silently trusted",
               not any(_k.startswith("smart") for _k, _w in _sp_pbD), str(_sp_pbD)[:200])
+        # ---- smart placement C2: L1 cap_read (design §8 whitelist) ----
+        print("")
+        print("S2) smart L1 -- cap_slots: one whitelisted key, never a walk (design S8)")
+        _cap_ok = '{"activity":{"in_flight":3},"concurrency":{"serving":8}}'
+        _cap_junk = [
+            ("string digits", '{"concurrency":{"serving":"8"}}'),
+            ("bool true -- the truthy family", '{"concurrency":{"serving":true}}'),
+            ("zero slots", '{"concurrency":{"serving":0}}'),
+            ("negative", '{"concurrency":{"serving":-2}}'),
+            ("fractional", '{"concurrency":{"serving":2.5}}'),
+            ("NaN literal", '{"concurrency":{"serving":NaN}}'),
+            ("Infinity literal", '{"concurrency":{"serving":Infinity}}'),
+            ("null", '{"concurrency":{"serving":null}}'),
+            ("wrong parent", '{"pools":{"serving":8}}'),
+            ("wrong child", '{"concurrency":{"max":8}}'),
+            ("flat dotted key is not the path", '{"concurrency.serving":8}'),
+            ("body is a list", '[{"concurrency":{"serving":8}}]'),
+            ("body not JSON", 'concurrency_serving 8\n'),
+            ("serving is an object", '{"concurrency":{"serving":{"now":8}}}'),
+            ("past the sane ceiling", '{"concurrency":{"serving":1000001}}'),
+        ]
+        check("S2: the whitelist key reads to a slot count, integral float included (isolation 2: exact path)",
+              R._read_cap_slots(_cap_ok) == 8
+              and R._read_cap_slots('{"concurrency":{"serving":8.0}}') == 8,
+              str(R._read_cap_slots(_cap_ok)))
+        check("S2: no near-miss shape ever reads -- the reader NEVER walks, one path only (§8)",
+              all(R._read_cap_slots(_b) is None for _n, _b in _cap_junk),
+              str([_n for _n, _b in _cap_junk if R._read_cap_slots(_b) is not None]))
+        _cap_pool_off, _cap_be_off = R.Pool([], {}), R.Backend("capoff", "http://127.0.0.1:9", cfg={})
+        _cap_pool_on = R.Pool([], {"smart": {"smart_cap_read": True}})
+        _cap_be_on = R.Backend("capon", "http://127.0.0.1:9", cfg={})
+        check("S2: the cap flag alone arms the scaffold (smart_any True, no behavior layer)",
+              _cap_pool_off.smart_any is False and _cap_pool_on.smart_any is True)
+        _cap_calls = []
+        _cap_real = R._read_cap_slots
+        R._read_cap_slots = lambda _b: (_cap_calls.append(1), _cap_real(_b))[1]
+        try:
+            _cap_pol_off = R.StatusPoller(_cap_pool_off, {})
+            _cap_pol_off._get = lambda be, path: (200, _cap_ok)
+            _cap_pol_off._poll(_cap_be_off)
+            check("S2: flag OFF -- the reader is never invoked and cap_slots stays None (isolation 1)",
+                  not _cap_calls and _cap_be_off.cap_slots is None,
+                  "calls=%d cap=%s" % (len(_cap_calls), _cap_be_off.cap_slots))
+            _cap_pol_on = R.StatusPoller(_cap_pool_on, {})
+            _cap_pol_on._get = lambda be, path: (200, _cap_ok)
+            _cap_pol_on._poll(_cap_be_on)
+            check("S2: flag ON fresh poll -- cap lands AND the load numbers are untouched by the decoy "
+                  "(isolation 3: cap feeds ONLY cap_slots)",
+                  len(_cap_calls) > 0 and _cap_be_on.cap_slots == 8
+                  and _cap_be_on.snapshot()["reported"]["serving"] == 3.0,
+                  "cap=%s serving=%s" % (_cap_be_on.cap_slots, _cap_be_on.snapshot()["reported"]["serving"]))
+            _cap_pol_on._get = lambda be, path: (None, "refused")
+            _cap_pol_on._poll(_cap_be_on)
+            check("S2: an unreachable box FREEZES cap_slots -- only fresh commits write it",
+                  _cap_be_on.cap_slots == 8, "cap=%s" % _cap_be_on.cap_slots)
+            _cap_junk_hits = []
+            for _n, _b in _cap_junk:
+                _bj = R.Backend("capj", "http://127.0.0.1:9", cfg={})
+                _cap_pol_j = R.StatusPoller(_cap_pool_on, {})
+                _cap_pol_j._get = lambda be, path, _body=_b: (200, _body)
+                _cap_pol_j._poll(_bj)
+                if _bj.cap_slots is not None:
+                    _cap_junk_hits.append(_n)
+            check("S2: a junk-shaped capacity is refused at the write point -- cap_slots stays None",
+                  not _cap_junk_hits, str(_cap_junk_hits))
+            _bt = R.Backend("capk", "http://127.0.0.1:9", cfg={"max_inflight": 4})
+            _bt.cap_slots = 2
+            _bt.ever_reported = True
+            _bt.reported = {"serving": 2.0, "queued": 0.0}
+            _bt.status_ts = time.monotonic()
+            _bt._smart_tick_locked(_cap_pool_on.sm_cfg, time.monotonic())
+            check("S2: k_b = min(max_inflight, cap_slots) -- the declared cap tightens congestion",
+                  _bt.sm["cong_streak"] == 1, "streak=%s" % _bt.sm["cong_streak"])
+        finally:
+            R._read_cap_slots = _cap_real
     finally:
         proc.terminate()
         try:
