@@ -258,6 +258,16 @@ class Backend:
         # Bounded; appended/trimmed under self.lock at the completion tick.
         self.recent_ttfb = []
 
+        # smart-placement scaffold (design v4.1): every consumer flag defaults
+        # OFF, and this state is written ONLY by note_completion /
+        # _smart_tick_locked -- both flag-gated -- and read by the OBS panel.
+        # cap_slots stays None until L1 (smart_cap_read) reads the whitelist key.
+        self.cap_slots = None
+        self.sm = {"streams_s": 0, "dur_sum_s": 0.0, "win_streams": 0, "win_dur": 0.0,
+                   "t_bar_window": None, "t_bar_base": None, "t_bar_used": None,
+                   "t_bar_hist": [], "degraded": True, "feed_blind": True,
+                   "cong_streak": 0, "L_hat": None, "tick_n": 0}
+
     # ---- health state machine (rule 4) -----------------------------------
     def note_connect_failure(self, err, max_fails, backoff):
         down_msg = None
@@ -471,6 +481,23 @@ class Backend:
                 "recent_ttfb_p95_s": (sorted(self.recent_ttfb)[max(0, int(0.95 * (len(self.recent_ttfb) - 1) + 0.5))]
                                       if self.recent_ttfb else None),
                 "recent_ttfb_n": len(self.recent_ttfb),
+                # OBS panel (design v4.1 S11): additive, ALWAYS present, null
+                # while the scaffold sleeps -- a monitor's parser must never
+                # see a field appear only after some flag flips
+                "cap_slots": self.cap_slots,
+                "t_bar_window_s": self.sm["t_bar_window"],
+                "t_bar_base_s": self.sm["t_bar_base"],
+                "t_bar_used_s": self.sm["t_bar_used"],
+                "t_bar_degraded": self.sm["degraded"],
+                "feed_blind": self.sm["feed_blind"],
+                "cong_streak": self.sm["cong_streak"],
+                # F13 proxy: real failure_pressure needs the estimator's own
+                # ledger (L2+); this reads what IS on record -- state plus the
+                # hard-error share of the box's own requests
+                "failure_pressure": self._failure_pressure_locked(),
+                "estimator_mode": "J" if (self.cfg.get("smart") or {}).get("smart_place") else "today",
+                "inflation": (round(self.sm["t_bar_window"] / self.sm["t_bar_used"], 3)
+                              if self.sm["t_bar_window"] and self.sm["t_bar_used"] else None),
                 "stats": dict(self.stats),
             }
 
@@ -496,6 +523,78 @@ class Backend:
         elif self.state == SUSPECT:
             s += 5e3
         return s
+
+    def _failure_pressure_locked(self):
+        """F13 OBS proxy (caller holds self.lock): how much of this box's own
+        record says "hurt" -- its state away from HEALTHY plus the connect +
+        stream error share of its own requests."""
+        st = self.stats
+        return round((0.0 if self.state == HEALTHY else 1.0)
+                     + (st["connect_errors"] + st["stream_errors"]) / max(1, st["requests"]), 3)
+
+    def _smart_tick_locked(self, sm, now):
+        """Poll-tick bookkeeping for the smart scaffold (CALLER HOLDS self.lock;
+        design S-2: zero resident threads -- every number moves only when a
+        status poll lands, and the poller calls this EVERY cycle, fresh sample
+        or not, so staleness itself gets a verdict). Returns the OBS line when
+        smart_obs is due on this tick (cadence knob obs_every_polls, default
+        10); the POLLER logs it -- never log under a lock."""
+        self.sm["tick_n"] += 1
+        stale = (not self.ever_reported) or (now - self.status_ts) > self._stale_after()
+        self.sm["feed_blind"] = stale
+        # window T-bar: difference of the class-filtered cumulative counters
+        # (V3-09-1) -- n_min counts FILTERED completions, not raw requests
+        ds = self.sm["streams_s"] - self.sm["win_streams"]
+        dd = self.sm["dur_sum_s"] - self.sm["win_dur"]
+        self.sm["win_streams"] = self.sm["streams_s"]
+        self.sm["win_dur"] = self.sm["dur_sum_s"]
+        hist = self.sm["t_bar_hist"]
+        if ds >= max(1, int(sm.get("n_min") or 20)):
+            mean = dd / ds
+            self.sm["t_bar_window"] = mean
+            self.sm["degraded"] = False
+            hist.append((now, mean))
+        else:
+            self.sm["t_bar_window"] = None
+            self.sm["degraded"] = True
+        keep = float(sm.get("t_bar_base_window_s") or 86400.0)
+        while hist and (now - hist[0][0] > keep or len(hist) > 4096):
+            hist.pop(0)
+        # T̄_base: rolling min of recorded window values (24h). O11 stays true
+        # and documented: a quiet-hours service component can pull this BELOW
+        # daytime service time -- the clamp bites the placement side; the
+        # shipping gate only weighs the move side.
+        self.sm["t_bar_base"] = min(v for _t, v in hist) if hist else None
+        w, base = self.sm["t_bar_window"], self.sm["t_bar_base"]
+        if w is None:
+            self.sm["t_bar_used"] = None      # DEFAULT-T-bar path: clamp-EXEMPT (E6-3)
+        elif base is None:
+            self.sm["t_bar_used"] = w         # cold start: clamp waived one cycle (E6-3)
+        else:
+            self.sm["t_bar_used"] = min(w, float(sm.get("t_bar_clamp_factor") or 3.0) * base)
+        # cong_streak: own-signal congestion L̂ >= k_b, FRESH polls only --
+        # a stale feed FREEZES the streak (V3-09-3: a stale-reset streak would
+        # make the move trigger "never fires" behind a blind feed)
+        if not stale:
+            caps = [v for v in (self.max_inflight, self.cap_slots) if v is not None]
+            if caps:      # both None: k_b undefined, honest freeze (S-1 territory)
+                k_b = max(1, min(caps))
+                l_hat = max(float(self.reported.get("serving") or 0.0)
+                            + float(self.reported.get("queued") or 0.0), float(self.inflight))
+                self.sm["L_hat"] = l_hat
+                self.sm["cong_streak"] = self.sm["cong_streak"] + 1 if l_hat >= k_b else 0
+        if sm.get("smart_obs") and \
+                self.sm["tick_n"] % max(1, int(sm.get("obs_every_polls") or 10)) == 0:
+            return ("OBS box=%s L_hat=%s Tbar_w=%s Tbar_base=%s Tbar_used=%s inflight=%d "
+                    "cong=%d degraded=%s cap=%s feed_blind=%s" % (
+                        self.id,
+                        ("%0.1f" % self.sm["L_hat"]) if self.sm["L_hat"] is not None else "-",
+                        ("%0.1fs" % w) if w is not None else "DEFAULT",
+                        ("%0.1fs" % base) if base is not None else "-",
+                        ("%0.1fs" % self.sm["t_bar_used"]) if self.sm["t_bar_used"] is not None else "-",
+                        self.inflight, self.sm["cong_streak"], self.sm["degraded"],
+                        self.cap_slots, self.sm["feed_blind"]))
+        return None
 
 
 class Pool:
@@ -536,7 +635,34 @@ class Pool:
             # re-derived from /stats alone after an operator touched anything
             # (stress Q2/F3).
             "operator_cancelled": 0,
+            # smart ledger (design v4.1): diagnostics only -- a move re-homes
+            # an existing lane and never books a request, so the closed
+            # identity stays untouched by any smart flag (S13-13)
+            "moves": 0, "homecomings": 0, "preview_passes": 0, "move_gate_locked": 0,
+            "shadow_would_moves": 0, "shadow_loss_moves": 0, "shadow_unresolved": 0,
         }
+        # smart knobs (ALL default OFF, design S9): resolved once at boot;
+        # sm_cfg carries the merged defaults so readers never re-default keys.
+        # A non-dict section is IGNORED here -- validate_cfg names it as a
+        # boot problem before anything ever serves.
+        _sm_raw = cfg.get("smart")
+        self.sm_cfg = (dict(DEFAULTS["smart"], **_sm_raw) if isinstance(_sm_raw, dict)
+                       else dict(DEFAULTS["smart"]))
+        self.smart_any = any(self.sm_cfg.get(f) for f in SMART_FLAGS)
+
+    def note_completion(self, backend, method, bare, duration, key):
+        """Class-filtered success accumulator (design S2/S13-14): ONLY
+        POST /v1/messages completions feed T-bar -- count_tokens, other paths,
+        other methods and every failure never count, because their seconds are
+        not a conversation's answer time. `key` is reserved for the shadow
+        lane ledger (L2). Silent no-op while every smart flag is off."""
+        if not self.smart_any:
+            return
+        if method != "POST" or bare != "/v1/messages":
+            return
+        with backend.lock:
+            backend.sm["streams_s"] += 1
+            backend.sm["dur_sum_s"] += float(duration)
 
     def _stash_pending(self, token, entry):
         """Book a pending overflow (CALLER HOLDS self.lock). The 4096 cap is a
@@ -1198,6 +1324,13 @@ class StatusPoller(threading.Thread):
                 except Exception as exc:
                     with be.lock:
                         be.status_error = "poller: " + repr(exc)
+                if self.pool.smart_any:
+                    # the scaffold's ONLY heartbeat (S-2): it ticks whether or
+                    # not this poll got a fresh sample -- staleness is a verdict
+                    with be.lock:
+                        obs = be._smart_tick_locked(self.pool.sm_cfg, time.monotonic())
+                    if obs:
+                        LOG.info("%s", obs)
             self.stop_evt.wait(max(0.2, float(self.cfg.get("status_interval") or 1.0)))
 
     def _poll(self, be):
@@ -2012,6 +2145,7 @@ class Handler(BaseHTTPRequestHandler):
                     backend.recent_ttfb.append(round(ttfb, 2))
                     if len(backend.recent_ttfb) > RECENT_TTFB_WINDOW:
                         backend.recent_ttfb.pop(0)
+            self.pool.note_completion(backend, method, bare, duration, key)
             # A big ttfb while nothing else was running means the request was
             # sitting in the backend FIFO. That is the queue working -- watch it.
             LOG.info(
@@ -2262,10 +2396,23 @@ def _probe_messages(be, path):
 # config
 # ---------------------------------------------------------------------------
 
+# smart-placement ladder (design v4.1 S9): flags gate behavior layers, all
+# default OFF; numbers are the engine knobs. validate_cfg checks shape here;
+# unknown knobs warn-and-ignore, never silently trusted as something else.
+SMART_FLAGS = ("smart_obs", "smart_cap_read", "smart_shadow", "smart_place",
+               "smart_preview", "smart_move", "smart_transient", "smart_homecoming")
+SMART_NUMS = ("k_gain", "tau_pp_move", "tau_pp_homecoming", "tau_pp_transient",
+              "default_t_bar", "n_min", "w_cour", "kappa_hat", "r_hat_init",
+              "r_hat_min", "r_hat_max", "k_eps", "t_bar_clamp_factor",
+              "t_bar_base_window_s", "window_n", "release_gate_shadow_cycles",
+              "release_gate_min_would_moves", "shadow_cycle_s",
+              "homecoming_lane_s", "homecoming_box_s", "obs_every_polls")
+
 DEFAULTS = {
     "listen": "127.0.0.1",
     "port": 8088,
     "backends": [],
+    "smart": {},                    # the ladder lives here; empty = every flag off
     "path_prefix": "",
     "sticky_ttl": 21600,          # 6h: a Codex session should never drift boxes
     "sticky_max": 20000,
@@ -2989,6 +3136,48 @@ def validate_cfg(cfg, pool, strict=True):
             "-- and gate the control surface: --set-key control.",
             _ln, _ln,
         )
+    # ---- smart ladder section (design v4.1 S9/S-1) ------------------------
+    _sm_sec = cfg.get("smart")
+    if _sm_sec is not None:
+        if not isinstance(_sm_sec, dict):
+            problems.append(("smart", "must be an object of smart.* knobs, got %s"
+                             % (type(_sm_sec).__name__,)))
+        else:
+            for fk in SMART_FLAGS:
+                v = _sm_sec.get(fk)
+                if v is not None and not isinstance(v, bool):
+                    problems.append(("smart." + fk,
+                                     "must be true/false (a JSON boolean), got %r -- the string \"false\" is truthy" % (v,)))
+            for nk in SMART_NUMS:
+                v = _sm_sec.get(nk)
+                if v is None:
+                    continue
+                if isinstance(v, bool):
+                    problems.append(("smart." + nk, "must be a number, got a boolean"))
+                    continue
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    problems.append(("smart." + nk, "must be a number, got %s" % (type(v).__name__,)))
+                    continue
+                if f != f or f in (float("inf"), float("-inf")):
+                    problems.append(("smart." + nk, "must be finite, got %r" % (v,)))
+                elif nk == "k_eps":
+                    if f < 0:
+                        problems.append(("smart.k_eps", "must be >= 0 (it is a tolerance), got %r" % (v,)))
+                elif f <= 0:
+                    problems.append(("smart." + nk, "must be > 0, got %r" % (v,)))
+            for k in _sm_sec:
+                if k not in SMART_FLAGS and k not in SMART_NUMS:
+                    LOG.warning("smart: unknown knob %r is IGNORED -- knobs never guess a spelling", k)
+            if _sm_sec.get("smart_place") or _sm_sec.get("smart_move"):
+                # S-1: J costs divide by k_b; an undeclared max_inflight makes
+                # k_b the attractive lie "infinite capacity". Refuse boot by
+                # name -- never substitute a silent cap for an absent promise.
+                for b in pool.backends:
+                    if b.max_inflight is None:
+                        problems.append((b.id + ".max_inflight",
+                                         "S-1: smart_place/smart_move need every box to declare max_inflight -- k_b would be unbounded"))
     if problems and strict:
         for k, why in problems:
             LOG.error("config: %s: %s", k, why)

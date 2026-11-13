@@ -2774,6 +2774,128 @@ def main():
                 os.rmdir(_r5dir)
             except OSError:
                 pass
+        # ---- smart placement C1: scaffold + L0 observation (design v4.1 §2/§9/§13) ----
+        print("")
+        print("S1) smart scaffold -- config, accumulator, OBS (design v4.1)")
+        _sp_be = R.Backend("sp1", "http://127.0.0.1:9", cfg={"max_inflight": 4})
+        _sp_be2 = R.Backend("sp2", "http://127.0.0.1:9", cfg={"max_inflight": 4})
+        _sp_pool = R.Pool([_sp_be, _sp_be2], {"smart": {"smart_obs": True}})
+        _sp_off = R.Pool([R.Backend("sp3", "http://127.0.0.1:9", cfg={})], {})
+        check("S1: smart counters exist on the ledger, zero at birth (moves are diagnostics only)",
+              all(_sp_pool.metrics[k] == 0 for k in
+                  ("moves", "homecomings", "preview_passes", "move_gate_locked",
+                   "shadow_would_moves", "shadow_loss_moves", "shadow_unresolved")),
+              str({k: _sp_pool.metrics.get(k, "ABSENT") for k in ("moves", "preview_passes")}))
+        check("S1: flags default ALL off -- a plain cfg runs the estimator nowhere (§9)",
+              _sp_off.smart_any is False and _sp_pool.smart_any is True,
+              "off=%s on=%s" % (_sp_off.smart_any, _sp_pool.smart_any))
+        for _sp_m, _sp_p in (("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"),
+                             ("GET", "/v1/messages"), ("POST", "/v1/responses")):
+            _sp_pool.note_completion(_sp_be, _sp_m, _sp_p, 5.0, None)
+        check("S1: class-filtered accumulator counts ONLY POST /v1/messages (§13-14)",
+              _sp_be.sm["streams_s"] == 1 and abs(_sp_be.sm["dur_sum_s"] - 5.0) < 1e-9,
+              "streams_s=%s dur=%.1f" % (_sp_be.sm.get("streams_s"), _sp_be.sm.get("dur_sum_s", -1)))
+        _sp_off.note_completion(_sp_be2, "POST", "/v1/messages", 5.0, None)
+        check("S1: all flags OFF -- the accumulator never ticks (byte-silent scaffold)",
+              _sp_be2.sm["streams_s"] == 0, "streams_s=%s" % _sp_be2.sm.get("streams_s"))
+        _sp_be.ever_reported = True
+        _sp_be.reported = {"serving": 0.0, "queued": 0.0}
+        _sp_t = time.monotonic() + 100.0
+        _sp_be.status_ts = _sp_t - 0.1
+        for _i in range(20):
+            _sp_be.sm["streams_s"] += 1
+            _sp_be.sm["dur_sum_s"] += 300.0
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t)
+        check("S1: window T-bar = counter difference; n_min counts FILTERED completions (V3-09①②)",
+              _sp_be.sm["t_bar_window"] is not None
+              and abs(_sp_be.sm["t_bar_window"] - (5.0 + 20 * 300.0) / 21.0) < 1e-9
+              and _sp_be.sm["degraded"] is False,
+              "w=%s deg=%s" % (_sp_be.sm["t_bar_window"], _sp_be.sm["degraded"]))
+        for _i in range(20):
+            _sp_be.sm["streams_s"] += 1
+            _sp_be.sm["dur_sum_s"] += 10.0
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 1.0)
+        for _i in range(20):
+            _sp_be.sm["streams_s"] += 1
+            _sp_be.sm["dur_sum_s"] += 300.0
+        _sp_be.status_ts = _sp_t + 0.9
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 1.0)
+        check("S1: T̄_used = min(window, 3 x 24h rolling-min base) binds on a spike (V3-05/E3)",
+              _sp_be.sm["t_bar_window"] is not None and abs(_sp_be.sm["t_bar_window"] - 300.0) < 1e-6
+              and abs(_sp_be.sm["t_bar_used"] - 30.0) < 1e-6 and abs(_sp_be.sm["t_bar_base"] - 10.0) < 1e-6,
+              "w=%s used=%s base=%s" % (_sp_be.sm["t_bar_window"], _sp_be.sm["t_bar_used"], _sp_be.sm["t_bar_base"]))
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 2.0)
+        check("S1: streams_s < n_min -- window None + degraded (DEFAULT_T̄ path, clamp-exempt E6③)",
+              _sp_be.sm["t_bar_window"] is None and _sp_be.sm["degraded"] is True
+              and _sp_be.sm["t_bar_used"] is None,
+              "w=%s deg=%s used=%s" % (_sp_be.sm["t_bar_window"], _sp_be.sm["degraded"], _sp_be.sm["t_bar_used"]))
+        _sp_be.reported = {"serving": 4.0, "queued": 0.0}
+        _sp_be.status_ts = _sp_t + 2.9
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 3.0)
+        _sp_c1 = _sp_be.sm["cong_streak"]
+        _sp_be.status_ts = _sp_t + 3.9
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 4.0)
+        _sp_c2 = _sp_be.sm["cong_streak"]
+        _sp_be.status_ts = _sp_t - 2.0          # 6.0s behind the tick clock: stale
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 4.0)
+        _sp_c3 = _sp_be.sm["cong_streak"]
+        _sp_be.reported = {"serving": 0.0, "queued": 0.0}
+        _sp_be.status_ts = _sp_t + 3.9
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 4.0)
+        _sp_c4 = _sp_be.sm["cong_streak"]
+        check("S1: cong_streak counts fresh congested polls, FREEZES while stale, resets on idle (V3-09③)",
+              (_sp_c1, _sp_c2, _sp_c3, _sp_c4) == (1, 2, 2, 0),
+              "steps=%s" % (( _sp_c1, _sp_c2, _sp_c3, _sp_c4),))
+        _sp_inf, _sp_req = _sp_be.inflight, _sp_be.stats["requests"]
+        _sp_be.ever_reported = True
+        _sp_be.status_ts = time.monotonic()
+        _sp_be.accepts_placement()
+        check("S1: accepts_placement is an un-ticked read -- no inflight++, no request tick (§13-17)",
+              _sp_be.inflight == _sp_inf and _sp_be.stats["requests"] == _sp_req,
+              "inflight %s->%s requests %s->%s" % (_sp_inf, _sp_be.inflight, _sp_req, _sp_be.stats["requests"]))
+        _sp_snap = _sp_be.snapshot()
+        check("S1: /stats carries the additive OBS panel incl. F13 failure_pressure proxy",
+              all(_sp_snap.get(k, "ABSENT") != "ABSENT" or k == "cap_slots"
+                  for k in ("t_bar_window_s", "t_bar_base_s", "t_bar_used_s", "t_bar_degraded",
+                            "cong_streak", "failure_pressure"))
+              and "cap_slots" in _sp_snap and isinstance(_sp_snap["failure_pressure"], float),
+              str({k: _sp_snap.get(k, "ABSENT") for k in ("t_bar_window_s", "cong_streak", "failure_pressure")}))
+        _sp_thr = threading.active_count()
+        _sp_pool.note_completion(_sp_be, "POST", "/v1/messages", 1.0, None)
+        _sp_be._smart_tick_locked(_sp_pool.sm_cfg, time.monotonic())
+        check("S1: the scaffold starts ZERO resident threads (S-2)",
+              threading.active_count() == _sp_thr,
+              "%d -> %d" % (_sp_thr, threading.active_count()))
+        _sp_pay = [None] * 10
+        _sp_be.sm["tick_n"] = 0                 # cadence is per-backend: count from here
+        _sp_be.status_ts = _sp_t + 19.9
+        for _i in range(10):
+            _sp_pay[_i] = _sp_be._smart_tick_locked(_sp_pool.sm_cfg, _sp_t + 20.0 + _i * 0.001)
+        check("S1: an OBS line is prepared exactly once per obs_every_polls tick, never otherwise",
+              sum(1 for _p in _sp_pay if _p) == 1 and _sp_pay[-1],
+              "emitted at %s" % [i for i, p in enumerate(_sp_pay) if p])
+        _sp_pay_off = []
+        for _i in range(10):
+            _sp_pay_off.append(_sp_be._smart_tick_locked(_sp_off.sm_cfg, time.monotonic()))
+        check("S1: smart_obs OFF -- no OBS line is ever prepared (default-off L0 with no exception, §1)",
+              not any(_sp_pay_off), str([bool(p) for p in _sp_pay_off].count(True)))
+        _sp_pA = R.Pool([R.Backend("mx1", "http://127.0.0.1:9", cfg={})], {"smart": {"smart_place": True}})
+        _sp_pbA = R.validate_cfg({"smart": {"smart_place": True}}, _sp_pA, strict=False)
+        check("S1: S-1 -- smart_place ON without a declared max_inflight is a named boot refusal",
+              any("S-1" in _w for _k, _w in _sp_pbA),
+              str(["%s: %s" % (k, w) for k, w in _sp_pbA])[:220])
+        _sp_pB = R.Pool([R.Backend("mx2", "http://127.0.0.1:9", cfg={"max_inflight": 2})], {"smart": {}})
+        _sp_pbB = R.validate_cfg({"smart": {"smart_obs": True}}, _sp_pB, strict=False)
+        check("S1: S-1 does NOT demand mi for obs/shadow/preview -- only place/move do",
+              not any("S-1" in _w for _k, _w in _sp_pbB), str(_sp_pbB)[:200])
+        _sp_pC = R.Pool([R.Backend("mx3", "http://127.0.0.1:9", cfg={})], {"smart": {"smart_obs": "false"}})
+        _sp_pbC = R.validate_cfg({"smart": {"smart_obs": "false"}}, _sp_pC, strict=False)
+        check("S1: a string \"false\" flag is refused BY NAME -- the truthy-string trap stays closed",
+              any(_k == "smart.smart_obs" for _k, _w in _sp_pbC), str(_sp_pbC)[:200])
+        _sp_pD = R.Pool([R.Backend("mx4", "http://127.0.0.1:9", cfg={})], {"smart": {"k_gainn": 3}})
+        _sp_pbD = R.validate_cfg({"smart": {"k_gainn": 3}}, _sp_pD, strict=False)
+        check("S1: an unknown smart.* knob is not a problem (warn+ignore doctrine) -- never silently trusted",
+              not any(_k.startswith("smart") for _k, _w in _sp_pbD), str(_sp_pbD)[:200])
     finally:
         proc.terminate()
         try:
