@@ -2580,7 +2580,7 @@ def main():
 
         _p4 = R.Pool([R.Backend("u1", "http://127.0.0.1:9", "", cfg={})], {"sticky_max": 4})
         for _i in range(7):
-            _p4._affinity_put("k%d" % _i, "u1")
+            _p4._affinity_put("k%d" % _i, "u1", "sticky")
         check("v1.2.16: sticky_max is honored literally -- 4 means 4, oldest evicted first (R4-A/F7)",
               len(_p4.affinity) == 4 and list(_p4.affinity) == ["k3", "k4", "k5", "k6"],
               str(list(_p4.affinity)))
@@ -2971,6 +2971,47 @@ def main():
                   _bt.sm["cong_streak"] == 1, "streak=%s" % _bt.sm["cong_streak"])
         finally:
             R._read_cap_slots = _cap_real
+        # ---- smart placement C3: affinity origin field (design S13-20) ----
+        print("")
+        print("S3) affinity origin -- who seated this lane, and does it survive a restamp (S13-20)")
+        _ob1 = R.Backend("ob1", "http://127.0.0.1:9", cfg={})
+        _ob2 = R.Backend("ob2", "http://127.0.0.1:9", cfg={})
+        _opool = R.Pool([_ob1, _ob2], {})
+        _opool.affinity["legacy"] = ("ob1", time.monotonic())   # pre-origin 2-form
+        check("S3: readers tolerate the legacy 2-form -- _affinity_get reads it and RESTAMPS to 3-form",
+              _opool._affinity_get("legacy") == "ob1"
+              and len(_opool.affinity["legacy"]) == 3 and _opool.affinity["legacy"][2] == "sticky",
+              str(_opool.affinity.get("legacy")))
+        check("S3: status() counts in v[0]-form -- a wider value never breaks the monitor feed",
+              _opool.status()["affinity_by_backend"].get("ob1") == 1)
+        _loud = False
+        try:
+            _opool._affinity_put("noorigin", "ob1")
+        except TypeError:
+            _loud = True
+        check("S3: _affinity_put has NO origin default -- a missed call site dies LOUD, never defaults",
+              _loud and "noorigin" not in _opool.affinity)
+        _opool._affinity_put("tr1", "ob2", "transient")
+        _opool._affinity_get("tr1")
+        check("S3: restamp preserves ANY origin -- transient survives a sticky hit intact",
+              _opool.affinity["tr1"][2] == "transient" and _opool.affinity["tr1"][0] == "ob2",
+              str(_opool.affinity.get("tr1")))
+        _r1 = _opool.pick("lane1", pin="ob1")
+        check("S3: the pin seat writes origin=pin",
+              _r1[1] == "pinned" and _opool.affinity["lane1"][2] == "pin",
+              "%s / %s" % (_r1[1], _opool.affinity["lane1"][2] if len(_opool.affinity["lane1"]) > 2 else "2-FORM"))
+        _r2 = _opool.pick("lane1")
+        _r3 = _opool.pick("lane1")
+        check("S3: two sticky hits restamp the row -- origin STAYS pin (§13-20: hits must not launder an operator pin)",
+              _r2[1] == "sticky" and _r3[1] == "sticky" and _opool.affinity["lane1"][2] == "pin",
+              "reasons=%s,%s origin=%s" % (_r2[1], _r3[1], _opool.affinity["lane1"][2]))
+        _r4 = _opool.pick("lane2")
+        check("S3: fresh placement seats origin=sticky",
+              _r4[1] == "placed" and _opool.affinity["lane2"][2] == "sticky")
+        _od = _opool.status().get("affinity_origin", "ABSENT")
+        check("S3: /stats publishes the origin distribution (who owns the table, right now)",
+              _od != "ABSENT" and _od.get("pin") == 1 and _od.get("sticky") == 2
+              and _od.get("transient") == 1, str(_od))
     finally:
         proc.terminate()
         try:

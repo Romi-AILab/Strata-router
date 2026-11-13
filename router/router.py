@@ -696,7 +696,7 @@ class Pool:
             if pend is None or pend[0] != affinity_key:
                 return
             self.metrics["overflow_placements"] += 1
-        self._affinity_put(affinity_key, pend[2])
+        self._affinity_put(affinity_key, pend[2], "sticky")
 
     def overflow_rollback(self, affinity_key, token, failed_id):
         """The overflow target died BEFORE a single request byte was sent --
@@ -799,31 +799,41 @@ class Pool:
             )
 
     # ---- affinity store ---------------------------------------------------
+    # Values are (backend_id, monotonic_ts, origin), origin in
+    # {pin, sticky, smart, transient}: WHO seated this lane, so L5+ knows what
+    # it may move. All readers are arity-tolerant on the 2-form (a value can
+    # only be 2-form after a binary rollback -- reading it must not die), and
+    # _affinity_get's restamp MUST preserve origin (S13-20: a sticky hit must
+    # never launder an operator pin into movable traffic).
     def _affinity_get(self, key):
         ttl = float(self.cfg.get("sticky_ttl") or 0)
         with self.lock:
             hit = self.affinity.get(key)
             if not hit:
                 return None
-            backend_id, ts = hit
+            backend_id, ts = hit[0], hit[1]
             if ttl > 0 and time.monotonic() - ts > ttl:
                 del self.affinity[key]
                 return None
             # idle-TTL: a live conversation keeps its pin -- ttl counts idle
             # time since the LAST turn, not since placement, so a long working
             # night never drifts an active session onto a cold box
-            self.affinity[key] = (backend_id, time.monotonic())
+            self.affinity[key] = (backend_id, time.monotonic(),
+                                  hit[2] if len(hit) > 2 else "sticky")
             self.affinity.move_to_end(key)
             return backend_id
 
-    def _affinity_put(self, key, backend_id):
+    def _affinity_put(self, key, backend_id, origin):
+        # origin has NO default on purpose: every seat must SAY who seated it,
+        # and a call site that forgot is a TypeError at boot-smoke, not a
+        # silent "sticky" that quietly makes an operator pin movable.
         # explicit None check: `or 20000` silently turned a configured 0 into
         # 20000 and a negative cap into "empty the table on every write"
         # (R4-A/F7); validate_cfg rejects non-positive caps at boot now
         v = self.cfg.get("sticky_max")
         cap = 20000 if v is None else int(v)
         with self.lock:
-            self.affinity[key] = (backend_id, time.monotonic())
+            self.affinity[key] = (backend_id, time.monotonic(), origin)
             self.affinity.move_to_end(key)
             while len(self.affinity) > cap:
                 self.affinity.popitem(last=False)
@@ -874,7 +884,7 @@ class Pool:
             want = self.by_id.get(pin)
             if want is not None and want.try_place(ignore_cap=True):
                 if affinity_key:
-                    self._affinity_put(affinity_key, want.id)
+                    self._affinity_put(affinity_key, want.id, "pin")
                     # an operator who just pinned this lane takes manual
                     # control: a provisional overflow re-home in flight must
                     # not silently overwrite the pin when its stream answers
@@ -956,7 +966,7 @@ class Pool:
                     "affinity %s migrating %s -> %s (dropped %d keys); one cold prompt re-read expected",
                     short(affinity_key), home.id, alt.id, dropped,
                 )
-                self._affinity_put(affinity_key, alt.id)
+                self._affinity_put(affinity_key, alt.id, "sticky")
                 return alt, "migrated", True, None
         else:
             # New conversation: put it on the shallowest ACCEPTING queue and
@@ -970,7 +980,7 @@ class Pool:
                     self._note_gate_bypass(alt)
             if alt is not None and reserved:
                 if affinity_key:
-                    self._affinity_put(affinity_key, alt.id)
+                    self._affinity_put(affinity_key, alt.id, "sticky")
                 with self.lock:
                     self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
                 return alt, "placed", True, None
@@ -1003,7 +1013,7 @@ class Pool:
                 with self.lock:
                     self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
                 if affinity_key:
-                    self._affinity_put(affinity_key, be.id)   # "placed" means homed
+                    self._affinity_put(affinity_key, be.id, "sticky")   # "placed" means homed
                 LOG.info("new placement found every gate closed mid-race; queued at live %s", be.id)
                 return be, "placed", True, None
         with self.lock:
@@ -1048,11 +1058,17 @@ class Pool:
     def status(self):
         with self.lock:
             dist = {}
-            for backend_id, _ts in self.affinity.values():
-                dist[backend_id] = dist.get(backend_id, 0) + 1
+            origin_dist = {}
+            for v in self.affinity.values():
+                # v[0]-form: the table's shape must never break the monitor
+                # feed, and origin belongs on its own axis (S13-19/S13-20)
+                dist[v[0]] = dist.get(v[0], 0) + 1
+                _o = v[2] if len(v) > 2 else "sticky"
+                origin_dist[_o] = origin_dist.get(_o, 0) + 1
             out = dict(self.metrics)
             out["affinity_keys"] = len(self.affinity)
             out["affinity_by_backend"] = dist
+            out["affinity_origin"] = origin_dist
             # the provisional window made observable: overflows that have left
             # home but not yet earned a re-home (each settles within its own
             # request's lifetime -- a number that GROWS is the landmine signal)
