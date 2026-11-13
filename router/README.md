@@ -444,11 +444,23 @@ What that gets you:
   (`smart.smart_move`, gated by the release gate and cooled by its own
   `tau_pp_transient`) may branch it on, and J's own arithmetic decides whether
   idle old home is the cheapest next seat. Everything above describes the
-  flag-off reality: with `smart_transient` off, overflow stays permanent and
+  flag-off reality: with `smart_transient` and `smart_homecoming` off,
+  overflow stays permanent, nothing auto-corrects it, and
   `__router/sticky/clear` stays the only lever.
-  A narrow hysteretic
-  homecoming (return home only when it has been empty at pick time, so
-  re-overflow needs real load) is a possible future refinement, not shipped.
+  `smart.smart_homecoming` (off by default) ships the narrow hysteretic
+  return the paragraph above used to call unshipped: an exiled lane walks
+  back when its old home has been VERIFIABLY empty -- healthy, gate open,
+  the fresh feed showing no load that is not our own (aborted requests'
+  ghost debt subtracted), zero inflight there -- for two consecutive fresh
+  polls (a blind stretch freezes the proof; it neither counts nor resets).
+  Each lane then cools on its own `tau_pp_homecoming`, and the box drains
+  its returning lanes throttled by `homecoming_box_s` (120s): a freed box
+  takes lanes back one careful step at a time, never a storm. Returned
+  lanes carry origin=`smart` in `affinity_origin` -- you can see which
+  seats smart itself re-seated. The two storm columns are `moves` and
+  `homecomings` in `/stats`, read beside `affinity_by_backend` settling
+  back toward the primary; both are diagnostics, never part of the closed
+  identity, and every homecoming logs a `HOMECOMING` line when it lands.
 
 ### Mirror deployment (two friends, two boxes, one shared file)
 

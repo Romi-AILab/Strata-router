@@ -3515,6 +3515,88 @@ def main():
         finally:
             _proc_tv.terminate()
             _t_a.kill(); _t_b.kill()
+        # ---- smart placement C8: L6 smart_homecoming -- exile is not fate, but proof is the gate ----
+        print("")
+        print("S8) smart L6 -- the lane walks home only on a two-poll proof (§5)")
+        _ho, _hw = _ube("GA"), _ube("GB")
+        _hp = R.Pool([_ho, _hw], {"smart": {"smart_homecoming": True}})
+        _hp._affinity_put("hk", "GB", "sticky")
+        _hp._exiled["hk"] = "GA"
+        _ho.sm["empty_streak"] = 2
+        _ho.sm["feed_blind"] = False           # a never-polled box is born blind (router :268) -- and a blind feed is exactly what D4' refuses
+        _hp._homecoming("hk", _hw, {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        check("S8: exiled lane comes home on the two-poll verifiably-empty proof -- origin=smart, homecomings booked",
+              _hp.affinity.get("hk")[0] == "GA" and _hp.affinity.get("hk")[2] == "smart"
+              and _hp.metrics["homecomings"] == 1, str(_hp.affinity.get("hk")))
+        _hp._affinity_put("hk2", "GB", "sticky")
+        _hp._exiled["hk2"] = "GA"
+        _hp._homecoming("hk2", _hw, {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        check("S8: the per-box 120s throttle holds -- a freed box drains ONE lane, not its queue (§13-5)",
+              _hp.metrics["homecomings"] == 1 and _hp.affinity.get("hk2")[0] == "GB")
+        _hp2 = R.Pool([_ho2 := _ube("HA"), _ube("HB")], {"smart": {"smart_homecoming": True}})
+        _hp2._affinity_put("k1", "HB", "sticky")
+        _hp2._exiled["k1"] = "HA"
+        _ho2.sm["empty_streak"] = 1
+        _ho2.sm["feed_blind"] = False          # unblind so the streak is the ONLY refusing item
+        _hp2._homecoming("k1", _hp2.backends[1], {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        check("S8: one empty report is not a proof -- streak<2 keeps the lane put (D4' x2 consecutive)",
+              _hp2.metrics["homecomings"] == 0 and _hp2.affinity.get("k1")[0] == "HB")
+        _hp3 = R.Pool([_ho3 := _ube("IA"), _ube("IB")], {"smart": {"smart_homecoming": True}})
+        _hp3._affinity_put("k2", "IB", "transient")
+        _hp3._exiled["k2"] = "IA"
+        _ho3.sm["empty_streak"] = 5
+        _ho3.sm["feed_blind"] = False          # box fully proven -- only the transient origin may refuse
+        _hp3._homecoming("k2", _hp3.backends[1], {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        check("S8: transient homes belong to the MOVER -- homecoming skips them (§5 scope, two mechanisms never stack)",
+              _hp3.metrics["homecomings"] == 0 and _hp3.affinity.get("k2")[0] == "IB")
+        _hp4 = R.Pool([_ho4 := _ube("JA"), _ube("JB")], {"smart": {"smart_homecoming": True}})
+        _hp4._affinity_put("k3", "JB", "sticky")
+        _hp4._exiled["k3"] = "JA"
+        _ho4.sm["empty_streak"] = 5
+        _ho4.sm["feed_blind"] = False          # box fully proven -- only the lane's own cooldown may refuse
+        _hp4._homecoming("k3", _hp4.backends[1], {"turns": 2, "last_move": time.monotonic() - 30, "R_hat": 4.0})
+        check("S8: a just-moved lane waits out tau_pp_homecoming (900s) even beside a fully proven empty box",
+              _hp4.metrics["homecomings"] == 0)
+        _of = R.Pool([_ube("KA"), _ube("KB")], {})
+        _of._affinity_put("ok", "KB", "sticky")
+        _of._exile_note("ok", "KA")
+        _of.pick("ok")
+        check("S8: OFF -- the machinery is inert: no memory recorded, no decision read, counters byte-silent (§13-8)",
+              _of.metrics["homecomings"] == 0 and "ok" not in _of._exiled
+              and _of.affinity.get("ok")[0] == "KB")
+        # -- live: the whole arc on one real boot -- exiled by cap, home empties, lane walks back
+        _hc_a, _hc_b = FakeStrata(9155, "ha", hold=2.0), FakeStrata(9154, "hb", hold=0.1)
+        _hc_a.start(); _hc_b.start()
+        with open("smart_homecoming_probe.json", "w") as _ff:
+            json.dump({"listen": "127.0.0.1", "port": 9153, "status_interval": 0.2,
+                       "backends": [{"id": "ha", "url": "http://127.0.0.1:9155", "max_inflight": 1},
+                                    {"id": "hb", "url": "http://127.0.0.1:9154", "max_inflight": 8}],
+                       "smart": {"smart_homecoming": True}, "control_token": "s8ctl"}, _ff)
+        _proc_hc = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_homecoming_probe.json",
+                                     "--log-level", "WARNING"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S8: a legal homecoming boot comes up green",
+                  wait_for(lambda: get(9153, "/healthz")[0] == 200, 25))
+            _hc_ctl = {"x-strata-pin": "ha", "x-strata-control": "s8ctl"}
+            _w = threading.Thread(target=lambda: call(9153, "/v1/messages", conv("hclane"),
+                                                       extra=_hc_ctl, timeout=40))
+            _w.start()
+            time.sleep(0.5)
+            call(9153, "/v1/messages", conv("hclane"), timeout=40)     # cap-refused: overflow -> hb
+            _w.join()                                                  # ha's slot frees here
+            time.sleep(2.0)                                            # ha verifiably empty, x2 fresh
+            call(9153, "/v1/messages", conv("hclane"), timeout=40)     # the turn the proof fires on
+            _t4 = call(9153, "/v1/messages", conv("hclane"), timeout=40)  # the next turn walks home
+            _hr = stats(9153)["router"]
+            check("S8: LIVE arc -- exiled by cap, home proved empty x2, lane walked home: sticky@ha, counters agree",
+                  _t4[0] == 200 and _t4[1].get("x-strata-backend") == "ha"
+                  and _hr["homecomings"] >= 1 and _hr["affinity_origin"].get("smart", 0) >= 1,
+                  "b4=%s hc=%s o=%s" % (_t4[1].get("x-strata-backend"), _hr["homecomings"],
+                                        _hr["affinity_origin"]))
+        finally:
+            _proc_hc.terminate()
+            _hc_a.kill(); _hc_b.kill()
     finally:
         proc.terminate()
         try:

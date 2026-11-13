@@ -660,6 +660,7 @@ class Pool:
         self.smart_preview = bool(self.sm_cfg.get("smart_preview"))
         self.smart_move = bool(self.sm_cfg.get("smart_move"))
         self.smart_transient = bool(self.sm_cfg.get("smart_transient"))
+        self.smart_homecoming = bool(self.sm_cfg.get("smart_homecoming"))
         # lane + shadow bookkeeping (S2 state list): ALL in-memory, ALL
         # restart-zero (D13: losing samples only delays the shipping gate --
         # zero safety loss, and nothing re-derives identity from it)
@@ -668,6 +669,11 @@ class Pool:
         self._shadow_cyc = {}           # bucket -> {cycle, samples, resolved, loss, unresolved}
         self._shadow_done = []          # completed cycle dicts, oldest first
         self._shadow_bucket = None
+        # L6 working memory (volatile like the affinity table it shadows):
+        # which home each re-homed lane left, and the per-box homecoming
+        # throttle clock
+        self._exiled = {}
+        self._box_hc = {}
 
     def note_completion(self, backend, method, bare, duration, key):
         """Class-filtered success accumulator (design S2/S13-14): ONLY
@@ -938,6 +944,54 @@ class Pool:
                  short(affinity_key), home.id, tgt.id, home.sm["cong_streak"],
                  st["R_hat"], mv[1]["J"], mv[2]["J"])
 
+    def _exile_note(self, key, old_home_id):
+        """L6's memory of where a re-homed lane came from -- bounded like the
+        rest of the volatile tables; a dropped entry only loses a future
+        homecoming candidate, which is exactly the honest no-op. OFF means
+        OFF: nobody records what nobody will read."""
+        if not self.smart_homecoming:
+            return
+        self._exiled[key] = old_home_id
+        while len(self._exiled) > 4096:
+            self._exiled.pop(next(iter(self._exiled)))
+
+    def _homecoming(self, affinity_key, home, st):
+        """L6: bring an exiled lane home when home is PROVABLY empty -- the
+        D4' four items (healthy, gate open, the fresh feed showing zero load
+        that is not our own with ghost debt subtracted, zero inflight) held
+        TWO consecutive fresh polls (stale freezes, never counts nor resets);
+        the lane's own tau_pp_homecoming; and a per-box homecoming_box_s
+        throttle so a freed box drains lanes one careful step at a time,
+        never a storm. Transient homes belong to the mover (§4), pin homes
+        belong to the operator. Returns True if the lane came home (this
+        turn's mover must then stand down)."""
+        old_id = self._exiled.get(affinity_key)
+        if old_id is None or old_id == home.id:
+            return False
+        with self.lock:
+            _hit = self.affinity.get(affinity_key)
+        if _hit and len(_hit) > 2 and _hit[2] in ("pin", "transient"):
+            return False
+        old = self.by_id.get(old_id)
+        if old is None:
+            return False
+        now = time.monotonic()
+        if now - st["last_move"] < float(self.sm_cfg.get("tau_pp_homecoming") or 900.0):
+            return False
+        if now - self._box_hc.get(old_id, 0.0) < float(self.sm_cfg.get("homecoming_box_s") or 120.0):
+            return False
+        if old.sm["feed_blind"] or old.sm.get("empty_streak", 0) < 2:
+            return False
+        self._affinity_put(affinity_key, old_id, "smart")
+        st["last_move"] = now
+        self._box_hc[old_id] = now
+        self._exiled.pop(affinity_key, None)
+        with self.lock:
+            self.metrics["homecomings"] += 1
+        LOG.info("HOMECOMING lane %s %s -> %s (home verifiably empty x%d fresh)",
+                 short(affinity_key), home.id, old_id, old.sm.get("empty_streak", 0))
+        return True
+
     def _stash_pending(self, token, entry):
         """Book a pending overflow (CALLER HOLDS self.lock). The 4096 cap is a
         last-ditch bound -- past it the honest failure is thread exhaustion,
@@ -974,6 +1028,7 @@ class Pool:
         # origin column and coolable/movable on its own tau_pp key. The
         # settlement itself is the existing commit exit: zero new terminal.
         self._affinity_put(affinity_key, pend[2], "transient" if self.smart_transient else "sticky")
+        self._exile_note(affinity_key, pend[1])   # L6 remembers where it came from
 
     def overflow_rollback(self, affinity_key, token, failed_id):
         """The overflow target died BEFORE a single request byte was sent --
@@ -1195,16 +1250,20 @@ class Pool:
                 else:
                     with self.lock:
                         self.metrics["sticky_hits"] += 1
-                    if (self.smart_shadow or self.smart_move) and affinity_key:
+                    if (self.smart_shadow or self.smart_move or self.smart_homecoming) and affinity_key:
                         # L2 asks the mover's question observationally; L5
-                        # may act on it. Both roll the lane ONCE (shared
-                        # touch), and a failure here never touches the
-                        # request in flight (S9: observation cannot break it).
+                        # may act on it; L6 may bring the lane home first
+                        # (an empty-home proof outranks a J round this turn
+                        # -- the mover stands down when the lane came home).
+                        # All of it rolls the lane ONCE and a failure here
+                        # never touches the request in flight (S9).
                         try:
                             _lst = self._lane_touch(affinity_key)
                             if self.smart_shadow:
                                 self._shadow_note_turn(affinity_key, home, body_len, _lst)
-                            if self.smart_move:
+                            _hc = (self.smart_homecoming
+                                   and self._homecoming(affinity_key, home, _lst))
+                            if self.smart_move and not _hc:
                                 self._smart_move(affinity_key, home, body_len, _lst)
                         except Exception:
                             LOG.debug("smart decision failed for %s -- serving continues",
@@ -1282,6 +1341,7 @@ class Pool:
                         short(affinity_key), home.id, alt.id, dropped,
                     )
                     self._affinity_put(affinity_key, alt.id, "sticky")
+                    self._exile_note(affinity_key, home.id)   # L6 remembers where it came from
                 return alt, "migrated", True, None
         else:
             # New conversation: put it on the shallowest ACCEPTING queue and
@@ -1798,6 +1858,17 @@ class StatusPoller(threading.Thread):
                             # box FREEZES its last declared cap rather than
                             # losing it (the cap is a promise, not a sample)
                             be.cap_slots = _read_cap_slots(body)
+                        if self.pool.smart_homecoming:
+                            # L6's D4' verifiably-empty verdict, ticked on
+                            # FRESH commits only (a stale poll freezes the
+                            # streak -- it may neither count nor reset). Four
+                            # items: healthy, gate open, this very report is
+                            # the fresh one showing no FOREIGN load (ghost
+                            # debt subtracted), and zero inflight of ours.
+                            be.sm["empty_streak"] = (be.sm.get("empty_streak", 0) + 1
+                                if (be.state == HEALTHY and be._accepts_locked(be.status_ts)
+                                    and total <= be.inflight + debt and be.inflight == 0)
+                                else 0)
                     return
                 with be.lock:
                     be.status_error = sub + ": 200 but no load field recognised"
