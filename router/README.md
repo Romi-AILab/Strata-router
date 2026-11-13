@@ -436,7 +436,17 @@ What that gets you:
   nothing auto-corrects it (Claude Code cannot set a per-turn pin, so
   `__router/sticky/clear` -- which cold-starts every lane -- is the only lever).
   The signal is `affinity_by_backend` skewed to the *borrowed* box while the
-  primary's `inflight` sits near zero between turns. A narrow hysteretic
+  primary's `inflight` sits near zero between turns.
+  `smart.smart_transient` (off by default) puts one dent in that permanence,
+  and the origin column shows exactly where it: an overflow that ANSWERED
+  homes the lane with origin=`transient` -- an admitted seat, not a verdict.
+  Such a lane is movable: when its transient home itself congests, the mover
+  (`smart.smart_move`, gated by the release gate and cooled by its own
+  `tau_pp_transient`) may branch it on, and J's own arithmetic decides whether
+  idle old home is the cheapest next seat. Everything above describes the
+  flag-off reality: with `smart_transient` off, overflow stays permanent and
+  `__router/sticky/clear` stays the only lever.
+  A narrow hysteretic
   homecoming (return home only when it has been empty at pick time, so
   re-overflow needs real load) is a possible future refinement, not shipped.
 

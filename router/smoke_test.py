@@ -3391,6 +3391,130 @@ def main():
             _proc_pv.terminate()
             _pv_a.kill()
             _pv_b.kill()
+        # ---- smart placement C7: L5 smart_move + smart_transient + the shipping gate ----
+        print("")
+        print("S7) smart L5 -- the mover exists, but only on evidence (§4/§6/S9)")
+
+        def _mrig(mv=True, **extra):
+            cfg = {"smart": dict({"kappa_hat": 0.01, "w_cour": 1.0}, **({"smart_move": True} if mv else {}), **extra)}
+            _h = _ube("MH", serving=8.0, cap=8)
+            _h.sm["cong_streak"] = 2
+            _t = _ube("MT", serving=0.0)
+            _p = R.Pool([_h, _t], cfg)
+            _p._affinity_put("mk", "MH", "sticky")
+            return _p, _h, _t
+
+        def _gate(p):
+            for _c in (1, 2):
+                p._shadow_done.append({"cycle": _c, "samples": 11, "resolved": 11, "loss": 0, "unresolved": 0})
+            return p
+        _mp, _mh, _mt = _mrig()
+        _st = {"turns": 3, "last_move": 0.0, "R_hat": 4.0}
+        _mp._smart_move("mk", _mh, 8000, _st)
+        check("S7: predicate fires but the shipping gate is CLOSED -- zero evidence, zero moves, and the lock is COUNTED (S9)",
+              _mp.metrics["moves"] == 0 and _mp.metrics["move_gate_locked"] == 1
+              and _mp._affinity_get("mk") == "MH", "mv=%s lock=%s" % (_mp.metrics["moves"], _mp.metrics["move_gate_locked"]))
+        _gate(_mp)
+        _mp._smart_move("mk", _mh, 8000, _st)
+        _row = _mp.affinity.get("mk")
+        check("S7: gate open + all four conditions -- the lane MOVES: origin=smart (auditable), moves booked as diagnostics",
+              _mp.metrics["moves"] == 1 and _row[0] == "MT" and _row[2] == "smart",
+              str(_row))
+        _mp._smart_move("mk", _mh, 8000, _st)
+        check("S7: tau_pp_move cooldown (900s) -- a just-moved lane does not ping-pong on the very next turn",
+              _mp.metrics["moves"] == 1, "mv=%s" % _mp.metrics["moves"])
+        _pp, _ph, _pt = _mrig()
+        _pp._affinity_put("mk", "MH", "pin")
+        _gate(_pp)
+        _pp._smart_move("mk", _ph, 8000, {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+        check("S7: an origin=pin lane is UNTOUCHABLE by smart_move -- the exemption column does real work (V3-07)",
+              _pp.metrics["moves"] == 0 and _pp.affinity.get("mk")[2] == "pin", str(_pp.affinity.get("mk")))
+        _tp, _th2, _tt2 = _mrig(mv=True, tau_pp_move=0.001, tau_pp_transient=600.0)
+        _tp._affinity_put("mk", "MH", "transient")
+        _gate(_tp)
+        _tp._smart_move("mk", _th2, 8000, {"turns": 3, "last_move": time.monotonic() - 30, "R_hat": 4.0})
+        check("S7: a transient home cools on tau_pp_transient, NOT the move key -- three keys stay independent (§4.3)",
+              _tp.metrics["moves"] == 0, "mv=%s" % _tp.metrics["moves"])
+        _op = R.Pool([_ube("XA"), _ube("XB")], {"smart": {"smart_transient": True}})
+        _op._affinity_put("tk", "XA", "sticky")
+        _op._stash_pending(7, ("tk", "XA", "XB"))
+        _op.overflow_commit("tk", token=7)
+        _trow = _op.affinity.get("tk")
+        check("S6/§13-13: transient ON -- the overflow commit homes the lane with origin=transient (commit-then-migrate)",
+              _trow[0] == "XB" and _trow[2] == "transient", str(_trow))
+        _oq = R.Pool([_ube("YA"), _ube("YB")], {})
+        _oq._affinity_put("tk", "YA", "sticky")
+        _oq._stash_pending(7, ("tk", "YA", "YB"))
+        _oq.overflow_commit("tk", token=7)
+        check("S7: OFF -- overflow commit stays today's sticky re-home, origins and terminals byte-unchanged (§13-8)",
+              _oq.affinity.get("tk")[2] == "sticky" and _oq.metrics["overflow_placements"] == 1)
+        _fp, _fh, _ft = _mrig(mv=False)
+        _stf = {"turns": 1, "last_move": 0.0, "R_hat": 4.0}
+        _fp.pick("mk")
+        check("S7: move OFF -- a sticky hit changes nothing the mover would touch: no locks, no moves, lane untouched",
+              _fp.metrics["moves"] == 0 and _fp.metrics["move_gate_locked"] == 0
+              and "mk" not in _fp._lane and _fp.affinity.get("mk")[2] == "sticky")
+        # -- live: gate enforcement and the transient origin, both on a real boot --
+        _mv_a, _mv_b = FakeStrata(9157, "ma", hold=0.1), FakeStrata(9156, "mb", hold=0.1)
+        _mv_a.start(); _mv_b.start()
+        with open("smart_move_probe.json", "w") as _ff:
+            json.dump({"listen": "127.0.0.1", "port": 9158, "status_interval": 0.2,
+                       "backends": [{"id": "ma", "url": "http://127.0.0.1:9157", "max_inflight": 8},
+                                    {"id": "mb", "url": "http://127.0.0.1:9156", "max_inflight": 8}],
+                       "smart": {"smart_move": True, "smart_shadow": True}}, _ff)
+        _proc_mv = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_move_probe.json",
+                                     "--log-level", "WARNING"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S7: a legal move boot comes up green",
+                  wait_for(lambda: get(9158, "/healthz")[0] == 200, 25))
+            for _i in range(3):
+                check("S7: live turn %d answers" % _i, call(9158, "/v1/messages", conv("mlane"), timeout=30)[0] == 200)
+            _mr = stats(9158)["router"]
+            check("S7: live with the flag ON -- no evidence yet means ZERO moves, the lane never moved, gate reads closed",
+                  _mr["moves"] == 0 and _mr["release_gate_open"] is False
+                  and _mr["affinity_origin"].get("sticky", 0) >= 1,
+                  "mv=%s gate=%s" % (_mr["moves"], _mr["release_gate_open"]))
+        finally:
+            _proc_mv.terminate()
+            _mv_a.kill(); _mv_b.kill()
+        _t_a, _t_b = FakeStrata(9160, "ta", hold=2.0), FakeStrata(9159, "tb", hold=0.1)
+        _t_a.start(); _t_b.start()
+        with open("smart_transient_probe.json", "w") as _ff:
+            json.dump({"listen": "127.0.0.1", "port": 9161, "status_interval": 0.2,
+                       "backends": [{"id": "ta", "url": "http://127.0.0.1:9160", "max_inflight": 1},
+                                    {"id": "tb", "url": "http://127.0.0.1:9159", "max_inflight": 8}],
+                       "smart": {"smart_transient": True}, "control_token": "s7ctl"}, _ff)
+        _proc_tv = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_transient_probe.json",
+                                     "--log-level", "WARNING"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S7: a legal transient boot comes up green",
+                  wait_for(lambda: get(9161, "/healthz")[0] == 200, 25))
+            # determinism without coin flips: an operator pin puts turn 1 on
+            # the one-slot slow box (pin is also the honest stress of §6's
+            # claim -- the transient put must be able to RE-HOME a lane that
+            # the pin seated, because pin governs placement, not fate). Turn
+            # 2 finds the slot held by its own lane -- the cap branches it.
+            _ctl = {"x-strata-pin": "ta", "x-strata-control": "s7ctl"}
+            _w1 = threading.Thread(target=lambda: call(9161, "/v1/messages", conv("tlane"),
+                                                        extra=_ctl, timeout=40))
+            _w1.start()
+            time.sleep(0.5)              # turn 1 holds ta's only slot
+            _t_b.blind = False
+            time.sleep(0.4)              # poller sees tb healthy again
+            _t2s, _t2h = call(9161, "/v1/messages", conv("tlane"), timeout=40)[:2]
+            _w1.join()
+            check("S7: second turn OVERFLOWED the capped home and answered from the peer (§6 commit-then-migrate)",
+                  _t2s == 200 and _t2h.get("x-strata-placement") == "overflow"
+                  and _t2h.get("x-strata-backend") == "tb",
+                  "%s @%s" % (_t2h.get("x-strata-placement"), _t2h.get("x-strata-backend")))
+            _tr = stats(9161)["router"]
+            check("S7: LIVE origin=transient -- the answered overflow homed the lane and the origin column says so (§13-13)",
+                  _tr["affinity_origin"].get("transient", 0) >= 1, str(_tr["affinity_origin"]))
+        finally:
+            _proc_tv.terminate()
+            _t_a.kill(); _t_b.kill()
     finally:
         proc.terminate()
         try:

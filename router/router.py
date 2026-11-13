@@ -658,6 +658,8 @@ class Pool:
         self.smart_shadow = bool(self.sm_cfg.get("smart_shadow"))
         self.smart_place = bool(self.sm_cfg.get("smart_place"))
         self.smart_preview = bool(self.sm_cfg.get("smart_preview"))
+        self.smart_move = bool(self.sm_cfg.get("smart_move"))
+        self.smart_transient = bool(self.sm_cfg.get("smart_transient"))
         # lane + shadow bookkeeping (S2 state list): ALL in-memory, ALL
         # restart-zero (D13: losing samples only delays the shipping gate --
         # zero safety loss, and nothing re-derives identity from it)
@@ -834,29 +836,42 @@ class Pool:
             c["loss"] += 1
             self.metrics["shadow_loss_moves"] += 1
 
-    def _shadow_note_turn(self, affinity_key, home, body_len):
-        """Sticky hit at home: roll the lane, and ask the mover's question
-        OBSERVATIONALLY (L2 never moves anything -- S9)."""
-        st = self._lane_touch(affinity_key)
-        now = time.monotonic()
+    def _move_candidate(self, home, body_len, r_hat):
+        """The S4 predicate as ONE definition, shared by the shadow (which
+        samples it) and the mover (which acts on it): the home's own trigger
+        (cong_streak>=2, fresh-only by construction), the full net
+        inequality, and the un-ticked hard-gate probe (V3-09-6). Returns
+        (target, parts_home, parts_target) or None. Reads state only --
+        safe to ask from any caller, and it ticks nothing on its own."""
         if home.sm["cong_streak"] < 2:      # S4-1 trigger: own signal, 2 fresh polls
-            return
-        ph = self._j_parts(home, now, body_len, st["R_hat"])
+            return None
+        now = time.monotonic()
+        ph = self._j_parts(home, now, body_len, r_hat)
         if ph is None:
-            return
-        cands = [b for b in self.backends if b is not home and b.state == HEALTHY]
-        order = self._smart_order(cands, now, body_len, st["R_hat"], require_window=True)
+            return None
+        order = self._smart_order([b for b in self.backends if b is not home and b.state == HEALTHY],
+                                  now, body_len, r_hat, require_window=True)
         if not order:
-            return
+            return None
         tgt = order[0]
-        pt = self._j_parts(tgt, now, body_len, st["R_hat"])
+        pt = self._j_parts(tgt, now, body_len, r_hat)
         if pt is None or not tgt.accepts_placement():   # un-ticked probe (S13-17)
+            return None
+        # S4-2 net inequality -- evaluated blind in L2, acted on in L5:
+        if r_hat * (ph["W"] - pt["W"]) <= float(self.sm_cfg.get("k_gain") or 2.0) * pt["C"]:
+            return None
+        return tgt, ph, pt
+
+    def _shadow_note_turn(self, affinity_key, home, body_len, st=None):
+        """Sticky hit at home: roll the lane, and ask the mover's question
+        OBSERVATIONALLY (L2 never moves anything -- S9). A sample opens
+        exactly where the mover would have moved."""
+        st = st if st is not None else self._lane_touch(affinity_key)
+        mv = self._move_candidate(home, body_len, st["R_hat"])
+        if mv is None:
             return
-        # S4-2 net inequality -- the FULL L5 predicate, evaluated blind:
-        # a sample opens exactly where the mover would have moved.
-        k_gain = float(self.sm_cfg.get("k_gain") or 2.0)
-        if not (st["R_hat"] * (ph["W"] - pt["W"]) > k_gain * pt["C"]):
-            return
+        tgt, _ph, pt = mv
+        now = time.monotonic()
         old = self._shadow_open.get(affinity_key)
         if old is not None:
             self._shadow_settle(old)       # a superseded sample settles on its facts
@@ -887,6 +902,41 @@ class Pool:
         if sum(c["resolved"] for c in self._shadow_done) < mn:
             return False
         return all(c["loss"] == 0 for c in self._shadow_done[-n:])
+
+    def _smart_move(self, affinity_key, home, body_len, st):
+        """L5, one condition per gate (S4): the shared predicate (own signal
+        + net inequality + un-ticked probe), the origin=pin exemption
+        (V3-07 -- an operator seat is not smart's to move), the per-lane
+        tau_pp cooldown on the key its origin OWNS (transient homes cool on
+        tau_pp_transient), and the data gate (S9) checked last so
+        move_gate_locked counts moved-worthy denials, not traffic. A move
+        re-homes the lane and books NO request: diagnostics only, the closed
+        identity stays closed over every flag (§4 accountancy)."""
+        mv = self._move_candidate(home, body_len, st["R_hat"])
+        if mv is None:
+            return
+        tgt = mv[0]
+        with self.lock:
+            _hit = self.affinity.get(affinity_key)
+        _o = _hit[2] if _hit and len(_hit) > 2 else "sticky"
+        if _o == "pin":
+            return
+        now = time.monotonic()
+        tau = float(self.sm_cfg.get("tau_pp_transient" if _o == "transient" else "tau_pp_move")
+                    or 900.0)
+        if now - st["last_move"] < tau:
+            return
+        if not self._release_gate_open():
+            with self.lock:
+                self.metrics["move_gate_locked"] += 1
+            return
+        self._affinity_put(affinity_key, tgt.id, "smart")
+        st["last_move"] = now
+        with self.lock:
+            self.metrics["moves"] += 1
+        LOG.info("MOVE lane %s %s -> %s (streak=%d R_hat=%.1f J_home=%.1fs J_tgt=%.1fs)",
+                 short(affinity_key), home.id, tgt.id, home.sm["cong_streak"],
+                 st["R_hat"], mv[1]["J"], mv[2]["J"])
 
     def _stash_pending(self, token, entry):
         """Book a pending overflow (CALLER HOLDS self.lock). The 4096 cap is a
@@ -919,7 +969,11 @@ class Pool:
             if pend is None or pend[0] != affinity_key:
                 return
             self.metrics["overflow_placements"] += 1
-        self._affinity_put(affinity_key, pend[2], "sticky")
+        # §6: with smart_transient ON the answered overflow homes the lane as
+        # what it is -- a commit-then-migrate transient home, auditable in the
+        # origin column and coolable/movable on its own tau_pp key. The
+        # settlement itself is the existing commit exit: zero new terminal.
+        self._affinity_put(affinity_key, pend[2], "transient" if self.smart_transient else "sticky")
 
     def overflow_rollback(self, affinity_key, token, failed_id):
         """The overflow target died BEFORE a single request byte was sent --
@@ -1141,13 +1195,19 @@ class Pool:
                 else:
                     with self.lock:
                         self.metrics["sticky_hits"] += 1
-                    if self.smart_shadow and affinity_key:
-                        # L2: the mover's question, asked observationally --
-                        # records samples, changes NOTHING about this request
+                    if (self.smart_shadow or self.smart_move) and affinity_key:
+                        # L2 asks the mover's question observationally; L5
+                        # may act on it. Both roll the lane ONCE (shared
+                        # touch), and a failure here never touches the
+                        # request in flight (S9: observation cannot break it).
                         try:
-                            self._shadow_note_turn(affinity_key, home, body_len)
+                            _lst = self._lane_touch(affinity_key)
+                            if self.smart_shadow:
+                                self._shadow_note_turn(affinity_key, home, body_len, _lst)
+                            if self.smart_move:
+                                self._smart_move(affinity_key, home, body_len, _lst)
                         except Exception:
-                            LOG.debug("shadow decision failed for %s -- serving continues",
+                            LOG.debug("smart decision failed for %s -- serving continues",
                                       short(affinity_key), exc_info=True)
                 return home, "sticky", True, None
 
