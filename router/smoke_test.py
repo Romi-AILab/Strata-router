@@ -3932,6 +3932,27 @@ def main():
             sys.setswitchinterval(_old_si)
         check("S10/F5: note_turn x roll x gate under a 1us switch interval and a 20ms shadow cycle -- no thread dies and the ledger keeps no torn state",
               not _errs5, repr(_errs5[:4]))
+
+        # B2 (behavioral face, adopted P3): the sticky-decision catch-all logged
+        # swallowed failures at LOG.debug ONLY -- the exact invisibility that
+        # hid F1 through three INFO-level rounds (diagnostics ticking while the
+        # decision layer died behind the try). The swallow gets witnesses: a
+        # NAMED panel counter (diagnostics -- never in the closed identity)
+        # and a rate-limited WARNING; serving continues either way.
+        _b2 = R.Pool([_b2h := _ube("BH", mi=64), _ube("BT", mi=64)],
+                     {"smart": {"smart_shadow": True}})
+        _b2._affinity_put("kb2", "BH", "sticky")
+
+        def _b2boom(*a, **k):
+            raise RuntimeError("poisoned decision (B2 lock)")
+        _b2._shadow_note_turn = _b2boom           # an internal crash at the exact spot F1 died
+        _b2.pick("kb2", body_len=200)
+        check("S11/B2: a swallowed smart-decision failure books a NAMED counter and the request still serves at home -- the debug-only swallow that hid F1 never gets to be the only witness again",
+              _b2.metrics.get("smart_decision_errors") == 1 and _b2.metrics["sticky_hits"] == 1
+              and _b2.metrics["requests"] == sum(_b2.metrics.get(t, 0) for t in _TERMS),
+              "err=%s sticky=%s rq=%s sum=%s" % (_b2.metrics.get("smart_decision_errors"),
+                                                 _b2.metrics["sticky_hits"], _b2.metrics["requests"],
+                                                 sum(_b2.metrics.get(t, 0) for t in _TERMS)))
     finally:
         _term(proc)
         try:

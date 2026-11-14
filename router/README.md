@@ -662,6 +662,10 @@ The storm detector for `smart_move`/`smart_homecoming` is the two `/stats`
 columns (`moves`, `homecomings`) -- watch them in the first hour of any flip.
 Moves and homecomings are diagnostics: they never enter the closed identity,
 which the 64-combination flag matrix keeps closed for every ladder shape.
+`smart_decision_errors` is the decision layer's own witness: a crash inside
+the smart block never touches the request in flight, but it books here (and
+logs one named WARNING per minute) -- a decision failure can be swallowed,
+never silent.
 
 ## Limits
 

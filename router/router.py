@@ -650,6 +650,10 @@ class Pool:
             # identity stays untouched by any smart flag (S13-13)
             "moves": 0, "homecomings": 0, "preview_passes": 0, "move_gate_locked": 0,
             "shadow_would_moves": 0, "shadow_loss_moves": 0, "shadow_unresolved": 0,
+            # B2: the decision layer's OWN witness -- a swallowed failure books
+            # here (diagnostics: never in the closed identity), because a
+            # DEBUG-only swallow is how F1 hid from every INFO-level run.
+            "smart_decision_errors": 0,
         }
         # smart knobs (ALL default OFF, design S9): resolved once at boot;
         # sm_cfg carries the merged defaults so readers never re-default keys.
@@ -681,6 +685,7 @@ class Pool:
         # the sticky try would swallow the deadlock symptom). Flag-off cost:
         # zero -- nothing takes this lock unless a shadow path runs.
         self._shadow_lock = threading.Lock()
+        self._swallow_warn_at = 0.0   # B2 rate limiter: one WARNING per 60s, counter always
         # L6 working memory (volatile like the affinity table it shadows):
         # which home each re-homed lane left, and the per-box homecoming
         # throttle clock
@@ -1321,8 +1326,25 @@ class Pool:
                             if self.smart_move and not _hc:
                                 self._smart_move(affinity_key, home, body_len, _lst)
                         except Exception:
-                            LOG.debug("smart decision failed for %s -- serving continues",
-                                      short(affinity_key), exc_info=True)
+                            # B2: the swallow must never be the only witness.
+                            # A DEBUG-only line hid F1 through three INFO-level
+                            # rounds: diagnostics ticked while the decision layer
+                            # died. Same class never again -- named counter
+                            # (diagnostics, never in the identity) + rate-limited
+                            # WARNING; the full traceback stays at DEBUG so a
+                            # storm of failures cannot drown the log.
+                            with self.lock:
+                                self.metrics["smart_decision_errors"] += 1
+                                _due_w = (time.monotonic() - self._swallow_warn_at) >= 60.0
+                                if _due_w:
+                                    self._swallow_warn_at = time.monotonic()
+                                    _tot_w = self.metrics["smart_decision_errors"]
+                            if _due_w:
+                                LOG.warning("smart decision failed for %s -- serving continues (%d total, detail at DEBUG)",
+                                            short(affinity_key), _tot_w, exc_info=True)
+                            else:
+                                LOG.debug("smart decision failed for %s -- serving continues",
+                                          short(affinity_key), exc_info=True)
                 return home, "sticky", True, None
 
         if home is not None:
