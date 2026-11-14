@@ -579,6 +579,11 @@ class Backend:
                 self.sm["t_bar_used"] = w     # cold start: clamp waived one cycle (E6-3)
             else:
                 self.sm["t_bar_used"] = min(w, float(sm.get("t_bar_clamp_factor") or 3.0) * base)
+        # F2: OBS reads w/base on EVERY due tick, boundary tick or not --
+        # binding them only inside the boundary branch killed the poller with
+        # UnboundLocalError the first time obs_every_polls misaligned with
+        # window_n. They live in state between boundaries; read from state.
+        w, base = self.sm["t_bar_window"], self.sm["t_bar_base"]
         # cong_streak: own-signal congestion L̂ >= k_b, FRESH polls only --
         # a stale feed FREEZES the streak (V3-09-3: a stale-reset streak would
         # make the move trigger "never fires" behind a blind feed)
@@ -669,21 +674,34 @@ class Pool:
         self._shadow_cyc = {}           # bucket -> {cycle, samples, resolved, loss, unresolved}
         self._shadow_done = []          # completed cycle dicts, oldest first
         self._shadow_bucket = None
+        # F5: the ONE lock the shadow tables know. Deliberately NOT pool.lock:
+        # status() reads the gate while holding pool.lock, and the request
+        # threads reach the ledger from the sticky branch WITHOUT pool.lock --
+        # sharing pool.lock here would let a roll deadlock status() (or worse,
+        # the sticky try would swallow the deadlock symptom). Flag-off cost:
+        # zero -- nothing takes this lock unless a shadow path runs.
+        self._shadow_lock = threading.Lock()
         # L6 working memory (volatile like the affinity table it shadows):
         # which home each re-homed lane left, and the per-box homecoming
         # throttle clock
         self._exiled = {}
         self._box_hc = {}
 
-    def note_completion(self, backend, method, bare, duration, key):
-        """Class-filtered success accumulator (design S2/S13-14): ONLY
+    def note_completion(self, backend, method, bare, duration, key, status):
+        """Class-filtered SUCCESS accumulator (design S2/S13-14): ONLY
         POST /v1/messages completions feed T-bar -- count_tokens, other paths,
         other methods and every failure never count, because their seconds are
-        not a conversation's answer time. `key` is reserved for the shadow
-        lane ledger (L2). Silent no-op while every smart flag is off."""
+        not a conversation's answer time. F3 made the docstring the code:
+        status is a REQUIRED argument (no default -- silence about a failure
+        is exactly how this file's own ledger lied) and >=400 feeds nothing:
+        an outage's seconds made HOME look expensive, so failures feeding
+        T-bar turn placement FAILURE-ATTRACTING. `key` is reserved for the
+        shadow lane ledger (L2). Silent no-op while every smart flag is off."""
         if not self.smart_any:
             return
         if method != "POST" or bare != "/v1/messages":
+            return
+        if int(status) >= 400:      # an answer time, from an ANSWERED request
             return
         with backend.lock:
             backend.sm["streams_s"] += 1
@@ -702,6 +720,8 @@ class Pool:
             self._lane[key] = st
             while len(self._lane) > 20000:
                 self._lane.popitem(last=False)   # bounded like affinity's table
+        else:
+            self._lane.move_to_end(key)          # F6: the cap evicts the COLDEST lane, not the first-born -- FIFO eviction voided the HOTTEST lane's tau cooldown row and let the mover hit it twice
         st["turns"] += 1
         # R̂ (O3, the weakest multiplier, honestly so): a lane is expected to
         # keep going at least as long as it has -- init floors new lanes,
@@ -737,7 +757,7 @@ class Pool:
         rep = float(be.reported.get("serving") or 0.0) + float(be.reported.get("queued") or 0.0)
         w_hat = max(0.0, l - k + (1.0 if l >= k else 0.0)) / k * t
         c_hat = (max(0.0, float(body_len)) / 4.0) * float(self.sm_cfg.get("kappa_hat") or 0.001)
-        debt = sum(1 for x in be._ghost_debt if x > now)
+        debt = sum(1 for x in be._ghost_debt if x > be.status_ts)   # F8: ONE clock with the poller's prune -- a debt that settled after the last status still hid real load from J for a whole poll cycle
         x_cour = float(self.sm_cfg.get("w_cour") or 1.0) * max(0.0, rep - be.inflight - debt) * t / k
         return {"W": w_hat, "C": c_hat, "X": x_cour, "J": r_hat * w_hat + c_hat + x_cour}
 
@@ -794,10 +814,17 @@ class Pool:
         return {"cycle": b, "samples": 0, "resolved": 0, "loss": 0, "unresolved": 0}
 
     def _shadow_roll(self, now):
-        """Cycle bookkeeping (poller-called, S-2 zero resident threads): the
-        bucket is the release gate's period; crossing it closes the old cycle
-        and settles its open samples. Forward-only: the monotonic clock never
-        rewinds, and neither do the buckets."""
+        """Public entry (the poller's): the ledger tables move under the
+        dedicated shadow lock (F5); cores assume it, nothing logs under it."""
+        with self._shadow_lock:
+            self._shadow_roll_locked(now)
+
+    def _shadow_roll_locked(self, now):
+        """Cycle bookkeeping (CALLER HOLDS self._shadow_lock; poller-called,
+        S-2 zero resident threads): the bucket is the release gate's period;
+        crossing it closes the old cycle and settles its open samples.
+        Forward-only: the monotonic clock never rewinds, and neither do the
+        buckets."""
         cyc = float(self.sm_cfg.get("shadow_cycle_s") or 604800.0)
         b = int(now // cyc)
         if self._shadow_bucket is None:
@@ -821,9 +848,15 @@ class Pool:
             self._shadow_cyc.pop(_oldb)
 
     def _shadow_settle(self, s):
+        """CALLER HOLDS self._shadow_lock (both call sites run inside it)."""
         self._shadow_open.pop(s["key"], None)
         c = self._shadow_cyc.get(s["bucket"])
         if c is None:
+            # F16: 64 buckets at the shipped period is a YEAR -- reaching a
+            # missing table is a bug path, and a decision ledger loses
+            # NOTHING in silence: name the loss, then drop the sample.
+            LOG.warning("SHADOW: sample lane=%s bucket=%s found no cycle table (trimmed?) -- settled nowhere",
+                        short(s["key"]), s["bucket"])
             return
         if not s["durs"]:
             c["unresolved"] += 1
@@ -855,7 +888,14 @@ class Pool:
         ph = self._j_parts(home, now, body_len, r_hat)
         if ph is None:
             return None
-        order = self._smart_order([b for b in self.backends if b is not home and b.state == HEALTHY],
+        # F7 tier law: the mover moves WITHIN the home's tier. The step to
+        # the next tier is the operator's priority ladder (x-strata-pin is
+        # the cross-tier tool, overflow respects the boundary) -- a mover
+        # that crossed would silently promote a lane to a tier nobody
+        # priced it in. Disclosed in the README's smart_move row.
+        order = self._smart_order([b for b in self.backends if b is not home
+                                   and b.state == HEALTHY
+                                   and b.priority == home.priority],
                                   now, body_len, r_hat, require_window=True)
         if not order:
             return None
@@ -871,25 +911,33 @@ class Pool:
     def _shadow_note_turn(self, affinity_key, home, body_len, st=None):
         """Sticky hit at home: roll the lane, and ask the mover's question
         OBSERVATIONALLY (L2 never moves anything -- S9). A sample opens
-        exactly where the mover would have moved."""
+        exactly where the mover would have moved. F5 discipline: the
+        predicate (read-only, bounded skew accepted per F12's recorded
+        decline) runs lock-free; the ledger tables move as ONE region under
+        the shadow lock; the LOG line is emitted OUTSIDE the lock (house
+        rule) -- which is where F1 lived: the unpack bound _ph while the
+        line read ph, and the NameError behind the sticky branch's try was
+        silently stealing homecoming AND the mover on every would-move turn.
+        One binding, one path: the log line and the ledger never disagree."""
         st = st if st is not None else self._lane_touch(affinity_key)
         mv = self._move_candidate(home, body_len, st["R_hat"])
         if mv is None:
             return
-        tgt, _ph, pt = mv
+        tgt, ph, pt = mv
         now = time.monotonic()
-        old = self._shadow_open.get(affinity_key)
-        if old is not None:
-            self._shadow_settle(old)       # a superseded sample settles on its facts
-        self._shadow_roll(now)
-        b = self._shadow_bucket
-        c = self._shadow_cyc.setdefault(b, self._new_cycle(b))
-        c["samples"] += 1
-        self.metrics["shadow_would_moves"] += 1
-        self._shadow_open[affinity_key] = {"key": affinity_key, "home": home.id,
-                                           "target": tgt.id,
-                                           "target_raw": tgt.sm["t_bar_window"],
-                                           "c_hat": pt["C"], "durs": [], "bucket": b}
+        with self._shadow_lock:
+            old = self._shadow_open.get(affinity_key)
+            if old is not None:
+                self._shadow_settle(old)   # a superseded sample settles on its facts
+            self._shadow_roll_locked(now)
+            b = self._shadow_bucket
+            c = self._shadow_cyc.setdefault(b, self._new_cycle(b))
+            c["samples"] += 1
+            self.metrics["shadow_would_moves"] += 1
+            self._shadow_open[affinity_key] = {"key": affinity_key, "home": home.id,
+                                               "target": tgt.id,
+                                               "target_raw": tgt.sm["t_bar_window"],
+                                               "c_hat": pt["C"], "durs": [], "bucket": b}
         LOG.info("SHADOW lane=%s would-move %s -> %s (W_home=%.1fs W_tgt=%.1fs C_tgt=%.1fs)",
                  short(affinity_key), home.id, tgt.id, ph["W"], pt["W"], pt["C"])
 
@@ -903,11 +951,12 @@ class Pool:
         calibration knob stays beside it."""
         n = max(1, int(self.sm_cfg.get("release_gate_shadow_cycles") or 2))
         mn = max(1, int(self.sm_cfg.get("release_gate_min_would_moves") or 20))
-        if len(self._shadow_done) < n:
-            return False
-        if sum(c["resolved"] for c in self._shadow_done) < mn:
-            return False
-        return all(c["loss"] == 0 for c in self._shadow_done[-n:])
+        with self._shadow_lock:
+            if len(self._shadow_done) < n:
+                return False
+            if sum(c["resolved"] for c in self._shadow_done) < mn:
+                return False
+            return all(c["loss"] == 0 for c in self._shadow_done[-n:])
 
     def _smart_move(self, affinity_key, home, body_len, st):
         """L5, one condition per gate (S4): the shared predicate (own signal
@@ -980,7 +1029,13 @@ class Pool:
             return False
         if now - self._box_hc.get(old_id, 0.0) < float(self.sm_cfg.get("homecoming_box_s") or 120.0):
             return False
-        if old.sm["feed_blind"] or old.sm.get("empty_streak", 0) < 2:
+        # F4/F13: D4' item one is re-asked LIVE, next to the streak that only
+        # a live poller advances. feed_blind FREEZES at its last value when
+        # the poller stops -- the latch's final word ("fresh, empty x2!")
+        # must not open the home door forever for a box nobody watches: the
+        # clock and the state table get their own veto.
+        if (old.state != HEALTHY or (now - old.status_ts) > old._stale_after()
+                or old.sm["feed_blind"] or old.sm.get("empty_streak", 0) < 2):
             return False
         self._affinity_put(affinity_key, old_id, "smart")
         st["last_move"] = now
@@ -1474,7 +1529,8 @@ class Pool:
             # the release gate and its evidence (S9): an operator deciding
             # whether smart_move may ship reads THIS, not a log grep
             out["release_gate_open"] = self._release_gate_open()
-            out["shadow_cycles"] = list(self._shadow_done)[-4:]
+            with self._shadow_lock:               # snapshot the evidence table under its own lock (F5)
+                out["shadow_cycles"] = list(self._shadow_done)[-4:]
             return out
 
 
@@ -1793,13 +1849,23 @@ class StatusPoller(threading.Thread):
                         be.status_error = "poller: " + repr(exc)
                 if self.pool.smart_any:
                     # the scaffold's ONLY heartbeat (S-2): it ticks whether or
-                    # not this poll got a fresh sample -- staleness is a verdict
-                    with be.lock:
-                        obs = be._smart_tick_locked(self.pool.sm_cfg, time.monotonic())
-                    if obs:
-                        LOG.info("%s", obs)
+                    # not this poll got a fresh sample -- staleness is a verdict.
+                    # F2: the tick runs INSIDE its own try -- an escaping
+                    # exception here killed the poller thread, and a dead
+                    # poller blinds EVERY box at once (worse than any ledger).
+                    try:
+                        with be.lock:
+                            obs = be._smart_tick_locked(self.pool.sm_cfg, time.monotonic())
+                        if obs:
+                            LOG.info("%s", obs)
+                    except Exception as exc:
+                        with be.lock:
+                            be.status_error = "smart tick: " + repr(exc)
             if self.pool.smart_shadow:
-                self.pool._shadow_roll(time.monotonic())
+                try:
+                    self.pool._shadow_roll(time.monotonic())
+                except Exception:
+                    LOG.warning("shadow roll failed (poller survives)", exc_info=True)
             self.stop_evt.wait(max(0.2, float(self.cfg.get("status_interval") or 1.0)))
 
     def _poll(self, be):
@@ -2631,7 +2697,7 @@ class Handler(BaseHTTPRequestHandler):
                     backend.recent_ttfb.append(round(ttfb, 2))
                     if len(backend.recent_ttfb) > RECENT_TTFB_WINDOW:
                         backend.recent_ttfb.pop(0)
-            self.pool.note_completion(backend, method, bare, duration, key)
+            self.pool.note_completion(backend, method, bare, duration, key, resp.status)
             # A big ttfb while nothing else was running means the request was
             # sitting in the backend FIFO. That is the queue working -- watch it.
             LOG.info(
@@ -2893,6 +2959,11 @@ SMART_NUMS = ("k_gain", "tau_pp_move", "tau_pp_homecoming", "tau_pp_transient",
               "t_bar_base_window_s", "window_n", "release_gate_shadow_cycles",
               "release_gate_min_would_moves", "shadow_cycle_s",
               "homecoming_box_s", "obs_every_polls")
+# five of those numbers are TICK counters and minimums: every read site int()s
+# them, so a float there is a number that silently truncates behind the
+# operator's back (F15: window_n 2.7 "worked" as 2). Refused by name at boot.
+SMART_INT_KNOBS = ("window_n", "n_min", "obs_every_polls",
+                   "release_gate_shadow_cycles", "release_gate_min_would_moves")
 
 DEFAULTS = {
     "listen": "127.0.0.1",
@@ -3653,6 +3724,12 @@ def validate_cfg(cfg, pool, strict=True):
                         problems.append(("smart.k_eps", "must be >= 0 (it is a tolerance), got %r" % (v,)))
                 elif f <= 0:
                     problems.append(("smart." + nk, "must be > 0, got %r" % (v,)))
+                elif nk in SMART_INT_KNOBS and f != int(f):
+                    # F15: a tick counter is not a dial -- the read sites int()
+                    # these, so a fraction is an operator lie that silently
+                    # truncates (window_n 2.7 would run as 2). Refuse by name.
+                    problems.append(("smart." + nk,
+                                     "is a tick counter/minimum -- whole numbers only, got %r" % (v,)))
             for k in _sm_sec:
                 if k not in SMART_FLAGS and k not in SMART_NUMS:
                     LOG.warning("smart: unknown knob %r is IGNORED -- knobs never guess a spelling", k)

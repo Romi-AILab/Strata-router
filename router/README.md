@@ -637,11 +637,11 @@ the full block with shipped defaults so an operator can lift it wholesale.
 | `smart_obs` | `false` | The per-box OBS telemetry line every `obs_every_polls` polls -- data collection only, zero routing effect. |
 | `smart_cap_read` | `false` | Read `cap_slots` from the box status feed (single definition of "full"); no feed value falls back to config. |
 | `smart_shadow` | `false` | Measure the J currency (`R̂×Ŵ + Ĉ + X`) and roll the shadow cycles that feed the release gate. Decisions unchanged. |
-| `smart_place` | `false` | J walks INSIDE the placement tier (ties still fall to `load_score`'s jitter floor; a `None` anywhere degrades the whole round to today's walk). |
+| `smart_place` | `false` | J walks INSIDE the placement tier (ties still fall to `load_score`'s jitter floor; a `None` anywhere degrades the whole round to today's walk). Alone it speaks J on the FLOOR R̂: lane state is only born once `smart_obs` measures -- the currency stays honest about what it knows. |
 | `smart_preview` | `false` | `count_tokens` previews answer from a real box but book `preview_passes` -- no home written, no overflow, no exile, no lane roll. |
-| `smart_move` | `false` | The §4 mover (own-signal congestion + net inequality + un-ticked hard-gate probe), behind the release gate and per-lane cooldown. |
+| `smart_move` | `false` | The §4 mover (own-signal congestion + net inequality + un-ticked hard-gate probe), behind the release gate and per-lane cooldown. It moves WITHIN the home's tier -- crossing tiers stays the operator's ladder (`priority`, `x-strata-pin`). Its evidence is accrued ONLY while `smart_shadow` is lit: move-alone stands at a gate that can never open, and says so (`move_gate_locked` counts every moved-worthy denial it never got to make). |
 | `smart_transient` | `false` | An answered overflow re-homes as `origin="transient"` (admitted, movable) instead of a permanent sticky home. |
-| `smart_homecoming` | `false` | The §5 way home: an exiled lane walks back only after home proves itself verifiably empty on TWO consecutive fresh polls. |
+| `smart_homecoming` | `false` | The §5 way home: an exiled lane walks back only after home proves itself verifiably empty on TWO consecutive fresh polls -- and the door RE-ASKS, live at the turn itself, that home is still healthy on a still-fresh feed (a frozen last-word "fresh" from a dead poller opens nothing). |
 | `window_n` | `10` | A T̄ window is N poll ticks; the difference fires at the boundary and the value HOLDS between boundaries. |
 | `n_min` | `20` | Filtered completions a window needs before it reports a value; fewer says "no opinion" (`None`), never a guess. |
 | `default_t_bar` | `120` | The NAMED degraded-window default (clamp-exempt): the honest number when samples ran out, distinct from a box that has no boundary yet. |

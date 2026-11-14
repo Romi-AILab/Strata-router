@@ -2840,11 +2840,11 @@ def main():
               "off=%s on=%s" % (_sp_off.smart_any, _sp_pool.smart_any))
         for _sp_m, _sp_p in (("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"),
                              ("GET", "/v1/messages"), ("POST", "/v1/responses")):
-            _sp_pool.note_completion(_sp_be, _sp_m, _sp_p, 5.0, None)
+            _sp_pool.note_completion(_sp_be, _sp_m, _sp_p, 5.0, None, 200)
         check("S1: class-filtered accumulator counts ONLY POST /v1/messages (§13-14)",
               _sp_be.sm["streams_s"] == 1 and abs(_sp_be.sm["dur_sum_s"] - 5.0) < 1e-9,
               "streams_s=%s dur=%.1f" % (_sp_be.sm.get("streams_s"), _sp_be.sm.get("dur_sum_s", -1)))
-        _sp_off.note_completion(_sp_be2, "POST", "/v1/messages", 5.0, None)
+        _sp_off.note_completion(_sp_be2, "POST", "/v1/messages", 5.0, None, 200)
         check("S1: all flags OFF -- the accumulator never ticks (byte-silent scaffold)",
               _sp_be2.sm["streams_s"] == 0, "streams_s=%s" % _sp_be2.sm.get("streams_s"))
         _sp_be.ever_reported = True
@@ -2910,7 +2910,7 @@ def main():
               and "cap_slots" in _sp_snap and isinstance(_sp_snap["failure_pressure"], float),
               str({k: _sp_snap.get(k, "ABSENT") for k in ("t_bar_window_s", "cong_streak", "failure_pressure")}))
         _sp_thr = threading.active_count()
-        _sp_pool.note_completion(_sp_be, "POST", "/v1/messages", 1.0, None)
+        _sp_pool.note_completion(_sp_be, "POST", "/v1/messages", 1.0, None, 200)
         _sp_be._smart_tick_locked(_sp_pool.sm_cfg, time.monotonic())
         check("S1: the scaffold starts ZERO resident threads (S-2)",
               threading.active_count() == _sp_thr,
@@ -3183,9 +3183,9 @@ def main():
               _rs[1] == "sticky" and _rs[0].id == "sh"
               and _shp.metrics["shadow_would_moves"] == 1 and "sl" in _shp._shadow_open,
               "%s wm=%s open=%s" % (_rs[1], _shp.metrics["shadow_would_moves"], list(_shp._shadow_open)))
-        _shp.note_completion(_sh_home, "POST", "/v1/messages", 50.0, "sl")
-        _shp.note_completion(_sh_home, "POST", "/v1/messages", 70.0, "sl")
-        _shp.note_completion(_sh_home, "POST", "/v1/messages", 9.0, "other-lane")
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 50.0, "sl", 200)
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 70.0, "sl", 200)
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 9.0, "other-lane", 200)
         _cyc0 = _shp._shadow_bucket
         _shp._shadow_roll((_cyc0 + 1) * 60.0 + 1.0)
         _c = _shp._shadow_cyc[_cyc0]
@@ -3196,8 +3196,8 @@ def main():
         _sh_home.sm["cong_streak"] = 2
         _sh_home.inflight = 0
         _shp.pick("sl", body_len=8000)
-        _shp.note_completion(_sh_home, "POST", "/v1/messages", 10.0, "sl")
-        _shp.note_completion(_sh_home, "POST", "/v1/messages", 14.0, "sl")
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 10.0, "sl", 200)
+        _shp.note_completion(_sh_home, "POST", "/v1/messages", 14.0, "sl", 200)
         _cyc1 = _shp._shadow_bucket
         _shp._shadow_roll((_cyc1 + 1) * 60.0 + 1.0)
         _c2 = _shp._shadow_cyc[_cyc1]
@@ -3736,6 +3736,202 @@ def main():
         finally:
             _term(_proc_all)
             _la.kill(); _lb.kill()
+
+        # ---- DV round-1 fix-locks: every check below pins ONE CONFIRMED fidelity-
+        # audit finding (adjudication table in the notes dir). Authored against the
+        # findings and run RED against the pre-fix router FIRST; crash-finders are
+        # captured in a try so ONE run shows ALL the reds, not only the first.
+        print("")
+        print("S10) smart L10 -- the fix round: red locks on the fidelity audit's confirmed findings (DV round-1)")
+
+        # F1 (P1): _shadow_note_turn unpacked (tgt, _ph, pt) but its log line
+        # read ph -- NameError AFTER the booking and INSIDE the sticky branch's
+        # try, i.e. it silently skipped homecoming AND the mover on every
+        # would-move turn: shadow+move co-lit never moved (the shipping shape).
+        _fp, _fh, _ft = _mrig(mv=False, smart_shadow=True)
+        try:
+            _fp._shadow_note_turn("mk", _fh, 8000, {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+            _f1 = "ok"
+        except Exception as _e1:
+            _f1 = repr(_e1)
+        check("S10/F1: the shadow note runs end to end -- ledger booked AND log line bound (no NameError tax on L5/L6 behind the sticky try)",
+              _f1 == "ok" and _fp.metrics["shadow_would_moves"] == 1 and "mk" in _fp._shadow_open,
+              "f1=%s wm=%s open=%s" % (_f1, _fp.metrics["shadow_would_moves"], list(_fp._shadow_open)))
+
+        # F2 (P1): the OBS branch of _smart_tick_locked read w/base, bound ONLY
+        # by the window-boundary branch -- obs_every_polls misaligned with
+        # window_n made the first in-between OBS tick raise UnboundLocalError
+        # OUTSIDE the poller's try: the poller thread DIED, taking every box's
+        # feed with it. The defaults 10/10 are aligned by luck and hid it.
+        _ob9 = _ube("OB1")
+        _osc = {"smart_obs": True, "obs_every_polls": 5, "window_n": 10}
+        _oline = "UNREACHED"
+        try:
+            for _i in range(5):
+                _oline = _ob9._smart_tick_locked(_osc, time.monotonic())
+        except Exception as _e2:
+            _oline = repr(_e2)
+        check("S10/F2: an OBS tick BETWEEN window boundaries speaks -- cadence and window need no common divisor",
+              _oline != "UNREACHED" and "OBS box=OB1" in str(_oline) and "Error" not in str(_oline),
+              repr(_oline))
+
+        # F3 (P1): note_completion's own docstring promised "every failure
+        # never count" -- nothing filtered status. A 500's seconds fed T-bar,
+        # T-bar feeds every J and every W: an outage made HOME look expensive,
+        # so placement grew FAILURE-ATTRACTING. The legacy stats beside it are
+        # untouched (pre-existing production ledger); only the smart feed locks.
+        _nb9 = _ube("NC")
+        _np9 = R.Pool([_nb9], {"smart": {"smart_obs": True}})
+        _t0 = (_nb9.sm["streams_s"], _nb9.sm["dur_sum_s"])
+        _lg0 = dict(_nb9.stats)
+        _f3 = "ok"
+        try:
+            _np9.note_completion(_nb9, "POST", "/v1/messages", 30.0, "", 500)
+            _np9.note_completion(_nb9, "POST", "/v1/messages", 30.0, "", 503)
+            _np9.note_completion(_nb9, "POST", "/v1/messages", 30.0, "", 200)
+        except Exception as _e3:
+            _f3 = repr(_e3)
+        check("S10/F3: the docstring becomes the code -- >=400 feeds the smart T-bar NOTHING, 200 feeds exactly one; the legacy stats beside it untouched",
+              _f3 == "ok" and _nb9.sm["streams_s"] == _t0[0] + 1
+              and abs(_nb9.sm["dur_sum_s"] - (_t0[1] + 30.0)) < 1e-9 and dict(_nb9.stats) == _lg0,
+              "f3=%s sm=%s legacy_moved=%s" % (_f3, (_nb9.sm["streams_s"], _nb9.sm["dur_sum_s"]),
+                                               dict(_nb9.stats) != _lg0))
+
+        # F4+F13 (P2): the D4' freshness proof lived only in feed_blind -- and
+        # a frozen feed FREEZES the flag at its last value. A dead poller's
+        # last word ("empty x2, fresh!") therefore latched forever: lanes would
+        # walk home to a box nobody is watching anymore. The door must re-ask
+        # the LIVE clock (F4) and the LIVE state table (F13), not the latch.
+        _hp5 = R.Pool([_ho5 := _ube("QA"), _ube("QB")], {"smart": {"smart_homecoming": True}})
+        _ho5.sm["feed_blind"] = False        # the frozen latch: last poll before the death said FRESH
+        _ho5.sm["empty_streak"] = 2
+        _hp5._exiled["kq5"] = "QA"
+        _ho5.status_ts = time.monotonic() - 60.0   # ...but the clock says the feed died a minute ago
+        check("S10/F4: a frozen feed_blind=False is no evidence forever -- the homecoming door re-asks the LIVE clock (a dead poller cannot send lanes home)",
+              _hp5._homecoming("kq5", _hp5.by_id["QB"], {"turns": 1, "last_move": 0.0, "R_hat": 4.0}) is False)
+        _hp6 = R.Pool([_ho6 := _ube("RA"), _ube("RB")], {"smart": {"smart_homecoming": True}})
+        _ho6.sm["feed_blind"] = False
+        _ho6.sm["empty_streak"] = 2
+        _ho6.state = R.SUSPECT               # the poller is alive and says: NOT healthy
+        _hp6._exiled["kq6"] = "RA"
+        check("S10/F13: a SUSPECT home never receives a lane home -- D4' item one is re-verified live, not remembered",
+              _hp6._homecoming("kq6", _hp6.by_id["RB"], {"turns": 1, "last_move": 0.0, "R_hat": 4.0}) is False)
+        _hp7 = R.Pool([_ho7 := _ube("SA"), _ube("SB")], {"smart": {"smart_homecoming": True}})
+        _ho7.sm["feed_blind"] = False        # fixtures unblinded: a polled box with a fresh feed (C8 lesson)
+        _ho7.sm["empty_streak"] = 2
+        _hp7._exiled["kq7"] = "SA"
+        check("S10/F4: the fresh, HEALTHY, verifiably-empty home STILL welcomes the lane -- the new guards prove, they do not veto",
+              _hp7._homecoming("kq7", _hp7.by_id["SB"], {"turns": 1, "last_move": 0.0, "R_hat": 4.0}) is True)
+
+        # F6 (P2): _lane was capped FIFO, not LRU -- past 20000 lanes the
+        # eviction killed the HOTTEST lane's row, voiding its tau cooldown and
+        # R-hat history: a busy pool could move the same hot lane twice inside
+        # one cooldown window. A lane that just spoke must outlive the cap.
+        _lp2 = R.Pool([_ube("LZ")], {})
+        for _i in range(19999):
+            _lp2._lane_touch("lane%05d" % _i)
+        _lp2._lane_touch("lane00000")                  # a TURN for the oldest lane: it is alive
+        _lp2._lane_touch("lane20000"); _lp2._lane_touch("lane20001")
+        check("S10/F6: a lane that just spoke survives the cap -- eviction is least-RECENTLY-used, not first-born",
+              "lane00000" in _lp2._lane and "lane00001" not in _lp2._lane,
+              "hot_survives=%s cold=%s len=%s" % ("lane00000" in _lp2._lane,
+                                                  "lane00001" not in _lp2._lane, len(_lp2._lane)))
+
+        # F7 (P2): overflow placement is tier-bound -- the step to the next
+        # tier is the OPERATOR's priority ladder -- but the mover crossed
+        # tiers, silently promoting a lane to a tier no operator priced for
+        # it. Tier law: the mover moves WITHIN the home's tier; crossing
+        # stays an operator decision (x-strata-pin, priority). Disclosed.
+        _t7h = _ube("7H", serving=8.0, cap=8); _t7h.sm["cong_streak"] = 2
+        _t7t = _ube("7T", serving=0.0); _t7t.priority = 1
+        _t7p = R.Pool([_t7h, _t7t], {"smart": {"smart_move": True, "kappa_hat": 0.01, "w_cour": 1.0}})
+        _t7p._affinity_put("mk7", "7H", "sticky")
+        _gate(_t7p)                          # the data gate OPEN -- only the tier law may refuse
+        _t7p._smart_move("mk7", _t7h, 8000, {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+        check("S10/F7: the mover does not cross tiers -- all four conditions true and the gate open, a tier-1-only target still means stand down (predicate first, so the gate never even hears about it)",
+              _t7p.metrics["moves"] == 0 and _t7p.metrics["move_gate_locked"] == 0
+              and _t7p._affinity_get("mk7") == "7H",
+              "mv=%s lock=%s aff=%s" % (_t7p.metrics["moves"], _t7p.metrics["move_gate_locked"],
+                                        _t7p._affinity_get("mk7")))
+
+        # F8 (P3): ghost debt was aged by TWO clocks -- J asked "debt newer
+        # than THIS instant", the poller prunes "newer than the last status".
+        # A debt that settled between polls kept hiding real load from J for a
+        # full poll cycle. One clock: the status stamp (the poller's own line).
+        _f8b = _ube("F8", serving=6.0, cap=4, tbar=50.0)
+        _n8 = time.monotonic()
+        _f8b.status_ts = _n8 - 0.2
+        _f8b._ghost_debt = [_n8 - 0.1]      # born AFTER the last status: this box HAS been busier than it reports
+        _p8 = R.Pool([_f8b], {"smart": {"w_cour": 1.0, "kappa_hat": 0.0}})
+        _j8 = _p8._j_parts(_f8b, _n8, 0, 4.0)
+        check("S10/F8: ghost debt ages on the STATUS clock -- a debt newer than the last poll still speaks (rep 6.0, one ghost: X=(6-0-1)*50/4=62.5, not the sighted 75)",
+              _j8 is not None and abs(_j8["X"] - 62.5) < 1e-9, repr(_j8))
+
+        # F15 (P3): every smart number was float-checked, but five are tick
+        # counters and minimums -- the read sites int() them, so window_n=2.7
+        # "worked" as 2 while the operator believed 2.7. Int-typed knobs
+        # refuse a fraction at boot, BY NAME (the validator never truncates).
+        _pr15 = R.validate_cfg({"smart": {"window_n": 2.7}}, R.Pool([], {}), strict=False)
+        check("S10/F15: a tick-counter knob refuses a float at boot -- window_n=2.7 would silently run as 2; refuse by name, never truncate at the read site",
+              any("window_n" in k for k, _w in _pr15), repr(_pr15))
+
+        # F16 (P3): a sample whose cycle table was trimmed away vanished
+        # mid-settle in total silence. 64 weekly buckets is a year -- the trim
+        # is a bug path; if it ever bites, the ledger says so OUT LOUD.
+        # (Fix is a warning line: nothing observable pre-fix but the silence.)
+        _p16 = R.Pool([], {"smart": {"smart_shadow": True}})
+        _f16 = "ok"
+        try:
+            _p16._shadow_settle({"key": "zz", "bucket": 999999, "home": "h", "target": "t",
+                                 "c_hat": 0.0, "durs": [1.0]})
+        except Exception as _e16:
+            _f16 = repr(_e16)
+        check("S10/F16: settling a sample whose cycle table is gone is a NAMED loss, never a crash",
+              _f16 == "ok", _f16)
+
+        # F5 (P2): the shadow tables were mutated UNLOCKED -- the poller's
+        # _shadow_roll raced the request threads' _shadow_note_turn on
+        # _shadow_open/_shadow_cyc/_shadow_done, and the poller's call sat
+        # outside its try (a racing death was a DEAD POLLER). Discipline: one
+        # dedicated shadow lock (pool.lock would deadlock status(), which
+        # already holds it), table cores run under it, LOG outside it, the
+        # poller's calls land INSIDE its try. A race is a race: pre-fix this
+        # stress may or may not catch it (it also collects F1's NameError tax)
+        # -- the lock is the fix, this is the regression net.
+        import threading as _th
+        _shh = _ube("SH1", serving=8.0, cap=8); _shh.sm["cong_streak"] = 2
+        _sp5 = R.Pool([_shh, _sht := _ube("ST1")],
+                      {"smart": {"kappa_hat": 0.001, "w_cour": 1.0, "shadow_cycle_s": 0.02}})
+        _errs5 = []
+
+        def _note5(_lo, _hi):
+            for _k in range(_lo, _hi):
+                try:
+                    _sp5._shadow_note_turn("s5k%05d" % _k, _shh, 8000,
+                                           {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+                except Exception as _e:
+                    _errs5.append(repr(_e))
+
+        def _roll5(_n):
+            for _i in range(_n):
+                try:
+                    _sp5._shadow_roll(time.monotonic())
+                    _sp5._release_gate_open()
+                except Exception as _e:
+                    _errs5.append(repr(_e))
+        _old_si = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            _ts5 = [_th.Thread(target=_note5, args=(0, 300)), _th.Thread(target=_note5, args=(300, 600)),
+                    _th.Thread(target=_roll5, args=(1200,)), _th.Thread(target=_roll5, args=(1200,))]
+            for _t5 in _ts5:
+                _t5.start()
+            for _t5 in _ts5:
+                _t5.join(timeout=180)
+        finally:
+            sys.setswitchinterval(_old_si)
+        check("S10/F5: note_turn x roll x gate under a 1us switch interval and a 20ms shadow cycle -- no thread dies and the ledger keeps no torn state",
+              not _errs5, repr(_errs5[:4]))
     finally:
         _term(proc)
         try:
