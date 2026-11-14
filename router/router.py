@@ -972,6 +972,7 @@ class Pool:
             return
         tgt, ph, pt = mv
         now = time.monotonic()
+        _dropped17 = None
         with self._shadow_lock:
             old = self._shadow_open.get(affinity_key)
             if old is not None:
@@ -988,15 +989,23 @@ class Pool:
             # (nothing booked, nothing to settle) and says so at DEBUG.
             _tw = tgt.sm["t_bar_window"]
             if _tw is None:
-                LOG.debug("SHADOW would-move %s -> %s dropped: target T-bar window went None between decision and booking",
-                          home.id, tgt.id)
-                return
-            c = self._shadow_cyc.setdefault(b, self._new_cycle(b))
-            c["samples"] += 1
-            self.metrics["shadow_would_moves"] += 1
-            self._shadow_open[affinity_key] = {"key": affinity_key, "home": home.id,
-                                               "target": tgt.id,
-                                               "target_raw": _tw, "c_hat": pt["C"], "durs": [], "bucket": b}
+                # R5-F2 (DV-R5): the drop speaks OUTSIDE the lock. A LOG call
+                # inside _shadow_lock is this file's own scar family (a blocked
+                # console sink freezes every sticky turn's shadow path) -- and
+                # this guard shipped committing exactly that sin, caught the
+                # next round by a blind face's source scan.
+                _dropped17 = tgt.id
+            else:
+                c = self._shadow_cyc.setdefault(b, self._new_cycle(b))
+                c["samples"] += 1
+                self.metrics["shadow_would_moves"] += 1
+                self._shadow_open[affinity_key] = {"key": affinity_key, "home": home.id,
+                                                   "target": tgt.id,
+                                                   "target_raw": _tw, "c_hat": pt["C"], "durs": [], "bucket": b}
+        if _dropped17 is not None:
+            LOG.debug("SHADOW would-move %s -> %s dropped: target T-bar window went None between decision and booking",
+                      home.id, _dropped17)
+            return
         LOG.info("SHADOW lane=%s would-move %s -> %s (W_home=%.1fs W_tgt=%.1fs C_tgt=%.1fs)",
                  short(affinity_key), home.id, tgt.id, ph["W"], pt["W"], pt["C"])
         self._shadow_drain_warn()   # P2-2: the superseded settle above ran
@@ -2108,10 +2117,32 @@ class StatusPoller(threading.Thread):
                     except Exception as exc:
                         with be.lock:
                             be.status_error = "smart tick: " + repr(exc)
+                        # R5-B1 (DV-R5): this surface booked NOTHING, and its
+                        # status_error row is overwritten by the NEXT poll's
+                        # success -- a persistent crash was invisible to the
+                        # panel the README promises ("never silent"). Book the
+                        # witness; the shared 60s limiter keeps a per-poll
+                        # storm quiet, and the WARNING speaks outside all locks.
+                        _due17 = False
+                        with self.pool.lock:
+                            self.pool.metrics["smart_decision_errors"] += 1
+                            _due17 = (time.monotonic() - self.pool._swallow_warn_at) >= 60.0
+                            if _due17:
+                                self.pool._swallow_warn_at = time.monotonic()
+                                _tot17 = self.pool.metrics["smart_decision_errors"]
+                        if _due17:
+                            LOG.warning("smart tick failed for %s -- poller survives (%d decision errors total)",
+                                        be.id, _tot17, exc_info=True)
             if self.pool.smart_shadow:
                 try:
                     self.pool._shadow_roll(time.monotonic())
                 except Exception:
+                    # R5-B1: the named WARNING existed, the COUNTER did not --
+                    # an operator watching smart_decision_errors through a
+                    # persistent ledger failure saw a frozen number. Book the
+                    # witness (the sticky branch's swallow books its own).
+                    with self.pool.lock:
+                        self.pool.metrics["smart_decision_errors"] += 1
                     LOG.warning("shadow roll failed (poller survives)", exc_info=True)
             self.stop_evt.wait(max(0.2, float(self.cfg.get("status_interval") or 1.0)))
 
@@ -2726,8 +2757,8 @@ class Handler(BaseHTTPRequestHandler):
         max_fails = int(self.cfg.get("max_connect_failures") or 3)
         backoff = float(self.cfg.get("down_backoff") or 20.0)
         connect_timeout = float(self.cfg.get("connect_timeout") or 5.0)
-        read_timeout = self.cfg.get("read_timeout")
-        read_timeout = None if read_timeout in (0, None, "0") else float(read_timeout)
+        # R5-F3: one float(), NUMERIC zero test (see resolve_read_timeout).
+        read_timeout = resolve_read_timeout(self.cfg.get("read_timeout"))
 
         try:
             body = self._rewrite_model(body)
@@ -3771,10 +3802,23 @@ def make_pool(cfg):
             "no backends configured. Example: python router.py "
             "--backend a=http://127.0.0.1:8080 --backend b=http://192.0.2.24:8080"
         )
+    if not isinstance(specs, list):
+        # R5-F6 (DV-R5): make_pool runs BEFORE validate_cfg, so a bad shape
+        # here must die NAMED at THIS door -- it used to die as a raw
+        # KeyError/AttributeError traceback, against the whole startup-refuses
+        # doctrine the config doors were built to honor.
+        raise SystemExit("backends must be a LIST of URL strings or objects, got %s"
+                         % type(specs).__name__)
     backends = []
     for i, spec in enumerate(specs):
         if isinstance(spec, str):
             spec = {"id": "box" + str(i + 1), "url": spec}
+        elif not isinstance(spec, dict):
+            raise SystemExit("backend #%d: each backend must be a URL string or an object, got %s"
+                             % (i, type(spec).__name__))
+        if not isinstance(spec.get("url"), str) or not spec["url"]:
+            raise SystemExit("backend #%d: needs a non-empty \"url\" string (id=URL) -- a spec without it is a traceback, not a config"
+                             % i)
         extra = {k: v for k, v in spec.items() if k not in ("id", "url", "path_prefix")}
         backends.append(Backend(
             spec.get("id") or ("box" + str(i + 1)),
@@ -3783,6 +3827,21 @@ def make_pool(cfg):
             cfg=dict(cfg, **extra),
         ))
     return Pool(backends, cfg)
+
+
+def resolve_read_timeout(raw):
+    """R5-F3 (DV-R5): the never-time-out sentinel used to be MIXED-TYPE
+    membership -- `raw in (0, None, "0")`. The numeric door floats strings
+    through ("0.0" is finite and >= 0), the membership test missed the
+    spelling, and float("0.0") reached settimeout(): a NON-BLOCKING socket,
+    every getresponse a BlockingIOError, every forwarded request a 502 with
+    ghost debt -- under a boot log that printed "0.0" as if it meant
+    something. Compare NUMERICALLY after one float(); absent and every zero
+    spelling mean the same documented thing: never cut a parked stream."""
+    if raw is None:
+        return None
+    _f = float(raw)
+    return None if _f == 0.0 else _f
 
 
 # the knobs that must be numbers: a value that coerces to None, or crashes
@@ -3804,6 +3863,19 @@ _KNOWN_BE_KEYS = {"id", "url", "path_prefix", "priority", "max_inflight",
                   # (C9's dead-knob doctrine, generalized past SMART_NUMS).
                   "tls_insecure", "status_interval"}
 
+# R5-F1 (DV-R5): the non-bool law in ONE place per domain. The file already
+# spoke it twice -- `the string "false" is truthy` at require_idle's door and
+# at every SMART flag -- while tls_insecure, a SECURITY knob, had no door at
+# all: `"tls_insecure": "false"` is truthy at open_connection and SILENTLY
+# TURNS TLS CERTIFICATE VERIFICATION OFF for that box (a security default
+# inverted by a plausible spelling, invisible in /stats and logs), and
+# `"expose_affinity": "false"` keeps the x-strata-* headers ON under
+# --no-expose-affinity expectations. A future bool knob joins the list;
+# every door reads the same sentence. (Third layer of the same lesion:
+# the law stood at two doors and not the third.)
+_BOOL_KNOBS_TOP = ("expose_affinity", "tls_insecure")
+_BOOL_KNOBS_BE = ("require_idle", "tls_insecure")
+
 
 def validate_cfg(cfg, pool, strict=True):
     """Check every knob that tiering, key injection or the health machine
@@ -3811,6 +3883,30 @@ def validate_cfg(cfg, pool, strict=True):
     be indistinguishable from a crash, never from a working default.
     Returns the list of problems; main() treats them as fatal for serving."""
     problems = []
+    # R5-F4 (DV-R5): an explicit null is a VALUE. {"port": null} passed every
+    # door (the numeric loop skips None, the guards test `is not None`) and
+    # build_cfg's update() let it CLOBBER the merged DEFAULTS -- port died by
+    # a raw int(None) traceback at the bind (not the named error the startup
+    # paragraph promises), sticky_ttl/read_timeout silently landed on
+    # DOCUMENTED MODES that are not the documented defaults, expose_affinity
+    # inverted its default. The listen gate had already refused its own null
+    # (:4027's comment); the law now covers its siblings. To take a default,
+    # REMOVE the key.
+    for _k17, _v17 in cfg.items():
+        if _v17 is None and _k17 in DEFAULTS and not _k17.startswith("_"):
+            problems.append((_k17, "explicit null overrides the merged default -- the read sites disagree on what null means; remove the key to take the default"))
+    for _i17, _sp17 in enumerate(cfg.get("backends") or []):
+        if isinstance(_sp17, dict):
+            for _k17, _v17 in _sp17.items():
+                if _v17 is None:
+                    problems.append(("backends[%d] %s.%s" % (_i17, _sp17.get("id") or "?", _k17),
+                                     "explicit null in a backend spec overrides the merged global -- remove the key to inherit the default"))
+    # R5-F1: top-level bool knobs speak the SAME sentence as the backend
+    # loop's (SMART flags keep their own door; all three read one law).
+    for _bk17 in _BOOL_KNOBS_TOP:
+        _rv17 = cfg.get(_bk17)
+        if _rv17 is not None and not isinstance(_rv17, bool):
+            problems.append((_bk17, "must be true/false (a JSON boolean), got %r -- the string \"false\" is truthy" % (_rv17,)))
     for k, cast in _NUM_CFG.items():
         v = cfg.get(k)
         if v is None:
@@ -3904,10 +4000,14 @@ def validate_cfg(cfg, pool, strict=True):
             # (0 stays legal: accept-no-new-work, the drain shape.)
             problems.append((b.id + ".max_inflight",
                              "negative max_inflight silently means UNLIMITED -- omit the key if that is what you mean, got %r" % (raw,)))
-        raw = b.cfg.get("require_idle")
-        if raw is not None and not isinstance(raw, bool):
-            problems.append((b.id + ".require_idle",
-                             "must be true/false (a JSON boolean), got %r -- the string \"false\" is truthy" % (raw,)))
+        for _bk in _BOOL_KNOBS_BE:
+            # R5-F1: ONE list, ONE sentence -- require_idle's law now covers
+            # its unguarded sibling (b.cfg carries the merged globals, so a
+            # top-level "false" is caught here per box as well).
+            _rv = b.cfg.get(_bk)
+            if _rv is not None and not isinstance(_rv, bool):
+                problems.append((b.id + "." + _bk,
+                                 "must be true/false (a JSON boolean), got %r -- the string \"false\" is truthy" % (_rv,)))
         for nk in ("status_interval",):
             # status_interval IS read per-backend (_stale_after) -- a string
             # here would crash inside stats after boot. status_timeout was
@@ -4154,7 +4254,8 @@ def main(argv=None):
         "listening on http://%s:%s -- affinity+least-queued passthrough, no rate limiting, "
         "queue stays in the backends", cfg["listen"], cfg["port"],
     )
-    LOG.info("client read timeout: %s", cfg.get("read_timeout") or "disabled")
+    LOG.info("client read timeout: %s",
+             resolve_read_timeout(cfg.get("read_timeout")) or "disabled")
     LOG.info("control surface: %s",
              "GATED -- x-strata-pin and sticky/clear require x-strata-control"
              if cfg.get("_control_token") else

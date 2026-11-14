@@ -145,7 +145,9 @@ file), `control_token` (`""`, optional gate for `x-strata-pin` requests),
 `smart` (`{}`, the placement ladder -- every knob in *The `smart.*` ladder*
 below; empty = today's behavior).
 Tiering keys (`priority`, `max_inflight`, `require_idle`, and per-backend
-`status_interval` -- a queue-poll-rate override for just that box) live per
+`status_interval` -- how long that box's status feed stays fresh before going
+stale; the poll *rate* stays global: one poller walks every box once per
+top-level `status_interval`) live per
 backend -- see *Tiered placement* below. A per-backend (or top-level)
 `probe_model` names the model the `--probe` health request asks for.
 
@@ -584,7 +586,11 @@ non-numeric per-backend `status_interval`, a `backend_api_key_env` naming an
 unset variable, a broken or placeholder-holding keys file, a configured
 `keys_file` path that does not exist, an IPv6 `listen`, a malformed
 `status_paths`: all of them abort the boot with a named error instead of
-silently serving with a weakened gate. A gate-relevant box (`require_idle`
+silently serving with a weakened gate. The same fatal-typo law covers
+`tls_insecure` and `expose_affinity` (a truthy `"false"` would silently
+disable certificate verification -- the string is not the boolean), and an
+explicit `null` is refused too: it overrides a merged default and lands
+differently per knob, so remove the line to take the default. A gate-relevant box (`require_idle`
 or `priority > 0`) whose key resolves only from a SHARED fallback logs a
 warning -- for a borrowed box that is usually the wrong key -- and the boot
 log names where every key came from. Unknown config keys are logged as
@@ -690,7 +696,11 @@ which the 64-combination flag matrix keeps closed for every ladder shape.
 `smart_decision_errors` is the decision layer's own witness: a crash inside
 the smart block never touches the request in flight, but it books here (and
 logs one named WARNING per minute) -- a decision failure can be swallowed,
-never silent.
+never silent. Every surface books it: a sticky turn's deferred shadow/move/
+homecoming work, the poller's ledger roll, and a box's per-poll smart tick
+(the poller-side catches once logged a WARNING or a per-box status string the
+next successful poll overwrote, while the panel stayed frozen at its old
+number).
 
 ## Limits
 
@@ -768,7 +778,7 @@ never silent.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 383 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 405 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the

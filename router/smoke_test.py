@@ -4642,6 +4642,141 @@ def main():
     check("S16/F-8d: probe_model is a real top-level default (the unknown-knob warning loop told the truth again -- --probe was honored while the config name booted as IGNORED)",
           '"probe_model": "probe"' in _flat16, "top-level probe_model boots as 'IGNORED'")
 
+    # ---- S17: DV-R5's harvest (fidelity F-1..F-6 + behavioral B-1). 16
+    # laws burned RED against the frozen tree @7233056; the B-1 pair burned
+    # RED against the extracted baseline copy (delta 0/0 while the WARNING
+    # fired); the 4 controls are GREEN by design -- witnesses of the WHY.
+    print("")
+    print("S17) DV-R5: bool/null/spec doors, the numeric sentinel, log-out-of-lock scan, the poller witness")
+
+    def _probs17(_c):
+        return R.validate_cfg(_c, R.make_pool(_c), strict=False)
+
+    # F-1: the non-bool law reaches its unguarded siblings -- one is SECURITY
+    _b17a = dict(_base16()["backends"][0], tls_insecure="false")
+    _b17b = dict(_base16()["backends"][1], tls_insecure=False)
+    _pr = [p for p in _probs17(dict(_base16(), backends=[_b17a, _b17b])) if "tls_insecure" in p[0]]
+    check("S17/F-1: validator refuses backend tls_insecure='false' (the string is truthy at open_connection -- cert verification for that box silently OFF, a security default inverted by a plausible spelling; the file already spoke this law at two other doors)",
+          bool(_pr), "problems=%s" % (_pr,))
+    _pr = [p for p in _probs17(_base16(expose_affinity="false")) if p[0] == "expose_affinity"]
+    check("S17/F-1: validator refuses expose_affinity='false' (the x-strata-* headers stay ON while the operator believes --no-expose-affinity engaged)",
+          bool(_pr), "problems=%s" % (_pr,))
+    check("S17/F-1 CONTROL: bool('false') is True -- the witness of WHY (design control; truth on every tree)",
+          bool("false"), "")
+
+    # F-2: the house rule as a source lock -- DV-fix6's own Q1 guard had
+    # broken it, caught next round by a blind face's scan.
+    _l17 = open(ROUTER, encoding="utf-8").read().splitlines()
+    def _logs_in17(_lk):
+        _hits = []
+        for _i, _ln in enumerate(_l17):
+            _st = _ln.lstrip()
+            if _st.startswith("with ") and _lk + ":" in _st.replace(" ", ""):
+                _ind = len(_ln) - len(_ln.lstrip())
+                for _j in range(_i + 1, len(_l17)):
+                    _cur = _l17[_j]
+                    if not _cur.strip():
+                        continue
+                    if len(_cur) - len(_cur.lstrip()) <= _ind:
+                        break
+                    if "LOG." in _cur and "(" in _cur:
+                        _hits.append((_j + 1, _cur.strip()[:60]))
+        return _hits
+    _h17s = _logs_in17("self._shadow_lock")
+    check("S17/F-2: zero LOG calls inside any 'with self._shadow_lock' region (a blocked console sink freezes every sticky turn's shadow path -- the scar this file named for itself; DV-fix6's Q1 DEBUG line was the violation)",
+          not _h17s, "hits=%s" % (_h17s,))
+    _h17p = _logs_in17("self.lock")
+    check("S17/F-2: zero LOG calls inside any 'with self.lock' region (same law, pool.lock -- defense lock, GREEN at baseline by design: it guards the future, not the past)",
+          not _h17p, "hits=%s" % (_h17p,))
+
+    # F-3: the never-time-out sentinel is NUMERIC, not string membership
+    for _v17, _tag17 in (("0.0", 'the door floats "0.0" through (finite, >=0), then settimeout(0.0) made every socket NON-BLOCKING: every request a 502 with ghost debt'),
+                         (" 0 ", 'padded string " 0 "'),
+                         ("0.00", 'string "0.00"')):
+        check("S17/F-3: resolve_read_timeout(%r) is None -- %s" % (_v17, _tag17),
+              R.resolve_read_timeout(_v17) is None, "got=%r" % (R.resolve_read_timeout(_v17),))
+    check("S17/F-3: real 0.0 -> None and 3600.0 -> 3600.0 (the helper may not move the documented spellings)",
+          R.resolve_read_timeout(0.0) is None and R.resolve_read_timeout(3600.0) == 3600.0,
+          "0.0->%r 3600.0->%r" % (R.resolve_read_timeout(0.0), R.resolve_read_timeout(3600.0)))
+
+    # F-4: an explicit null is a VALUE -- it overrides a merged default and
+    # the numeric doors used to skip None outright.
+    for _k17, _tag17 in (("port", "int(None) died by raw traceback at the bind, not by named refusal"),
+                         ("sticky_ttl", "silently the 0 never-expire mode, replacing the documented default 21600"),
+                         ("read_timeout", "silently never-time-out, replacing the documented default 3600"),
+                         ("expose_affinity", "headers hidden against the documented default true")):
+        _cfg17n = _base16(**{_k17: None})
+        _pr = [p for p in _probs17(_cfg17n) if p[0] == _k17]
+        check("S17/F-4: validator refuses explicit null for %s -- %s (to take a default, REMOVE the key)" % (_k17, _tag17),
+              bool(_pr), "problems=%s" % (_pr,))
+    _cfg17n2 = _base16()
+    _cfg17n2["backends"][0]["max_inflight"] = None
+    _pr = [p for p in _probs17(_cfg17n2) if "max_inflight" in p[0]]
+    check("S17/F-4: validator refuses explicit null in a backend spec too (it overrides the merged global by the same mechanism)",
+          bool(_pr), "problems=%s" % (_pr,))
+    check("S17/F-4 CONTROL: an ABSENT key still means the default (design control; must stay true)",
+          not _probs17(_base16()), "problems=%s" % (_probs17(_base16()),))
+
+    # F-5: our own DV-fix6 sentence lied about what per-backend
+    # status_interval does -- locked against re-drift in BOTH directions.
+    _seg17 = _fl15.split("Tiering keys (", 1)
+    _seg17 = _seg17[1].split(") live per backend", 1)[0] if len(_seg17) > 1 else "<no tiering-keys line>"
+    check("S17/F-5: the enumeration no longer claims per-backend status_interval overrides the POLL RATE (cadence is the global knob only; the per-backend read is the stale-window -- DV-fix6's own fix sentence was the lie, caught by the next round)",
+          "queue-poll-rate" not in _seg17, "enumeration is: %r" % (_seg17,))
+    check("S17/F-5: the enumeration names what it really overrides (freshness until stale) and that the poll rate stays global",
+          "stale" in _seg17 and "global" in _seg17, "enumeration is: %r" % (_seg17,))
+
+    # F-6: make_pool runs BEFORE validate_cfg -- bad shapes die NAMED here.
+    def _spec_die17(_specs):
+        try:
+            R.make_pool({"listen": "127.0.0.1", "port": 9298, "backends": _specs})
+            return None
+        except SystemExit as _e:
+            return str(_e)
+        except Exception as _e:
+            return "%s: %s" % (type(_e).__name__, _e)
+    _d17 = _spec_die17([{"id": "a"}])
+    check("S17/F-6: a backend spec without url dies NAMED (no KeyError traceback before the doors even run -- the startup-refuses doctrine, enforced at the door that precedes them)",
+          _d17 is not None and "url" in _d17 and "Error" not in _d17, "died: %s" % (_d17,))
+    _d17 = _spec_die17([["a", "http://127.0.0.1:1"]])
+    check("S17/F-6: a non-dict/non-string spec dies NAMED (no AttributeError at spec.items())",
+          _d17 is not None and "Error" not in _d17, "died: %s" % (_d17,))
+    _d17 = _spec_die17(["http://127.0.0.1:1"])
+    check("S17/F-6 CONTROL: the documented string spec form keeps working (design control; must stay true)",
+          _d17 is None, "died: %s" % (_d17,))
+
+    # B-1: poller-side smart crashes book the witness -- in-process poller,
+    # zero ports; the status_error row the tick used to leave behind is
+    # overwritten by the next successful poll, so the counter is the witness.
+    _c18 = _base16(status_interval=0.2, smart={"smart_shadow": True})
+    _p18 = R.make_pool(_c18)
+    def _boom18r(*_a, **_k):
+        raise RuntimeError("poison roll (S17/B-1)")
+    _p18._shadow_roll = _boom18r
+    _m18 = _p18.metrics["smart_decision_errors"]
+    _pol18 = R.StatusPoller(_p18, _c18)
+    _pol18.start()
+    time.sleep(1.2)
+    _pol18.stop_evt.set()
+    _pol18.join(5)
+    check("S17/B-1a: a poller ledger-roll crash books smart_decision_errors (baseline: the named WARNING fired while the counter froze at its old number -- panel-blindness the README's 'never silent' forbids)",
+          _p18.metrics["smart_decision_errors"] - _m18 >= 1,
+          "delta=%s" % (_p18.metrics["smart_decision_errors"] - _m18,))
+    _p19 = R.make_pool(_base16(status_interval=0.2, smart={"smart_shadow": True}))
+    def _boom19t(*_a, **_k):
+        raise RuntimeError("poison tick (S17/B-1)")
+    for _b19 in _p19.backends:
+        _b19._smart_tick_locked = _boom19t
+    _m19 = _p19.metrics["smart_decision_errors"]
+    _pol19 = R.StatusPoller(_p19, _c18)
+    _pol19.start()
+    time.sleep(1.2)
+    _pol19.stop_evt.set()
+    _pol19.join(5)
+    check("S17/B-1b: a per-box smart-tick crash books it too (its status_error row is OVERWRITTEN by the next successful poll -- a persistent crash was invisible; the counter is the only durable witness)",
+          _p19.metrics["smart_decision_errors"] - _m19 >= 1,
+          "delta=%s" % (_p19.metrics["smart_decision_errors"] - _m19,))
+
     print("")
     if FAKE_ERRORS:
         print("FakeStrata swallowed %d handler tracebacks (last few):" % len(FAKE_ERRORS))
