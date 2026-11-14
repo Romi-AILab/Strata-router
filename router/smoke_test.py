@@ -1029,7 +1029,7 @@ def main():
         _cp._overflow_pending[11] = ("meta:m1/lane:m1", "ch", "ca2")
         _cp._overflow_pending[12] = ("meta:m1/lane:m1", "ch", "ca3")
         _ca2.inflight = _ca3.inflight = 1
-        _co = _cp.overflow_rollback("meta:m1/lane:m1", 12, "ca3")     # the SIBLING's alt died
+        _co = _cp.overflow_rollback("meta:m1/lane:m1", 12, "ca3", 4096)     # the SIBLING's alt died
         check("a sibling overflow's rollback releases only its OWN reservation and leaves the lane's other pending intact",
               _co is not None and _co[0] is _ch and _co[1] == "sticky" and _co[2] is True
               and _ca3.inflight == 0 and _ca2.inflight == 1
@@ -1040,7 +1040,7 @@ def main():
         _cp._overflow_pending[13] = ("meta:m1/lane:m1", "ch", "ca3")
         _ca3.inflight = 2                                              # a live lane ALSO rides ca3
         _ch.state = R.DOWN                                             # home died inside the same request
-        _co2 = _cp.overflow_rollback("meta:m1/lane:m1", 13, "ca3")
+        _co2 = _cp.overflow_rollback("meta:m1/lane:m1", 13, "ca3", 4096)
         check("a rollback whose home died mid-request releases the alt EXACTLY once and migrates -- no None, no 502",
               _co2 is not None and _co2[0] is _cl and _co2[1] == "migrated"
               and _ca3.inflight == 1 and _cl.inflight == (1 if _co2[2] else 0),
@@ -2773,10 +2773,10 @@ def main():
         _f4place_real = _f4pool._place
         _f4pool._place = lambda **_kw: (None, False)   # nowhere to migrate onward to
         try:
-            _f4late = _f4pool.overflow_rollback("f4lane", 555, "f4alt")
+            _f4late = _f4pool.overflow_rollback("f4lane", 555, "f4alt", 4096)
         finally:
             _f4pool._place = _f4place_real
-        _f4early = _f4pool.overflow_rollback("f4lane", 999, "f4alt")  # pop miss: plain None,
+        _f4early = _f4pool.overflow_rollback("f4lane", 999, "f4alt", 4096)  # pop miss: plain None,
         # the reservation stays with the caller's finally -- unchanged semantics
         check("v1.2.17: released verdict stops a double end() when rollback finds no box; early-None stays plain None (R6-C note-1)",
               _f4late is not None and _f4late[0] is None and _f4late[2] is False
@@ -3953,6 +3953,167 @@ def main():
               "err=%s sticky=%s rq=%s sum=%s" % (_b2.metrics.get("smart_decision_errors"),
                                                  _b2.metrics["sticky_hits"], _b2.metrics["requests"],
                                                  sum(_b2.metrics.get(t, 0) for t in _TERMS)))
+
+        # ---- DV round-2 (CONVERGENCE round, fidelity face @8a7b070) fix-locks.
+        # Red baseline is 28812b8 -- P2-1 and P2-2 sit INSIDE DV-fix1's own F5/F16
+        # fix region, so the tree that must burn is the one that contains the fix.
+        print("")
+        print("S12) smart L12 -- the convergence round: P2/P3 reds the fidelity face confirmed (the fix round itself gets audited and it flinched)")
+
+        # P2-1: note_completion reached into a LIVE sample's durs with no lock --
+        # settle's sorted(s["durs"]) races that append and the release gate's own
+        # evidence resolves on fewer (or orphaned) durations. Watch-list: the
+        # ledger says so only when the shadow lock says so. The sample is seeded
+        # by hand (same dict shape) so no predicate happens to hide the defect.
+        _w21mh, _w21mt = _ube("MH", serving=8.0, mi=8), _ube("MT")
+        _w21 = R.Pool([_w21mh, _w21mt], {"smart": {"smart_shadow": True}})
+        _w21viol = []
+
+        class _WatchDurs(list):
+            def append(self, x):
+                if not _w21._shadow_lock.locked():
+                    _w21viol.append("durs append outside the shadow lock")
+                list.append(self, x)
+        _w21._shadow_open["mk"] = {"key": "mk", "home": "MH", "target": "MT",
+                                   "target_raw": None, "c_hat": 0.0, "durs": [], "bucket": 0}
+        _w21._shadow_open["mk"]["durs"] = _WatchDurs()
+        _w21.note_completion(_w21mh, "POST", "/v1/messages", 3.0, "mk", 200)
+        check("S12/P2-1: the ledger really is ONE region -- even the completion path appends its duration under the shadow lock (settle never races a cross-lock write)",
+              not _w21viol and len(_w21._shadow_open["mk"]["durs"]) == 1, repr(_w21viol))
+
+        # P2-2: DV-fix1's own F16 warning fired UNDER _shadow_lock -- the first
+        # log-under-a-lock the file ever had, breaking its own written doctrine
+        # ("nothing logs under it") and the freeze family (blocked console sinks
+        # are this operator's OBSERVED history). The fix for logging must not sin.
+        _w22 = R.Pool([_ube("WH"), _ube("WT")], {"smart": {"smart_shadow": True, "shadow_cycle_s": 0.02}})
+        _w22fire, _w22viol = [], []
+
+        class _LockSpy(logging.Handler):
+            def emit(self, rec):
+                if "cycle table" in rec.getMessage():
+                    _w22fire.append(1)
+                    if _w22._shadow_lock.locked():
+                        _w22viol.append("named loss logged under the shadow lock")
+        _spy22 = _LockSpy(level=logging.WARNING)
+        R.LOG.addHandler(_spy22)
+        try:
+            _w22._shadow_bucket = 0
+            _w22._shadow_cyc.clear()
+            _w22._shadow_open["k9"] = {"key": "k9", "home": "WH", "target": "WT",
+                                       "target_raw": None, "c_hat": 0.0, "durs": [], "bucket": 0}
+            _w22._shadow_roll(time.monotonic())     # the crossing settles k9 into a MISSING table
+        finally:
+            R.LOG.removeHandler(_spy22)
+        check("S12/P2-2: the named missing-table loss still speaks -- but OUTSIDE the shadow lock (a warning that freezes the lock freezes every sticky turn behind it)",
+              len(_w22fire) >= 1 and not _w22viol, "fires=%s viol=%s" % (_w22fire, _w22viol))
+
+        # P2-3 (disclosure): smart_place ON hides SUSPECT boxes from the placement
+        # face while any HEALTHY box is in the round -- pinned design (SUSPECT
+        # means unproven-for-first-visit, not dead; drain keeps their tail seat)
+        # but the table that discloses the mover's tier law said nothing of this.
+        # P2-4 (my own F11 sentence was wrong): lane-state birth belongs to the
+        # flags that READ lanes (shadow/move/homecoming sticky branch), never to
+        # smart_obs. P3-4: the parity sentence named a stale version (v1.2.16);
+        # the pre-smart baseline main@36ef04d speaks 1.2.17.
+        _rd = open(os.path.join(os.path.dirname(ROUTER), "README.md"), encoding="utf-8").read()
+        _l_place = next(_l for _l in _rd.splitlines() if _l.startswith("| `smart_place`"))
+        _l_parity = _rd[_rd.index("empty or absent means"): _rd.index("empty or absent means") + 300]
+        check("S12/P2-3: the smart_place row discloses the SUSPECT placement-face exclusion (still in the drain tail, still served when every box is SUSPECT -- but no FIRST visit while a healthy box stands)",
+              "SUSPECT" in _l_place, _l_place[:120])
+        check("S12/P2-4: the table names lane-state birth truthfully -- the flags that READ lanes (shadow/move/homecoming), never smart_obs",
+              "smart_shadow`/`smart_move`/`smart_homecoming" in _l_place and "smart_obs` measures" not in _l_place,
+              _l_place[:120])
+        check("S12/P3-4: the flag-off parity claim names the REAL baseline version (v1.2.17 @36ef04d), not a stale label",
+              "v1.2.17" in _l_parity and "v1.2.16" not in _l_parity, _l_parity[:150])
+
+        # P3-2: the gate reads at most 32 completed cycles -- release_gate_shadow_cycles=33
+        # would stand at a gate that can never open, in silence. The move-alone row
+        # already boasts that this kind of lockout SAYS SO; the boot refuses instead.
+        _p32 = R.validate_cfg({"smart": {"release_gate_shadow_cycles": 33}}, R.Pool([], {}), strict=False)
+        check("S12/P3-2: release_gate_shadow_cycles above the 32-cycle ledger refuses boot by name -- a knob above the table is a gate that can never open, and silence is not the house answer",
+              any("release_gate_shadow_cycles" in k for k, _w in _p32), repr(_p32))
+
+        # P3-3: an overflow that migrates ONWARD (target died AND home raced DOWN)
+        # placed with the r_hat floor and C=0 while the same lane's ordinary
+        # migration passed both -- one request, two placement rounds, two
+        # currencies. Signature red first: the body_len argument does not exist yet.
+        _rb = R.Pool([_rbh := _ube("RH"), _ube("RA")], {})
+        _rbh.state = R.DOWN
+        _rb._overflow_pending["t1"] = ("kr", "RH", "RA")
+        _cap33, _realp33 = {}, _rb._place
+
+        def _capw33(*a, **k):
+            _cap33.update(k)
+            return _realp33(*a, **k)
+        _rb._place = _capw33
+        _e33 = "ok"
+        try:
+            _rb.overflow_rollback("kr", "t1", "RA", 4096)
+        except Exception as _e:
+            _e33 = repr(_e)
+        check("S12/P3-3: an overflow's migrate-onward speaks the lane's OWN currency -- body_len AND r_hat reach _place exactly as the normal migration round does",
+              _e33 == "ok" and _cap33.get("body_len") == 4096 and "r_hat" in _cap33,
+              "%s cap=%s" % (_e33, {k: _cap33.get(k) for k in ("body_len", "r_hat")}))
+
+        # P3-6a: the config door cast numbers but never asked if they were
+        # FINITE -- json.load accepts NaN/Infinity literals; status_interval=NaN
+        # makes every `> _stale_after()` comparison permanently False: the feed
+        # is never stale, the freshness doctrine dies silently at boot.
+        _p36 = R.validate_cfg({"status_interval": float("nan"), "down_backoff": float("inf")},
+                              R.Pool([], {}), strict=False)
+        check("S12/P3-6a: non-finite numbers never pass the CONFIG door either -- status_interval=NaN would make every box's feed forever fresh (the same invariant v1.2.16 nailed for relayed values)",
+              any("status_interval" in k for k, _w in _p36) and any("down_backoff" in k for k, _w in _p36),
+              repr(_p36))
+
+        # P3-6b (legacy, same freeze family): _stash_pending's 4096-cap eviction
+        # warning fired UNDER pool.lock (caller holds it). The counter books
+        # inside the lock; the WARNING waits for the next request's pick.
+        _pd = R.Pool([_ube("PH", mi=64), _ube("PT", mi=64)], {})
+        _6bfires, _6bviol = [], []
+
+        class _Cap6b(logging.Handler):
+            def emit(self, rec):
+                if "4096 cap" in rec.getMessage():
+                    _6bfires.append(1)
+                    if _pd.lock.locked():
+                        _6bviol.append("eviction warning logged under pool.lock")
+        _spy6b = _Cap6b(level=logging.WARNING)
+        R.LOG.addHandler(_spy6b)
+        try:
+            with _pd.lock:
+                for _i in range(4097):
+                    _pd._stash_pending(("t", _i), ("k6b", "PH", "PT"))
+            _pd.pick("k6b", body_len=10)      # the next request drains the deferred warning
+        finally:
+            R.LOG.removeHandler(_spy6b)
+        check("S12/P3-6b: the legacy 4096-cap eviction warning speaks OUTSIDE pool.lock too (deferred to the next request) -- the never-log-under-the-lock rule admits no legacy exemption",
+              _pd.metrics["overflow_evictions"] == 1 and len(_6bfires) >= 1 and not _6bviol,
+              "evict=%s fires=%s viol=%s" % (_pd.metrics["overflow_evictions"], _6bfires, _6bviol))
+
+        # F-B1 (behavioral face 2): a pin that MISSES on a preview must name
+        # the preview consequence -- "falling back to normal placement" would
+        # promise a home write that a preview contractually cannot perform.
+        _pf = R.Pool([_ube("PA", ri=True), _ube("PB")], {"smart": {"smart_preview": True}})
+        _pa = _pf.by_id["PA"]
+        _pa.ext_streak = 2          # the require_idle gate's real "busy" door
+        _pfcap = []
+
+        class _PinSpy(logging.Handler):
+            def emit(self, rec):
+                if "unavailable" in rec.getMessage():
+                    _pfcap.append(rec.getMessage())
+        _spyfb = _PinSpy(level=logging.WARNING)
+        R.LOG.addHandler(_spyfb)
+        try:
+            _pf.pick("pl1", pin="PA", body_len=10, preview=True)
+        finally:
+            R.LOG.removeHandler(_spyfb)
+        check("S13/F-B1: a pin that misses on a PREVIEW names the consequence -- the lane stays homeless BY CONTRACT and the operator's steer says so out loud, never silently degraded into a plain preview's \"placed\"",
+              _pf.metrics["pin_misses"] == 1 and _pf.metrics["preview_passes"] == 1
+              and _pf._affinity_get("pl1") is None
+              and any("preview" in m.lower() for m in _pfcap),
+              "miss=%s pv=%s home=%s warns=%s" % (_pf.metrics["pin_misses"], _pf.metrics["preview_passes"],
+                                                  _pf._affinity_get("pl1"), _pfcap))
     finally:
         _term(proc)
         try:

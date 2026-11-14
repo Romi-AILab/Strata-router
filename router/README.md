@@ -288,7 +288,11 @@ but a preview is not a conversation turn: it never writes the lane's home,
 never overflows or re-homes it, and it books the `preview_passes` terminal
 instead of `sticky_hits`/`new_placements`/`migrations`. With the flag off a
 preview behaves exactly as it always has; `x-strata-pin` on a preview is an
-operator command and keeps the full pin behavior.
+operator command and keeps the full pin behavior WHEN THE PINNED BOX
+ACCEPTS IT (a pin hit writes the lane's home, origin `pin`, like any pin).
+When the pinned gate refuses, the preview still answers -- but the lane
+stays homeless by contract, the dropped steer is logged by name, and only
+a real turn can re-seat it.
 
 The router injects your backend keys for callers that send none, so it knows
 its callers: it answers only requests whose `Host` is a loopback name (or the
@@ -627,9 +631,11 @@ never changed, only grew a term.
 ### The `smart.*` ladder: every knob, one table
 
 The ladder lives under the `smart` object in `router.json` (no CLI flags);
-empty or absent means every rung is off and the router is v1.2.16 behavior
+empty or absent means every rung is off and the router is v1.2.17 behavior
 byte-for-byte. Unknown knobs inside `smart` warn and are ignored -- they are
-never silently trusted as something else. `router.remote.example.json` ships
+never silently trusted as something else. Every number knob must be finite
+and `> 0` (a throttle cannot be zero-disabled, only made small), and tick
+counters refuse fractions by name. `router.remote.example.json` ships
 the full block with shipped defaults so an operator can lift it wholesale.
 
 | Knob | Default | What it governs |
@@ -637,7 +643,7 @@ the full block with shipped defaults so an operator can lift it wholesale.
 | `smart_obs` | `false` | The per-box OBS telemetry line every `obs_every_polls` polls -- data collection only, zero routing effect. |
 | `smart_cap_read` | `false` | Read `cap_slots` from the box status feed (single definition of "full"); no feed value falls back to config. |
 | `smart_shadow` | `false` | Measure the J currency (`R̂×Ŵ + Ĉ + X`) and roll the shadow cycles that feed the release gate. Decisions unchanged. |
-| `smart_place` | `false` | J walks INSIDE the placement tier (ties still fall to `load_score`'s jitter floor; a `None` anywhere degrades the whole round to today's walk). Alone it speaks J on the FLOOR R̂: lane state is only born once `smart_obs` measures -- the currency stays honest about what it knows. |
+| `smart_place` | `false` | J walks INSIDE the placement tier (ties still fall to `load_score`'s jitter floor; a `None` anywhere degrades the whole round to today's walk). Alone it speaks J on the FLOOR R̂: per-lane state is born only where lanes are READ -- the sticky branch under `smart_shadow`/`smart_move`/`smart_homecoming` -- never by placement or OBS alone. With J ON the placement face admits HEALTHY boxes only: a SUSPECT box keeps its seat in the drain/last-resort tail (`begin()` stays legal) but takes no FIRST visit while any HEALTHY box stands in the round; an all-SUSPECT round degrades to today's walk and serves normally -- SUSPECT means unproven, not dead. |
 | `smart_preview` | `false` | `count_tokens` previews answer from a real box but book `preview_passes` -- no home written, no overflow, no exile, no lane roll. |
 | `smart_move` | `false` | The §4 mover (own-signal congestion + net inequality + un-ticked hard-gate probe), behind the release gate and per-lane cooldown. It moves WITHIN the home's tier -- crossing tiers stays the operator's ladder (`priority`, `x-strata-pin`). Its evidence is accrued ONLY while `smart_shadow` is lit: move-alone stands at a gate that can never open, and says so (`move_gate_locked` counts every moved-worthy denial it never got to make). |
 | `smart_transient` | `false` | An answered overflow re-homes as `origin="transient"` (admitted, movable) instead of a permanent sticky home. |

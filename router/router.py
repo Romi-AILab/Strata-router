@@ -686,6 +686,8 @@ class Pool:
         # zero -- nothing takes this lock unless a shadow path runs.
         self._shadow_lock = threading.Lock()
         self._swallow_warn_at = 0.0   # B2 rate limiter: one WARNING per 60s, counter always
+        self._settle_warn = []        # P2-2: settle's F16 loss, named OUTSIDE the lock
+        self._evict_warn_n = 0        # P3-6b: 4096-cap eviction count, warned OFF pool.lock
         # L6 working memory (volatile like the affinity table it shadows):
         # which home each re-homed lane left, and the per-box homecoming
         # throttle clock
@@ -712,9 +714,14 @@ class Pool:
             backend.sm["streams_s"] += 1
             backend.sm["dur_sum_s"] += float(duration)
         if self.smart_shadow and key:
-            smp = self._shadow_open.get(key)
-            if smp is not None and backend.id == smp["home"]:
-                smp["durs"].append(float(duration))
+            # P2-1: the ledger is ONE region -- settle pops and sorts under
+            # _shadow_lock, so this append must live under it too, or the
+            # release gate's own evidence resolves mid-write (a cross-lock
+            # append is exactly the race the lock exists to close).
+            with self._shadow_lock:
+                smp = self._shadow_open.get(key)
+                if smp is not None and backend.id == smp["home"]:
+                    smp["durs"].append(float(duration))
 
     # ---- smart engine (design S2/S3/S9; every entry point flag-gated) ----
     def _lane_touch(self, key):
@@ -820,9 +827,18 @@ class Pool:
 
     def _shadow_roll(self, now):
         """Public entry (the poller's): the ledger tables move under the
-        dedicated shadow lock (F5); cores assume it, nothing logs under it."""
+        dedicated shadow lock (F5); cores assume it, nothing logs under it
+        -- P2-2 made that docstring the code: settle defers its warnings."""
         with self._shadow_lock:
             self._shadow_roll_locked(now)
+        self._shadow_drain_warn()
+
+    def _shadow_drain_warn(self):
+        """Emit deferred shadow-ledger warnings OUTSIDE the shadow lock --
+        house rule, no exemptions: a blocked console sink must never freeze
+        the lock that every sticky turn queues behind."""
+        while self._settle_warn:
+            LOG.warning(self._settle_warn.pop(0))
 
     def _shadow_roll_locked(self, now):
         """Cycle bookkeeping (CALLER HOLDS self._shadow_lock; poller-called,
@@ -860,8 +876,12 @@ class Pool:
             # F16: 64 buckets at the shipped period is a YEAR -- reaching a
             # missing table is a bug path, and a decision ledger loses
             # NOTHING in silence: name the loss, then drop the sample.
-            LOG.warning("SHADOW: sample lane=%s bucket=%s found no cycle table (trimmed?) -- settled nowhere",
-                        short(s["key"]), s["bucket"])
+            # P2-2: the naming is DEFERRED -- we run under _shadow_lock and
+            # nothing logs under it (a frozen sink would freeze every sticky
+            # turn behind the lock); the roll wrapper and note_turn drain.
+            self._settle_warn.append(
+                "SHADOW: sample lane=%s bucket=%s found no cycle table (trimmed?) -- settled nowhere"
+                % (short(s["key"]), s["bucket"]))
             return
         if not s["durs"]:
             c["unresolved"] += 1
@@ -945,6 +965,8 @@ class Pool:
                                                "c_hat": pt["C"], "durs": [], "bucket": b}
         LOG.info("SHADOW lane=%s would-move %s -> %s (W_home=%.1fs W_tgt=%.1fs C_tgt=%.1fs)",
                  short(affinity_key), home.id, tgt.id, ph["W"], pt["W"], pt["C"])
+        self._shadow_drain_warn()   # P2-2: the superseded settle above ran
+                                    # under the lock -- its warnings speak here
 
     def _release_gate_open(self):
         """S9 data gate: L5 ships only on OBSERVED evidence -- the last
@@ -1066,9 +1088,11 @@ class Pool:
             evicted += 1
         if evicted:
             self.metrics["overflow_evictions"] += evicted
-            LOG.warning("overflow ledger hit its 4096 cap and evicted %d pending re-home(s) -- "
-                        "this many concurrent parked re-homes means the box fleet is far past "
-                        "any real load; their requests will 502 instead of home-queue", evicted)
+            # P3-6b: the counter books HERE, the WARNING waits -- we run
+            # under pool.lock (the caller holds it, the docstring says so)
+            # and nothing logs under it; pick's request-tick region drains
+            # the count to the next request, off the lock.
+            self._evict_warn_n += evicted
 
     def overflow_commit(self, affinity_key, token=None):
         """The overflow target ANSWERED (first HTTP status -- any status: busy
@@ -1090,13 +1114,19 @@ class Pool:
         self._affinity_put(affinity_key, pend[2], "transient" if self.smart_transient else "sticky")
         self._exile_note(affinity_key, pend[1])   # L6 remembers where it came from
 
-    def overflow_rollback(self, affinity_key, token, failed_id):
+    def overflow_rollback(self, affinity_key, token, failed_id, body_len):
         """The overflow target died BEFORE a single request byte was sent --
         nothing reached it, so nothing is lost by moving on. Release its
         reservation EXACTLY once (the caller must not end() it again; the
         returned tuple carries the reservation state of whatever box takes
         over) and hand the caller a box to queue at instead -- rule 2: the
         gate redirects, it never rejects.
+
+        body_len is REQUIRED (no default): when the home ALSO died, the
+        migrate-onward placement must speak the lane's own currency --
+        body_len AND the lane's r_hat -- exactly like the normal migration
+        round (P3-3: one request, two placement rounds, two currencies
+        was the defect; silence about a currency is how J quietly lies).
 
         Returns (backend, reason, reserved): the live home ("sticky"), or --
         when the home itself raced into DOWN inside this same request -- a
@@ -1129,7 +1159,8 @@ class Pool:
         # overflow it is (overflow_rollbacks already ticked) plus the home's
         # migrations_from evidence; the lane's later turns re-place fresh on
         # their own once the poller drops the dead home's keys.
-        alt2, reserved = self._place(exclude={failed_id} | ({home.id} if home else set()))
+        alt2, reserved = self._place(exclude={failed_id} | ({home.id} if home else set()),
+                                     body_len=body_len, r_hat=self._r_hat_for(affinity_key))
         if alt2 is not None and not reserved:
             reserved = alt2.begin()     # queue-anyway box (nothing accepted)
             if reserved:
@@ -1278,6 +1309,14 @@ class Pool:
         """
         with self.lock:
             self.metrics["requests"] += 1
+            _ew = self._evict_warn_n
+            if _ew:
+                self._evict_warn_n = 0
+        if _ew:      # P3-6b: the deferred 4096-cap warning, spoken OFF pool.lock
+            LOG.warning("overflow ledger hit its 4096 cap and evicted %d pending re-home(s) -- "
+                        "this many concurrent parked re-homes means the box fleet is far past "
+                        "any real load; their requests will 502 instead of home-queue "
+                        "(warning deferred off pool.lock to the next request)", _ew)
         _pv = preview and self.smart_preview
 
         if pin:
@@ -1295,7 +1334,15 @@ class Pool:
                 return want, "pinned", True, None
             with self.lock:
                 self.metrics["pin_misses"] += 1
-            LOG.warning("pin %r unavailable; falling back to normal placement", pin)
+            if _pv:
+                # F-B1: a preview's fallback placement is NOT the turn's
+                # "normal placement" -- previews never write a home, so this
+                # steer lands nowhere. The old line promised a fallback that
+                # semantically cannot happen; name the real consequence:
+                # only a REAL turn can re-seat the lane.
+                LOG.warning("pin %r unavailable on a PREVIEW -- the preview answers by placement but writes no home (contract); steer the lane with a real turn", pin)
+            else:
+                LOG.warning("pin %r unavailable; falling back to normal placement", pin)
 
         home = None
         if affinity_key:
@@ -2543,7 +2590,7 @@ class Handler(BaseHTTPRequestHandler):
                 backend.note_connect_failure(method + " " + bare + ": overflow target: " + type(exc).__name__,
                                              max_fails, backoff)
                 connect_charged = True
-                outcome = self.pool.overflow_rollback(key, ovf_token, backend.id)
+                outcome = self.pool.overflow_rollback(key, ovf_token, backend.id, len(body or b""))
                 if outcome is None:
                     # nothing to roll back to (an operator cleared this lane's
                     # pending mid-flight): the honest 502 stands; the finally
@@ -3560,8 +3607,22 @@ def validate_cfg(cfg, pool, strict=True):
             problems.append((k, "must be a number, got a boolean"))
             continue
         try:
-            cast(v)
+            _fv = float(v)
         except (TypeError, ValueError):
+            problems.append((k, "must be a number, got %r" % (v,)))
+            continue
+        # P3-6a: json.load happily produces NaN/Infinity literals, and a
+        # non-finite knob is not "a number that behaves oddly" -- it is the
+        # death of a comparison: status_interval=NaN makes every
+        # `> _stale_after()` permanently False (the feed is NEVER stale and
+        # the freshness doctrine dies silently at boot). Refuse by name,
+        # mirroring the smart block's finite rule so the file speaks ONE law.
+        if _fv != _fv or _fv in (float("inf"), float("-inf")):
+            problems.append((k, "must be finite, got %r" % (v,)))
+            continue
+        try:
+            cast(v)
+        except (TypeError, ValueError, OverflowError):
             problems.append((k, "must be a number, got %r" % (v,)))
     sm = cfg.get("sticky_max")
     if sm is not None and not isinstance(sm, bool):
@@ -3752,6 +3813,13 @@ def validate_cfg(cfg, pool, strict=True):
                     # truncates (window_n 2.7 would run as 2). Refuse by name.
                     problems.append(("smart." + nk,
                                      "is a tick counter/minimum -- whole numbers only, got %r" % (v,)))
+                elif nk == "release_gate_shadow_cycles" and f > 32:
+                    # P3-2: the gate reads the last 32 completed cycles -- a
+                    # knob above the ledger is a gate that can NEVER open.
+                    # The move-alone row promises lockouts that SAY SO; a
+                    # boot-time lockout refuses boot by name instead.
+                    problems.append(("smart." + nk,
+                                     "above the 32-cycle ledger -- the release gate could never open, got %r" % (v,)))
             for k in _sm_sec:
                 if k not in SMART_FLAGS and k not in SMART_NUMS:
                     LOG.warning("smart: unknown knob %r is IGNORED -- knobs never guess a spelling", k)
