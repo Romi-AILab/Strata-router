@@ -655,8 +655,12 @@ class Pool:
             # DEBUG-only swallow is how F1 hid from every INFO-level run.
             "smart_decision_errors": 0,
         }
-        # smart knobs (ALL default OFF, design S9): resolved once at boot;
-        # sm_cfg carries the merged defaults so readers never re-default keys.
+        # smart knobs (ALL default OFF, design S9): resolved once at boot.
+        # F-F: DEFAULTS["smart"] is EMPTY on purpose -- every read site
+        # re-defaults inline with `or X` (24 sites, README's Default column
+        # is their ledger), and what keeps those `or`s honest is the
+        # validator's refuse-<=0-by-name law, NOT any merged table. (This
+        # comment used to claim a merged-defaults shape that never existed.)
         # A non-dict section is IGNORED here -- validate_cfg names it as a
         # boot problem before anything ever serves.
         _sm_raw = cfg.get("smart")
@@ -733,7 +737,18 @@ class Pool:
             while len(self._lane) > 20000:
                 self._lane.popitem(last=False)   # bounded like affinity's table
         else:
-            self._lane.move_to_end(key)          # F6: the cap evicts the COLDEST lane, not the first-born -- FIFO eviction voided the HOTTEST lane's tau cooldown row and let the mover hit it twice
+            try:
+                self._lane.move_to_end(key)      # F6: the cap evicts the COLDEST lane, not the first-born -- FIFO eviction voided the HOTTEST lane's tau cooldown row and let the mover hit it twice
+            except KeyError:
+                # F-E: between our get and our touch, another thread's cap
+                # eviction happened to evict exactly THIS lane (cold table,
+                # unlucky crowd). A KeyError here died inside the sticky
+                # swallow and skipped the turn's homecoming+mover -- the
+                # decision layer must never die over the ledger's own
+                # bookkeeping: re-seat fresh, the lane's history restarts.
+                st = {"turns": 0, "last_move": 0.0,
+                      "R_hat": float(self.sm_cfg.get("r_hat_init") or 4.0)}
+                self._lane[key] = st
         st["turns"] += 1
         # R̂ (O3, the weakest multiplier, honestly so): a lane is expected to
         # keep going at least as long as it has -- init floors new lanes,
@@ -836,9 +851,16 @@ class Pool:
     def _shadow_drain_warn(self):
         """Emit deferred shadow-ledger warnings OUTSIDE the shadow lock --
         house rule, no exemptions: a blocked console sink must never freeze
-        the lock that every sticky turn queues behind."""
-        while self._settle_warn:
-            LOG.warning(self._settle_warn.pop(0))
+        the lock that every sticky turn queues behind. F-D: the take must be
+        an ATOMIC SWAP -- the poller and every sticky thread drain, and
+        `while list: pop(0)` from two of them let the loser pop an emptied
+        list: an IndexError that the sticky swallow booked as a decision
+        error while silently skipping that turn's homecoming+mover. Same
+        scar family, caught in our own fix's plumbing."""
+        with self._shadow_lock:
+            _w, self._settle_warn = self._settle_warn, []
+        for _m in _w:
+            LOG.warning(_m)
 
     def _shadow_roll_locked(self, now):
         """Cycle bookkeeping (CALLER HOLDS self._shadow_lock; poller-called,
@@ -1012,7 +1034,10 @@ class Pool:
             with self.lock:
                 self.metrics["move_gate_locked"] += 1
             return
-        self._affinity_put(affinity_key, tgt.id, "smart")
+        if not self._affinity_put_smart(affinity_key, tgt.id):
+            LOG.info("MOVE skipped: lane %s pinned during the decision window (V3-07 wins at the put -- seat and counters untouched)",
+                     short(affinity_key))
+            return
         st["last_move"] = now
         with self.lock:
             self.metrics["moves"] += 1
@@ -1064,12 +1089,33 @@ class Pool:
         if (old.state != HEALTHY or (now - old.status_ts) > old._stale_after()
                 or old.sm["feed_blind"] or old.sm.get("empty_streak", 0) < 2):
             return False
-        self._affinity_put(affinity_key, old_id, "smart")
-        st["last_move"] = now
-        self._box_hc[old_id] = now
-        self._exiled.pop(affinity_key, None)
+        # F-B+F-C: the PUT-TIME GATE -- one pool.lock region that re-asks the
+        # seat owner (a pin may have landed while the live re-ask ran) AND
+        # enforces the box throttle atomically. The old shape read the box
+        # clock, did a lock hand-off (the put), then stamped: N exiled lanes
+        # of one freed box ALL passed the check before ANYONE stamped, and
+        # the README's "ONE lane per window, never its queue" -- the very
+        # law the storm columns rest on -- was advertised but never booked.
+        _hc_pin, _hc_ok = False, False
+        _box_s = float(self.sm_cfg.get("homecoming_box_s") or 120.0)
         with self.lock:
-            self.metrics["homecomings"] += 1
+            _hit = self.affinity.get(affinity_key)
+            if _hit is not None and len(_hit) > 2 and _hit[2] == "pin":
+                _hc_pin = True
+            elif now - self._box_hc.get(old_id, 0.0) < _box_s:
+                pass          # another lane took this box's window -- next turn
+            else:
+                self._affinity_write_locked(affinity_key, old_id, "smart")
+                self._box_hc[old_id] = now
+                self._exiled.pop(affinity_key, None)
+                self.metrics["homecomings"] += 1
+                _hc_ok = True
+        if _hc_pin:
+            LOG.info("HOMECOMING skipped: lane %s pinned during the decision window (V3-07 wins at the put)", short(affinity_key))
+            return False
+        if not _hc_ok:
+            return False
+        st["last_move"] = now
         LOG.info("HOMECOMING lane %s %s -> %s (home verifiably empty x%d fresh)",
                  short(affinity_key), home.id, old_id, old.sm.get("empty_streak", 0))
         return True
@@ -1246,6 +1292,16 @@ class Pool:
             self.affinity.move_to_end(key)
             return backend_id
 
+    def _affinity_write_locked(self, key, backend_id, origin):
+        # CALLER HOLDS self.lock -- the one write shape (value, LRU touch,
+        # cap) so every guarded writer gets the identical table law.
+        v = self.cfg.get("sticky_max")
+        cap = 20000 if v is None else int(v)
+        self.affinity[key] = (backend_id, time.monotonic(), origin)
+        self.affinity.move_to_end(key)
+        while len(self.affinity) > cap:
+            self.affinity.popitem(last=False)
+
     def _affinity_put(self, key, backend_id, origin):
         # origin has NO default on purpose: every seat must SAY who seated it,
         # and a call site that forgot is a TypeError at boot-smoke, not a
@@ -1253,13 +1309,25 @@ class Pool:
         # explicit None check: `or 20000` silently turned a configured 0 into
         # 20000 and a negative cap into "empty the table on every write"
         # (R4-A/F7); validate_cfg rejects non-positive caps at boot now
-        v = self.cfg.get("sticky_max")
-        cap = 20000 if v is None else int(v)
         with self.lock:
-            self.affinity[key] = (backend_id, time.monotonic(), origin)
-            self.affinity.move_to_end(key)
-            while len(self.affinity) > cap:
-                self.affinity.popitem(last=False)
+            self._affinity_write_locked(key, backend_id, origin)
+
+    def _affinity_put_smart(self, key, backend_id):
+        """F-B (V3-07 AT THE PUT): the mover checked the operator's seat at
+        DECISION time and wrote it UNCHECKED -- with the release gate's lock
+        queue in between, a pin landing inside that window was clobbered to
+        origin=smart, making an operator's seat movable FOREVER (one silent
+        overwrite, lifetime effect; invisible in /stats). The guard must live
+        where the write lives: same lock, re-asked first. Returns False and
+        writes NOTHING when a pin holds the seat -- the caller must then book
+        nothing at all (no moves, no stamp): a move that did not happen
+        may not even be counted."""
+        with self.lock:
+            hit = self.affinity.get(key)
+            if hit is not None and len(hit) > 2 and hit[2] == "pin":
+                return False
+            self._affinity_write_locked(key, backend_id, "smart")
+        return True
 
     def _affinity_drop_backend(self, backend_id):
         with self.lock:
@@ -3620,6 +3688,11 @@ def validate_cfg(cfg, pool, strict=True):
         if _fv != _fv or _fv in (float("inf"), float("-inf")):
             problems.append((k, "must be finite, got %r" % (v,)))
             continue
+        if k in ("status_interval", "status_timeout") and _fv <= 0:
+            # F-A twin of the per-backend door: the read sites `or`-default
+            # these, so 0 is a value the operator wrote but nobody obeys.
+            problems.append((k, "must be > 0 -- the read site's `or` would silently re-default it (%r is not what you wrote)" % (v,)))
+            continue
         try:
             cast(v)
         except (TypeError, ValueError, OverflowError):
@@ -3650,8 +3723,25 @@ def validate_cfg(cfg, pool, strict=True):
             # these ARE read per-backend (staleness window, poll timeout) --
             # a string here would crash inside try_place/stats after boot
             raw = b.cfg.get(nk)
-            if raw is not None and (isinstance(raw, bool) or not isinstance(raw, (int, float))):
+            if raw is None:
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
                 problems.append((b.id + "." + nk, "must be a number, got %r" % (raw,)))
+                continue
+            # F-A: the finite law admits no twin-door exemption -- this door
+            # type-checked while the top-level one learned (DV-fix3) to
+            # refuse non-finite. NaN is an int/float for isinstance, survives
+            # `or` (bool(NaN) is True), and makes _stale_after() return NaN:
+            # every age comparison for THAT BOX goes permanently False in
+            # BOTH directions -- the require_idle blind-box refusal dies,
+            # feed_blind never latches, homecoming's live re-ask always
+            # passes. One box, silently, forever. ONE law, both doors.
+            _rv = float(raw)
+            if _rv != _rv or _rv in (float("inf"), float("-inf")):
+                problems.append((b.id + "." + nk, "must be finite, got %r" % (raw,)))
+            elif _rv <= 0:
+                problems.append((b.id + "." + nk,
+                                 "must be > 0 -- the read site's `or` would silently re-default it (%r is not what you wrote)" % (raw,)))
         raw = b.cfg.get("backend_api_key")
         if raw is not None and not isinstance(raw, str):
             # str() would boot `true`/123 as the WORKING key "True"/"123":

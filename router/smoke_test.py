@@ -4114,6 +4114,166 @@ def main():
               and any("preview" in m.lower() for m in _pfcap),
               "miss=%s pv=%s home=%s warns=%s" % (_pf.metrics["pin_misses"], _pf.metrics["preview_passes"],
                                                   _pf._affinity_get("pl1"), _pfcap))
+
+        # ---- Convergence-round-2 fix-locks (fidelity face ab3c84c6620753c3a @d520015:
+        # 3 P2 + 3 P3, all personally reproduced). Red baseline d520015 -- F-A and
+        # F-D are twin-door/plumbing faces OF DV-fix3's own region.
+        print("")
+        print("S14) smart L14 -- convergence round 2: the ONE law's twin doors, the guard that must live at the PUT, and the storm law that was advertised but never booked")
+
+        # F-A: DV-fix3 fixed the TOP-LEVEL finite door and left the per-backend
+        # twin type-checking only -- NaN is a float, passes, and silently mutes
+        # every freshness gate for that box (age > NaN and age <= NaN are both
+        # False: stale-refusal dead, feed_blind never latches, homecoming's live
+        # re-ask always passes). status_interval=0 may not whisper `or 1.0` either.
+        _fa_pool = R.Pool([_ube("BX", ri=True)], {})
+        _fa_pool.backends[0].cfg["status_interval"] = float("nan")
+        _fa = R.validate_cfg({"status_interval": 0}, _fa_pool, strict=False)
+        check("S14/F-A: the finite law admits no per-backend twin-door -- status_interval=NaN on ONE box would assassinate that box's require_idle blind-refusal, feed_blind latch, and homecoming live re-ask FOREVER and silently; <=0 may not re-default by `or` either",
+              any("status_interval" in str(k) for k, _w in _fa)
+              and any(str(k).endswith(".status_interval") for k, _w in _fa),
+              repr(_fa))
+
+        # F-B: the mover checked the operator's seat at DECISION time and wrote
+        # it UNCHECKED -- with the gate's _shadow_lock queue in between, a pin
+        # landing inside that window was clobbered with origin=smart, making
+        # the operator's seat movable FOREVER (one overwrite, lifetime effect).
+        _bh, _bt = _ube("MH", serving=8.0, mi=8), _ube("MT")
+        _bh.sm["cong_streak"] = 2
+        _bp = R.Pool([_bh, _bt], {"smart": {"smart_move": True, "smart_shadow": True}})
+        _bp._affinity_put("mk", "MH", "sticky")
+        _mk = _bp._lane_touch("mk")
+        _bp._shadow_done.extend(
+            [{"cycle": _i, "samples": 11, "resolved": 11, "loss": 0, "unresolved": 0} for _i in (1, 2)])
+
+        def _gate_lands_pin():
+            _bp._affinity_put("mk", "MH", "pin")      # operator pins mid-window
+            return True
+        _bp._release_gate_open = _gate_lands_pin      # (behind the gate queue's wait)
+        _berr = "ok"
+        try:
+            _bp._smart_move("mk", _bh, 8000, _mk)
+        except Exception as _e:
+            _berr = repr(_e)
+        with _bp.lock:
+            _seat = _bp.affinity.get("mk")
+        check("S14/F-B: an operator pin landing inside the mover's decision window WINS -- V3-07 is enforced AT THE PUT (re-asked under the same lock that writes), and a superseded move books nothing",
+              _berr == "ok" and _seat and len(_seat) > 2 and _seat[2] == "pin"
+              and _bp.metrics["moves"] == 0,
+              "%s seat=%s moves=%s" % (_berr, _seat and _seat[2:], _bp.metrics["moves"]))
+
+        _gb = R.Pool([_ube("GA"), _ube("GB")], {})
+        _gb._affinity_put("gp", "GA", "pin")
+        _gb._affinity_put("gs", "GA", "sticky")
+        _gt = "?"
+        try:
+            _r1 = _gb._affinity_put_smart("gp", "GB")     # must refuse: operator seat
+            _r2 = _gb._affinity_put_smart("gs", "GB")     # must land: smart-owned seat
+            with _gb.lock:
+                _gt = (_r1 is False and _gb.affinity["gp"][0] == "GA" and _gb.affinity["gp"][2] == "pin"
+                       and _r2 is True and _gb.affinity["gs"][2] == "smart")
+        except Exception as _e:
+            _gt = repr(_e)
+        check("S14/F-B2: the guarded re-seat put -- pin seats are untouchable AT THE PUT (the decision-time check was the half the file enforced; the write was the half that lied)",
+              _gt is True, _gt)
+
+        # F-C: the homecoming box throttle read its clock, did a pool.lock
+        # hand-off (the put), THEN stamped -- N exiled lanes of one freed box
+        # all passed the check before anyone stamped: README's "ONE lane per
+        # window, never its queue" was advertised but never booked.
+        _hb = _ube("HB", serving=0.0)
+        _hb.sm["empty_streak"] = 2
+        _hb.sm["feed_blind"] = False
+        _cb = _ube("CB", serving=1.0)
+        _hp = R.Pool([_hb, _cb], {"smart": {"smart_homecoming": True}})
+        _hp._exiled["la"] = "HB"
+        _hp._exiled["lb"] = "HB"
+        _hp._affinity_put("la", "CB", "sticky")
+        _hp._affinity_put("lb", "CB", "sticky")
+        _sa, _sb = _hp._lane_touch("la"), _hp._lane_touch("lb")
+        _real_put14 = _hp._affinity_put
+        _bar14 = threading.Barrier(2)
+
+        def _slowed_put(*a, **k):
+            try:
+                _bar14.wait(5.0)
+            except threading.BrokenBarrierError:
+                pass
+            return _real_put14(*a, **k)
+        _hp._affinity_put = _slowed_put    # patch AFTER setup (setup through a
+        # barrier would age the feed and the F4 live re-ask would CORRECTLY refuse --
+        # that fixture mistake burned a fake RED here once; the re-ask works)
+        _hb.status_ts = time.monotonic()
+        _hout = {}
+
+        def _hc_run(_nm, _st):
+            try:
+                _hout[_nm] = _hp._homecoming(_nm, _cb, _st)
+            except Exception as _e:
+                _hout[_nm] = repr(_e)
+        _t1 = threading.Thread(target=_hc_run, args=("la", _sa))
+        _t2 = threading.Thread(target=_hc_run, args=("lb", _sb))
+        _t1.start(); _t2.start(); _t1.join(15); _t2.join(15)
+        check("S14/F-C: the homecoming box throttle is a LAW -- check+stamp+re-home+book land as ONE pool.lock region, so a freed box takes back exactly ONE lane per window even when its whole exile queue turns at the same instant",
+              _hp.metrics["homecomings"] == 1 and _hout.get("la") is not None and _hout.get("lb") is not None,
+              "hc=%s outs=%s" % (_hp.metrics["homecomings"], _hout))
+
+        # F-D: DV-fix3's deferred-warning drain raced itself -- truthiness
+        # check, then pop(0), from two populations (poller + every sticky
+        # thread): the loser's pop hit an empty list. On the sticky side that
+        # IndexError killed the turn's homecoming+mover behind the B2 swallow.
+        _dp = R.Pool([_ube("DA"), _ube("DB")], {"smart": {"smart_shadow": True}})
+        _dv_in, _dv_rel = threading.Event(), threading.Event()
+        _EvilList = type("_EvilList", (list,), {
+            "pop": lambda self, _i=0: (
+                (setattr(self, "_first", False), _dv_in.set(), _dv_rel.wait(5.0))
+                if getattr(self, "_first", True) else None,
+                list.pop(self, _i))[1]})
+
+        _dp._settle_warn = _EvilList(["SHADOW: race witness"])
+        _dp._settle_warn._first = True
+        _draised = []
+
+        def _drain_a():
+            try:
+                _dp._shadow_drain_warn()
+            except Exception as _e:
+                _draised.append(repr(_e))
+        _dta = threading.Thread(target=_drain_a)
+        _dta.start()
+        _dv_in.wait(5.0)
+        try:
+            _dp._shadow_drain_warn()      # opponent passes the check, pops first
+        except Exception as _e:
+            _draised.append("B:" + repr(_e))
+        _dv_rel.set()
+        _dta.join(15)
+        check("S14/F-D: the deferred-warning drain cannot race itself -- the swap is atomic under the shadow lock and the LOG lands outside it, so the warning plumbing itself can never kill a turn's decisions",
+              not _draised, _draised)
+
+        # F-E: a cap eviction stealing THIS lane between get and move_to_end
+        # turned _lane_touch into a KeyError -- the whole smart decision block
+        # died for a ledger wobble (the P3-1 decline covered counter inflation;
+        # this crash-out variant is a different animal).
+        _ep = R.Pool([_ube("EA"), _ube("EB")], {"smart": {"smart_place": True}})
+        _ep._lane_touch("el")
+        _EvilLane = type("_EvilLane", (type(_ep._lane),), {
+            "move_to_end": lambda self, k, last=True: (self.pop(k, None),
+                                                       getattr(super(type(self), self), "move_to_end")(k, last))[1]})
+        _ep._lane = _EvilLane(_ep._lane)
+        _eerr, _eres = "ok", None
+        try:
+            _eres = _ep._lane_touch("el")
+        except Exception as _e:
+            _eerr = repr(_e)
+        check("S14/F-E: a cap eviction stealing the lane mid-touch re-seats it fresh instead of raising -- the decision layer never dies over the ledger's own bookkeeping",
+              _eerr == "ok" and _eres is not None and _eres.get("turns") == 1,
+              "%s st=%s" % (_eerr, _eres))
+
+        _src14 = open(os.path.join(os.path.dirname(ROUTER), "router.py"), encoding="utf-8").read()
+        check("S14/F-F: the boot comment tells the truth -- DEFAULTS['smart'] is EMPTY by design and every read site re-defaults inline (the validator's refuse-0-by-name law is what keeps `or X` honest); 'carries the merged defaults' was the lie",
+              "carries the merged defaults" not in _src14 and R.DEFAULTS["smart"] == {},
+              "DEFAULTS smart=%r" % (R.DEFAULTS["smart"],))
     finally:
         _term(proc)
         try:
