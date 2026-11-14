@@ -134,7 +134,7 @@ Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
 | `--status-interval SEC` | `status_interval` | `1.0` | Queue-depth poll rate per box. |
 | `--max-body-mb N` | `max_body_mb` | `512` | Request body cap. |
 | `--rewrite-model FROM=TO` | `rewrite_model` | `{}` | The only body rewrite allowed; repeatable. |
-| `--no-expose-affinity` | `expose_affinity` (inverted) | `true` | Keep lane pins out of the status views. |
+| `--no-expose-affinity` | `expose_affinity` (inverted) | `true` | hide the per-request x-strata-* response headers (`x-strata-backend`/`-affinity`/`-placement`); /stats only ever shows aggregates, never lane pins. |
 | `--log-level LVL` | `log_level` | `INFO` | |
 
 Config-only keys (no flag): `sticky_max` (`20000`, pin-table cap),
@@ -144,8 +144,10 @@ file), `control_token` (`""`, optional gate for `x-strata-pin` requests),
 `tls_insecure` (`False`, https backends only: skip cert verification),
 `smart` (`{}`, the placement ladder -- every knob in *The `smart.*` ladder*
 below; empty = today's behavior).
-Tiering keys (`priority`, `max_inflight`, `require_idle`) live per backend --
-see *Tiered placement* below.
+Tiering keys (`priority`, `max_inflight`, `require_idle`, and per-backend
+`status_interval` -- a queue-poll-rate override for just that box) live per
+backend -- see *Tiered placement* below. A per-backend (or top-level)
+`probe_model` names the model the `--probe` health request asks for.
 
 ## Wire the clients
 
@@ -214,9 +216,14 @@ the router watches its caller's socket the way Strata watches its own clients
 ages, so write failures alone would never notice), and on EOF/RST it drops the
 backend connection at once. The box's own watcher then sets its cancel flag
 within its 0.5 s poll: a request already in the slot stops within ~1 s; one
-parked in the FIFO notices at its next keep-alive beat (<= ~10 s). Either way
-the seat goes free on its own -- this is what stops one killed agent from
-making the whole FIFO burn minutes of compute for a corpse.
+parked in the FIFO notices at its next keep-alive beat (<= ~10 s). For boxes that watch their clients -- and
+Strata does -- the seat goes free on its own; this is what stops one killed
+agent from making the whole FIFO burn minutes of compute for a corpse. A box
+that does NOT watch (a plain direct-wire server) keeps computing and keeps
+the router's slot until it finally answers: our shutdown reaches the box
+instantly, but the parked relay wakes only on the box's last byte -- on
+Windows a socket shutdown does not wake a blocked read (verified platform
+behavior, DV-R4 B-2). The unblock is box-side law, not router-side will.
 
 * Raise the client-side timeout. Whatever you tolerate today through your
   existing shim is the tolerance this router inherits -- keep `--read-timeout`
@@ -308,6 +315,7 @@ How a conversation is recognised, per wire API:
 | Claude Code (`/v1/messages`) | `metadata.user_id` as the session SCOPE + hash of system+tools+first turn as the LANE |
 | Codex (`/v1/responses`) | `prompt_cache_key` / `user` / `session_id` scope + first-input-item lane, else the lane hash alone |
 | Anything else | the lane hash (stable-prefix hash) |
+| Explicit lane key (an inbound `x-strata-affinity` header) | the header's own value -- a debugging/steering channel; it is never forwarded upstream |
 
 Two levels, deliberately. `metadata.user_id` identifies a Claude Code
 *session* -- and its subagents all share it. Keyed on the session alone, every
@@ -359,7 +367,7 @@ it is free), give each backend three extra keys:
 | Key | Meaning |
 |-----|---------|
 | `priority` | Tier number, lower preferred. Your box `0`, the borrowed box `1`. |
-| `max_inflight` | Hard cap on conversations this router places there (`1` with `parallel` off). Enforced atomically: gate check and reservation happen in one step, so a burst of parallel subagents cannot both take the last slot. |
+| `max_inflight` | Hard cap on conversations this router places there (`1` with `parallel` off). Enforced atomically: gate check and reservation happen in one step, so a burst of parallel subagents cannot both take the last slot. A `0` cap is **closed-for-business** (the drain shape): new placements never land there, and a sticky lane treats home as full -- its next turn overflows to a peer if one takes it. Rule 2's queue door stays unconditional though: with nowhere else to go, a turn still queues at home behind the conversations draining out. |
 | `require_idle` | Place new work only while the box reports **external** load of zero: its own total load -- Strata reports it as `activity.in_flight` (requests running **plus** waiting) -- minus this router's in-flight, confirmed on two consecutive status polls. Fields that name a *capacity* (Strata's `concurrency.serving` slot count, its `vram.reserve_mib` / `expert_slots` figures) are never read as load. A box whose status endpoint has **never** answered (wrong borrower key, wrong path, unreadable schema) is unknown, and unknown is not idle -- the gate fails **closed**. |
 
 ```json
@@ -594,7 +602,7 @@ turn is a fresh `placed` placement** (`new_placements` ticks), because an
 idle-or-busy-aware tier is what spreads subagents; `overflow_placements`
 counts the narrower case -- a lane already homed somewhere redirected off a
 full home on a later turn (rolled-back attempts tick `overflow_rollbacks`
-instead). `requests` / `new_placements` count every forwarded request,
+instead). `requests` counts every forwarded request,
 including bodyless GETs like a UI's "fetch models" -- read spread from
 `affinity_by_backend`, not from absolute counter sizes. Do not read queue depth
 from `avg_ttfb_s`: Strata queues with keep-alives, so a parked stream's first
@@ -760,7 +768,7 @@ never silent.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 210 checks; needs loopback
+python smoke_test.py     # 383 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -777,8 +785,10 @@ rejoin. Relay liveness is checked as DELIVERY TIMING (the keep-alive must
 cross while the fake's stream is still open -- a fill-read relay would buffer
 it to EOF), together with the key-replacement rule, the status-stall rule
 (busy is not dead), the hang-up watchdog (a killed caller releases the box
-in ~1 s and is counted as an abort, while pipelined bytes mid-stream must
-NOT trigger it), non-ASCII refusal at the edge, and Windows exclusive
+in ~1 s THROUGH THE FAKE'S OWN WATCHER -- the fake watches its client the way
+Strata does, per the platform caveat above -- and is counted as an abort,
+while pipelined bytes mid-stream must NOT trigger it), non-ASCII refusal at
+the edge, and Windows exclusive
 port binding. Smart distribution is guarded at both levels: two Claude Code
 branches sharing one `metadata.user_id` must get different lane keys (and a
 branch's own follow-ups must stay sticky), and a lane whose home is FULL must

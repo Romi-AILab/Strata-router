@@ -978,13 +978,25 @@ class Pool:
                 self._shadow_settle(old)   # a superseded sample settles on its facts
             self._shadow_roll_locked(now)
             b = self._shadow_bucket
+            # R4-Q1 (open question from the R4 behavioral face, confirmed):
+            # _move_candidate filtered None-windows at decision, but a
+            # poller boundary tick (:563 branch) may flip THIS target's
+            # window to None before booking -- None+number in settle is the
+            # TypeError that kills cycle resolution and silently re-locks
+            # the gate: the decision-ledger-loses-nothing family. Read the
+            # clock once under this lock; a dead window drops the sample
+            # (nothing booked, nothing to settle) and says so at DEBUG.
+            _tw = tgt.sm["t_bar_window"]
+            if _tw is None:
+                LOG.debug("SHADOW would-move %s -> %s dropped: target T-bar window went None between decision and booking",
+                          home.id, tgt.id)
+                return
             c = self._shadow_cyc.setdefault(b, self._new_cycle(b))
             c["samples"] += 1
             self.metrics["shadow_would_moves"] += 1
             self._shadow_open[affinity_key] = {"key": affinity_key, "home": home.id,
                                                "target": tgt.id,
-                                               "target_raw": tgt.sm["t_bar_window"],
-                                               "c_hat": pt["C"], "durs": [], "bucket": b}
+                                               "target_raw": _tw, "c_hat": pt["C"], "durs": [], "bucket": b}
         LOG.info("SHADOW lane=%s would-move %s -> %s (W_home=%.1fs W_tgt=%.1fs C_tgt=%.1fs)",
                  short(affinity_key), home.id, tgt.id, ph["W"], pt["W"], pt["C"])
         self._shadow_drain_warn()   # P2-2: the superseded settle above ran
@@ -1110,6 +1122,12 @@ class Pool:
         with self.lock:
             _hit = self.affinity.get(affinity_key)
             _cur = _hit[2] if _hit is not None and len(_hit) > 2 else ""
+            _row = self._lane.get(affinity_key)   # R4-F4: same law as
+            # _affinity_put_smart -- tau is asked and stamped on the CURRENT
+            # row; a caller that grabbed st before its lock hand-off may be
+            # holding an orphan.
+            if _row is not None:
+                st = _row
             if _cur in ("pin", "transient"):
                 _hc_seat = _cur    # F-10 (DV-R3): re-ask BOTH seats the
                 # pre-check stands down for -- a transient that landed mid-
@@ -1225,6 +1243,13 @@ class Pool:
             self.metrics["overflow_rollbacks"] += 1
         home = self.by_id.get(pend[1])
         if home is not None and home.state != DOWN and home.begin():
+            # R4-F5: the ONE sibling shape that queued at a require_idle home
+            # without booking gate_bypass -- pick's home-queue door (:1561)
+            # and this function's own migrate-onward branch (:1239) both book
+            # it; the metric's documented purpose is that such admits are
+            # NEVER invisible. The helper is self-gating (a capacity-only
+            # refusal does not tick), so the call is unconditional.
+            self._note_gate_bypass(home)
             return home, "sticky", True
         # the home died mid-request too (or raced into its cooldown): migrate
         # this turn onward instead of failing it. Counted as the settled
@@ -1375,6 +1400,17 @@ class Pool:
             if hit is not None and len(hit) > 2 and hit[2] == "pin":
                 return False
             if _st is not None:
+                # R4-F4: the clock's source of truth is the TABLE ROW, not the
+                # object the caller captured before queuing on this lock --
+                # _lane_touch is lock-free and its own F-E comment documents
+                # the orphan shapes (double-create; a cap eviction catching
+                # exactly this lane mid-flight). Trusting the passed dict
+                # reads a stale clock AND stamps into an object the ledger
+                # no longer holds: the lane moves twice inside tau while the
+                # visible row never learns.
+                _row = self._lane.get(key)
+                if _row is not None:
+                    _st = _row
                 _cur = hit[2] if hit is not None and len(hit) > 2 else "sticky"
                 _tau = float(self.sm_cfg.get("tau_pp_transient" if _cur == "transient"
                                              else "tau_pp_move") or 900.0)
@@ -2272,12 +2308,20 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    def _json(self, code, obj):
+    def _json(self, code, obj, extra_headers=()):
+        # Optional headers emit before end_headers. First user is the R4-B1
+        # (DV-R4) fix: the synth count_tokens rescue must answer through the
+        # SAME header face as the relay it replaces -- README promises a
+        # preview "reports one of those same words byte-for-byte", and the
+        # rescue exists exactly for boxes that 404 the real probe, where the
+        # report was silently vanishing.
         data = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(code)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(data)))
         self.send_header("cache-control", "no-store")
+        for _hk, _hv in extra_headers:
+            self.send_header(_hk, _hv)
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -2637,12 +2681,18 @@ class Handler(BaseHTTPRequestHandler):
         slot). Every CLIENT_WATCH_S: caller readable + a zero-byte peek == EOF;
         a socket error on the peek == RST; both mean hangup. Readable DATA is
         a pipelined next request: the caller is alive (Strata's rule, kept).
-        On hangup, shut the backend socket down: that unblocks a relay parked
-        in getresponse()/read(). The box's own watcher SETS the cancel flag
-        within its 0.5 s poll: a request already in the slot stops within ~1 s
-        (per-token cancel checks); one still parked in the FIFO notices at its
-        next keep-alive beat (QUEUE_BEAT_S = 10 s) or at slot grant. Either
-        way the seat frees on its own -- the router never has to chase it.
+        On hangup, shut the backend socket down: the BOX learns now (its side
+        sees FIN/RST immediately), and a box that watches its clients --
+        Strata does -- cancels within its 0.5 s poll and ENDS the response:
+        that is what unblocks our parked relay, the box's last byte, not our
+        shutdown call. Platform fact (R4-B2, DV-R4, reproduced on the
+        shipping box): on Windows shutdown() does NOT wake a recv() already
+        parked in getresponse()/read() (it does on Linux) -- so on a box that
+        does not watch its clients (plain direct-wire servers, supported
+        shape), the reservation and this handler thread stay held until the
+        prefill completes, and the abort books at that point. "A hang-up is
+        heard, not waited for" is a BOX-side law: it closes fast via the
+        box's own watcher; the slot does not free by our will alone.
         """
         caller = self.connection
         sock = getattr(conn, "sock", None)
@@ -2797,7 +2847,16 @@ class Handler(BaseHTTPRequestHandler):
                     self.pool.metrics["count_tokens_synthesized"] += 1
                 obj = _json_or_none(body) or {}
                 text = _dump(obj)
-                return self._json(200, {"input_tokens": max(1, int(len(text) / 4))})
+                # R4-B1: the placement face of the preview contract survives
+                # the rescue -- same three headers, same exposure gate, same
+                # affinity/placement-only-with-a-key rule as the relay leg.
+                _ex = ()
+                if self.cfg.get("expose_affinity"):
+                    _ex = [("x-strata-backend", backend.id)]
+                    if key:
+                        _ex += [("x-strata-affinity", short(key)),
+                                ("x-strata-placement", reason)]
+                return self._json(200, {"input_tokens": max(1, int(len(text) / 4))}, _ex)
 
             _reason = resp.reason
             if _reason and re.search(r"[\r\n]", _reason):
@@ -3192,6 +3251,12 @@ DEFAULTS = {
     "status_timeout": 3.0,
     "status_paths": ["/v1/status", "/metrics"],
     "max_body_mb": 512,
+    # R4-F8d: --probe reads probe_model THROUGH the per-backend merge
+    # (be.cfg carries the globals), so a top-level probe_model was HONORED
+    # while the unknown-key warning swore it was IGNORED. A real default
+    # makes the warning loop tell the truth (and the value is unchanged:
+    # the read site's `or "probe"` fallback stays as the belt).
+    "probe_model": "probe",
     "backend_api_key": "",
     "keys_file": "",
     "control_token": "",            # optional gate for x-strata-pin and
@@ -3767,11 +3832,21 @@ def validate_cfg(cfg, pool, strict=True):
         if _fv != _fv or _fv in (float("inf"), float("-inf")):
             problems.append((k, "must be finite, got %r" % (v,)))
             continue
+        if cast is int and _fv != int(_fv):
+            # R4-F1 (DV-R4): the SMART_INT_KNOBS doctrine, extended to the
+            # top-level int knobs -- the read sites int()-TRUNCATE whatever
+            # passes, so max_body_mb 0.5 booted clean with a body cap of
+            # ZERO bytes (every request with a non-empty body 413s; only
+            # empty POSTs pass). "Nearly whole" is refused by
+            # name; the door's cast result was discarded and nobody re-asked.
+            problems.append((k, "must be a whole number -- the read site truncates it (%r silently becomes %d)" % (v, int(_fv))))
+            continue
         if k in ("status_interval", "status_timeout", "connect_timeout",
-                 "down_backoff", "max_body_mb") and _fv <= 0:
+                 "down_backoff", "max_body_mb", "max_connect_failures") and _fv <= 0:
             # F-A twin of the per-backend door + F-7 (DV-R3) siblings: the
             # read sites `or`-default these (max_body_mb `or 512`,
-            # down_backoff `or 20.0`), so 0 is a value the operator wrote
+            # max_connect_failures `or 3` (R4-F2: 0 whispered through it as
+            # "default 3"), down_backoff `or 20.0`), so 0 is a value the operator wrote
             # and nobody obeys; and a negative connect_timeout raises
             # ValueError from create_connection -- _proxy's ValueError catch
             # then CHARGES IT TO A HEALTHY BOX, and after
@@ -3786,6 +3861,20 @@ def validate_cfg(cfg, pool, strict=True):
             # connect_timeout, under the README section that promises parked
             # streams are never cut. Refuse by name.
             problems.append((k, "must be >= 0 (0 = the documented never-time-out mode), got %r" % (v,)))
+            continue
+        if k == "port" and not 1 <= _fv <= 65535:
+            # R4-F3: this knob has no documented zero mode. 0 binds an
+            # EPHEMERAL port while the boot log swears ":0" and clients aim
+            # at nothing; 70000 dies at the bind -- a raw traceback AFTER the
+            # lying "listening" INFO (the file's own OS-O scar family).
+            problems.append((k, "must be 1..65535, got %r (0 would bind an ephemeral port while the log names it)" % (v,)))
+            continue
+        if k == "sticky_ttl" and _fv < 0:
+            # R4-F2: a negative ttl makes the read site's `ttl > 0` False --
+            # silently the DOCUMENTED 0 mode (never expire). 0 is that mode;
+            # negative is a typo wearing its costume. (Second face this round
+            # to land here independently -- corroboration, not speculation.)
+            problems.append((k, "must be >= 0 (0 = the documented never-expire mode), got %r" % (v,)))
             continue
         try:
             cast(v)
@@ -4055,6 +4144,12 @@ def main(argv=None):
         src = (cfg.get("_key_sources") or {}).get(b.id) or ("global fallback" if b.api_key else "none")
         LOG.info("backend %s -> %s:%s%s  key=%s%s", b.id, b.host, b.port, b.prefix or "",
                  "yes" if b.api_key else "none", " (" + src + ")" if b.api_key else "")
+    # R4-F3: bind FIRST -- this file named its own scar ("bind gaierrors
+    # AFTER a lying 'listening' INFO", the listen-knob gate's comment); the
+    # same family was live here: a bad port logged "listening", started the
+    # poller, and only then died at the bind. If the bind fails, nothing was
+    # claimed and no sentence lied.
+    httpd = Router((str(cfg["listen"]), int(cfg["port"])), Handler)
     LOG.info(
         "listening on http://%s:%s -- affinity+least-queued passthrough, no rate limiting, "
         "queue stays in the backends", cfg["listen"], cfg["port"],
@@ -4067,7 +4162,6 @@ def main(argv=None):
              "Gate it with: python router.py --set-key control")
 
     StatusPoller(pool, cfg).start()
-    httpd = Router((str(cfg["listen"]), int(cfg["port"])), Handler)
 
     def shutdown(signum, _frame):
         LOG.info("signal %s: shutting down", signum)

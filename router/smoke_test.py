@@ -636,6 +636,17 @@ def main():
         stc, hc, bc, _ = call(ROUTER_PORT, "/v1/messages/count_tokens", conv("gamma"), extra={"x-strata-pin": "b"})
         after = stats(ROUTER_PORT)["router"]["count_tokens_synthesized"]
         check("count_tokens synthesized when the box 404s it", stc == 200 and "input_tokens" in bc and after == before + 1, "status=%s %s" % (stc, bc[:60]))
+        # R4-B1 (DV-R4): the rescue replaced the box's ANSWER but not its
+        # FACE. A client steering by response headers (the README's own
+        # x-strata-affinity lane key) lost its box identity at the exact
+        # moment the box dropped count_tokens -- the relay of the SAME turn
+        # would have carried them. The synthesized answer must answer
+        # through the same exposure-gated header face (see router.py's
+        # synth block vs the relay's send_header trio).
+        check("the synthesized count_tokens answers through the placement face too (backend/affinity/placement headers -- R4-B1)",
+              hc.get("x-strata-backend") == "b" and hc.get("x-strata-placement") == "pinned"
+              and hc.get("x-strata-affinity"),
+              str(hc)[:200])
         stc2, _, bc2, _ = call(ROUTER_PORT, "/v1/messages/count_tokens", conv("gamma2"), extra={"x-strata-pin": "a"})
         check("count_tokens passed through when the box implements it", stc2 == 200 and '"input_tokens":123' in bc2.replace(" ", ""), bc2[:60])
 
@@ -4500,6 +4511,136 @@ def main():
           "in its down-cooldown may consume" not in _fl15, "")
     check("S15/F-8: the S-1 boot law (smart_place/smart_move refuse boot unless EVERY box declares max_inflight) is disclosed where operators read the ladder's boot laws, not only inside the validator",
           "max_inflight" in _ld15[:900], "")
+
+    # ---- S16: DV-R4's harvest (fidelity F-1..F-8d + Q1's witness door).
+    # Zero-port, in-process -- same law the probe burned 20/20 RED against
+    # 0b4e215 with (the 21st is a design CONTROL, truth-witness by design).
+    print("")
+    print("S16) DV-R4 config-door laws, the table-row tau, the bypass witness")
+
+    def _base16(**over):
+        _c = {"listen": "127.0.0.1", "port": 9298,
+              "backends": [{"id": "B1", "url": "http://127.0.0.1:1", "max_inflight": 8},
+                           {"id": "B2", "url": "http://127.0.0.1:2", "max_inflight": 8}]}
+        _c.update(over)
+        return _c
+
+    def _probs16(_c, _k):
+        # strict=False: strict IS the boot door and it raises SystemExit
+        # (locked as its own check below); here we want the problems list.
+        return [p for p in R.validate_cfg(_c, R.make_pool(_c), strict=False) if p[0] == _k]
+
+    # F-1: the SMART_INT doctrine, extended -- read sites int()-TRUNCATE
+    _pr = _probs16(_base16(max_body_mb=0.5), "max_body_mb")
+    check("S16/F-1: validator refuses fractional max_body_mb (0.5 passes the door then int(0.5 or 512) makes the body cap ZERO bytes at the read site -- every request with a non-empty body 413s)",
+          bool(_pr), "problems=%s" % (_pr,))
+    _sx16 = None
+    try:
+        _c16s = _base16(max_body_mb=0.5)
+        R.validate_cfg(_c16s, R.make_pool(_c16s))   # strict default: the boot door
+    except SystemExit as _e16:
+        _sx16 = str(_e16)
+    check("S16/F-1: the strict boot door DIES on it (SystemExit, not a returned hint)",
+          _sx16 is not None, "raised=%r" % (_sx16,))
+
+    # F-2: max_connect_failures joins the >0 family; sticky_ttl negatives
+    for _v16, _tag16 in ((0, "0 whispers through `or 3` as the default"),
+                         (0.5, "0.5 truncates to 0 -- a hair trigger"),
+                         (-1, "-1 is a hair trigger through the `or` (truthy)")):
+        _pr = _probs16(_base16(max_connect_failures=_v16), "max_connect_failures")
+        check("S16/F-2: validator refuses max_connect_failures=%r (%s)" % (_v16, _tag16),
+              bool(_pr), "problems=%s" % (_pr,))
+    _pr = _probs16(_base16(sticky_ttl=-1), "sticky_ttl")
+    check("S16/F-2: validator refuses sticky_ttl=-1 (silently becomes the 0 never-expire mode -- the second face landed on this half independently)",
+          bool(_pr), "problems=%s" % (_pr,))
+    _cp16 = R.make_pool(_base16())
+    _cb16 = _cp16.backends[0]
+    _cb16.note_connect_failure("probe-x", 0, 20.0)
+    check("S16/F-2 CONTROL: note_connect_failure(max_fails=0) drops a HEALTHY box on ONE failure (design control -- the witness of why the door must refuse 0)",
+          _cb16.state == R.DOWN, "state=%r" % (_cb16.state,))
+
+    # F-3: port gets a real law; bind speaks BEFORE it claims
+    for _v16, _tag16 in ((8088.5, "silent truncation to 8088 -- straight onto a production port"),
+                         (0, "an ephemeral bind while the log names port 0"),
+                         (70000, "the bind dies AFTER the listening INFO (OS-O lying-listening family)")):
+        _pr = _probs16(_base16(port=_v16), "port")
+        check("S16/F-3: validator refuses port=%r (%s)" % (_v16, _tag16), bool(_pr), "problems=%s" % (_pr,))
+    _src16 = open(ROUTER, encoding="utf-8").read()
+    _b16, _l16 = _src16.index("httpd = Router(("), _src16.index('LOG.info(\n        "listening on')
+    check("S16/F-3: the bind happens BEFORE the listening INFO -- if the bind fails, nothing was claimed and no sentence lied",
+          _b16 < _l16,
+          "bind@%d listening@%d" % (_src16[:_b16].count("\n") + 1, _src16[:_l16].count("\n") + 1))
+
+    # F-4: the tau law consults the TABLE ROW under the lock, not the
+    # caller's possibly-orphan st (_lane_touch is lock-free by design).
+    _c4 = _base16(smart={"smart_move": True, "tau_pp_move": 100})
+    _p4 = R.make_pool(_c4)
+    _p4.sm_cfg["tau_pp_move"] = 100.0
+    _row4 = _p4._lane_touch("laneX")
+    _ok14 = _p4._affinity_put_smart("laneX", "B1", _row4, 1000.0)
+    _orp4 = {"turns": 1, "last_move": 0.0, "R_hat": 4.0}   # stale object, double-create shape
+    _ok24 = _p4._affinity_put_smart("laneX", "B2", _orp4, 1001.0)
+    check("S16/F-4: an orphan st cannot bypass the lane tau -- the law reads the TABLE row (a move stamped at 1000 stands), not the object the caller captured before queuing",
+          _ok14 and not _ok24 and _p4.affinity["laneX"][0] == "B1",
+          "ok1=%s ok2=%s seat=%s" % (_ok14, _ok24, _p4.affinity.get("laneX")))
+    _row4y = _p4._lane_touch("laneY")
+    _orp4y = dict(_row4y)                      # same content, NOT the table object
+    _oky4 = _p4._affinity_put_smart("laneY", "B1", _orp4y, 2000.0)
+    check("S16/F-4: the tau stamp lands on the TABLE row (a stale caller's accepted move still books its clock where the next decision will read it)",
+          _oky4 and _row4y.get("last_move") == 2000.0,
+          "ok=%s table.last_move=%s orphan.last_move=%s" % (_oky4, _row4y.get("last_move"), _orp4y.get("last_move")))
+
+    # F-5: rollback's queue-at-home is a gate-bypass admission like the two
+    # siblings that book the witness; the metric's purpose is never-invisible.
+    _p5 = R.make_pool(_base16())
+    _seen16 = []
+    _p5._note_gate_bypass = lambda _be: _seen16.append(_be.id)
+    with _p5.lock:                             # doctrine: caller holds the lock (its docstring says so)
+        _p5._stash_pending(1, ("laneZ", "B1", "B2"))
+    _p5.backends[1].begin()                    # balance the alt.end() the rollback runs
+    _res16 = _p5.overflow_rollback("laneZ", 1, "B2", 10)
+    check("S16/F-5: overflow-rollback's queue-at-home books the gate_bypass witness -- the one sibling shape that admitted a require_idle home turn invisibly (the helper is self-gating, so the call is unconditional)",
+          _res16[0] is _p5.backends[0] and _seen16 == ["B1"],
+          "verdict=%s bypass_seen=%s" % (_res16[1:2], _seen16))
+
+    # Q1 (the behavioral face's open question, confirmed and adopted):
+    # _move_candidate filtered None windows at DECISION, but a poller
+    # boundary tick (:563) may flip THIS target's window to None before
+    # booking -- None+number in settle is the TypeError that kills cycle
+    # resolution and silently re-locks the gate. The booking region reads
+    # the clock once under the shadow lock and drops a dead window by
+    # name: nothing booked, nothing to settle, nothing lost quietly.
+    _p17 = R.make_pool(_base16(smart={"smart_shadow": True, "smart_move": True}))
+    _t17 = _p17.backends[1]
+    _p17._move_candidate = lambda _h, _bl, _rh: (_t17, {"W": 1.0}, {"W": 0.5, "C": 0.1})
+    _t17.sm["t_bar_window"] = None      # the poller tick lands between decision and booking
+    _m017 = _p17.metrics["shadow_would_moves"]
+    _p17._shadow_note_turn("laneQ1", _p17.backends[0], 100, _p17._lane_touch("laneQ1"))
+    check("S16/Q1: a target window that flipped to None between decision and booking drops the would-move sample -- nothing is booked for the settle path to TypeError over (a dead sample silently re-locks the gate: the decision-ledger-loses-nothing family)",
+          _p17.metrics["shadow_would_moves"] == _m017 and "laneQ1" not in _p17._shadow_open,
+          "delta=%s open=%s" % (_p17.metrics["shadow_would_moves"] - _m017, list(_p17._shadow_open)))
+
+    # Text locks (flat form + enumeration-segment anchors -- lesson #6; the
+    # F-8a lock here IS that lesson's re-proof: a global-phrase anchor once
+    # passed pre-fix against an unrelated refusal paragraph).
+    check("S16/F-6: the counter guide no longer credits new_placements with bodyless GETs (requests counts every forwarded request)",
+          "`new_placements` count every forwarded request" not in _fl15,
+          "stale half still in the counter guide")
+    check("S16/F-7: the Tests line is not a stale 210 (the run's footer prints the live count)",
+          "210 checks" not in _fl15, "still 210")
+    check("S16/F-9: the --no-expose-affinity row names the RESPONSE-HEADERS surface (not 'status views')",
+          "hide the per-request x-strata-" in _fl15, "still points at 'status views'")
+    _seg16 = _fl15.split("Tiering keys (", 1)
+    _seg16 = _seg16[1].split(") live per backend", 1)[0] if len(_seg16) > 1 else "<no tiering-keys line>"
+    check("S16/F-8a: the tiering-keys ENUMERATION itself grants per-backend status_interval (locked to the enumeration segment, not any mention)",
+          "status_interval" in _seg16, "enumeration is: %r" % (_seg16,))
+    check("S16/F-8b: the tier table documents max_inflight 0 as closed-for-business (drain shape; rule 2's queue door stays unconditional)",
+          "closed-for-business" in _fl15, "mode only lived in a router comment")
+    check("S16/F-8c: the affinity-source table documents the inbound x-strata-affinity lane key (never forwarded upstream)",
+          "inbound `x-strata-affinity` header" in _fl15, "header only shown on the response side")
+    _flat16 = " ".join(_src16.split())
+    check("S16/F-8d: probe_model is a real top-level default (the unknown-knob warning loop told the truth again -- --probe was honored while the config name booted as IGNORED)",
+          '"probe_model": "probe"' in _flat16, "top-level probe_model boots as 'IGNORED'")
 
     print("")
     if FAKE_ERRORS:
