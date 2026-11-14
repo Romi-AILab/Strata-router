@@ -65,6 +65,7 @@ GH_A, GH_B, GH_ROUTER = 9181, 9180, 9179                              # v1.2.11 
 LIE_FAKE, LIE_ROUTER = 9178, 9177                                     # v1.2.12 stress-P1 guards
 
 FAILS, CHECKS = [], []
+FAKE_ERRORS = []          # last swallowed FakeStrata tracebacks (see handle_error)
 
 
 def check(label, cond, detail=""):
@@ -362,9 +363,28 @@ class FakeStrata:
         class S(ThreadingHTTPServer):
             daemon_threads = True
             allow_reuse_address = True
+            # request_queue_size was raised to 256 chasing the ~0.5% reset
+            # flakes -- WORSE. Backlog 5 RSTs the overflow connection in ms
+            # (poll fails, poller retries next tick, nobody notices); a deep
+            # queue holds those connections UNREAD instead, and one stalled
+            # poll blocks the poller's whole tick (status_timeout 3s), making
+            # every box look blind at once -- tier placement flips to the
+            # peer on a bench race. The default stays; the flakes live in the
+            # TCP stack, and the checks that could get bitten re-ask once.
 
             def handle_error(self, *a):
-                pass
+                # Swallow the noise (client aborts are constant on this bench)
+                # but never swallow the EVIDENCE: the last 50 tracebacks live
+                # in FAKE_ERRORS for the repro loops and the suite footer to
+                # read. A silent swallow made the 1-in-300 reset invisible for
+                # three rounds of chasing.
+                try:
+                    import traceback as _tb
+                    FAKE_ERRORS.append("".join(_tb.format_exception(*sys.exc_info()))[:400])
+                    while len(FAKE_ERRORS) > 50:
+                        FAKE_ERRORS.pop(0)
+                except Exception:
+                    pass
 
         self.httpd = S(("127.0.0.1", self.port), H)
         threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
@@ -437,6 +457,17 @@ def wait_for(cond, timeout=25.0):
             return True
         time.sleep(0.1)
     return False
+
+
+def _term(p):
+    """Terminate a lab router Popen. Windows reclaims a dead child's handle
+    under us sometimes (WinError 6 seen at suite teardown, twice) -- and a
+    crash at teardown swallows the suite's VERDICT, which is worse than the
+    race. A handle already gone is the state terminate() wanted anyway."""
+    try:
+        p.terminate()
+    except OSError:
+        pass
 
 
 def spawn(fn, *a):
@@ -637,8 +668,13 @@ def main():
         st4, h4, b4, _ = call(ROUTER_PORT, "/v1/messages", conv("after-recovery"))
         check("new work uses the recovered box again", st4 == 200, str(h4.get("x-strata-backend")))
         r = stats(ROUTER_PORT)["router"]
+        # The audit predates passthrough_gets (v1.2.16 gave keyless GETs their
+        # own terminal); without subtracting that term, ANY passive monitor
+        # poking /v1/models eats the 6-request slack and this check fails on
+        # a router that decided everything correctly. Generalize the formula
+        # like the closed identity did.
         check("decisions fully accounted for",
-              r["sticky_hits"] + r["new_placements"] + r["migrations"] + r["pinned"] + r.get("pin_misses", 0) + r.get("last_resort", 0) >= r["requests"] - 6,
+              r["sticky_hits"] + r["new_placements"] + r["migrations"] + r["pinned"] + r.get("pin_misses", 0) + r.get("last_resort", 0) + r.get("passthrough_gets", 0) >= r["requests"] - 6,
               json.dumps(r)[:220])
         print("")
         print("router decisions:", json.dumps(r, indent=2)[:420])
@@ -835,7 +871,7 @@ def main():
             wait_for(lambda: (tiers()["L"].get("reported") or {}).get("serving", 9) == 0, 10)
             a.beat_lag_s = 0.0
         finally:
-            proc2.terminate()
+            _term(proc2)
             try:
                 proc2.wait(timeout=5)
             except Exception:
@@ -956,19 +992,19 @@ def main():
 
             # ---- the closed identity: every request settles in ONE counter ----
             _r7 = qm()
-            _term = (_r7["sticky_hits"] + _r7["new_placements"] + _r7["migrations"]
-                     + _r7["pinned"] + _r7.get("last_resort", 0) + _r7.get("overflow_placements", 0)
-                     + _r7.get("overflow_rollbacks", 0) + _r7.get("overflow_fizzles", 0))
+            _term_sum = (_r7["sticky_hits"] + _r7["new_placements"] + _r7["migrations"]
+                         + _r7["pinned"] + _r7.get("last_resort", 0) + _r7.get("overflow_placements", 0)
+                         + _r7.get("overflow_rollbacks", 0) + _r7.get("overflow_fizzles", 0))
             check("placement counters form a CLOSED identity (one terminal per request; only the"
                   " operator-cancelled overflow is allowed uncounted)",
-                  _r7["requests"] - _term == 1 and _r7.get("pin_misses", 0) == 0,
-                  "requests=%s terminals=%s diff=%s %s" % (_r7["requests"], _term, _r7["requests"] - _term,
+                  _r7["requests"] - _term_sum == 1 and _r7.get("pin_misses", 0) == 0,
+                  "requests=%s terminals=%s diff=%s %s" % (_r7["requests"], _term_sum, _r7["requests"] - _term_sum,
                                                            json.dumps({k: _r7.get(k) for k in
                                                            ("sticky_hits", "new_placements", "pinned",
                                                             "overflow_placements", "overflow_rollbacks",
                                                             "overflow_fizzles")})[:220]))
         finally:
-            proc7.terminate()
+            _term(proc7)
             try:
                 proc7.wait(timeout=5)
             except Exception:
@@ -1828,10 +1864,23 @@ def main():
                   st == 200 and h.get("x-strata-backend") == "R",
                   "status=%s box=%s %s" % (st, h.get("x-strata-backend"), _bb[:60]))
             b.require_key = "smoke-kb-rotated-9d41"   # peer rotated their key; our borrower copy went stale
-            st, h, _bb, _w = call(ROUTER3_PORT, "/v1/messages", conv("key-stale"),
-                                  extra={"x-api-key": None, "x-strata-pin": "R"})
-            st2, _h2, _b2, _w2 = call(ROUTER3_PORT, "/v1/messages", conv("key-nooverride"),
-                                      extra={"x-api-key": "smoke-kb-rotated-9d41", "x-strata-pin": "R"})
+
+            def _keypin(cx, api):
+                # The fake box occasionally accepts then dies pre-first-byte
+                # under these back-to-back pairs (~1% reproduced in a focused
+                # 300-iteration loop); the router's answer to that is PINNED
+                # elsewhere (502, no retry on a POST, box stays healthy). So
+                # the harness may re-ask a box that was never answered --
+                # but ONLY that exact failure; any other 502 still fails.
+                for _try in range(6):
+                    _st, _h, _bb, _w = call(ROUTER3_PORT, "/v1/messages", conv(cx),
+                                            extra={"x-api-key": api, "x-strata-pin": "R"})
+                    if _st != 502 or "accepted the request but" not in _bb:
+                        return _st, _bb
+                    time.sleep(0.15)
+                return _st, _bb
+            st, _bb = _keypin("key-stale", None)
+            st2, _bb2 = _keypin("key-nooverride", "smoke-kb-rotated-9d41")
             check("the caller CANNOT override the configured key -- even the RIGHT one sent by the client still 401s (the router's copy rules)",
                   st2 == 401, "status=%s" % st2)
             bx = kstats()
@@ -1847,7 +1896,7 @@ def main():
             check("backend WITHOUT a configured key still receives the caller's auth verbatim",
                   st == 200 and ("caller-passthru-7f3" in a.seen_auths or "caller-passthru-7f3" in b.seen_auths),
                   "status=%s" % st)
-            proc3.terminate()
+            _term(proc3)
             try:
                 proc3.wait(timeout=5)
             except Exception:
@@ -2356,7 +2405,7 @@ def main():
                   "nothing (no fabricated zeros, old output shape)",
                   _ex14c == {"serving": 1, "queued": None}, str(_ex14c))
         finally:
-            proc4.terminate()
+            _term(proc4)
             try:
                 proc4.wait(timeout=5)
             except Exception:
@@ -2407,7 +2456,7 @@ def main():
             check("the overflow queued instead of failing -- all six conversations completed",
                   len(bres) == 6 and all(x[0] == 200 for x in bres), str([x[0] for x in bres])[:120])
         finally:
-            proc5.terminate()
+            _term(proc5)
             try:
                 proc5.wait(timeout=5)
             except Exception:
@@ -2446,7 +2495,7 @@ def main():
                   and "401" in (rr["status_error"] or "") and rr["state"] == "healthy",
                   json.dumps({k: rr.get(k) for k in ("reported_age_s", "accepting", "status_error", "state")})[:200])
         finally:
-            proc6.terminate()
+            _term(proc6)
             try:
                 proc6.wait(timeout=5)
             except Exception:
@@ -3304,9 +3353,9 @@ def main():
                   all(b["estimator_mode"] == "J" for b in _st2["backends"]),
                   str([b["estimator_mode"] for b in _st2["backends"]]))
         finally:
-            _proc_sp.terminate()
+            _term(_proc_sp)
             if _proc_s1.poll() is None:
-                _proc_s1.terminate()
+                _term(_proc_s1)
             _sp_a.kill()
             _sp_b.kill()
         # ---- smart placement C6: L4 smart_preview -- a preview passes, it never homes ----
@@ -3388,7 +3437,7 @@ def main():
                   _psum == _pr["requests"] and _pr.get("preview_passes", 0) >= 2,
                   "requests=%s sum=%s pv=%s" % (_pr["requests"], _psum, _pr.get("preview_passes")))
         finally:
-            _proc_pv.terminate()
+            _term(_proc_pv)
             _pv_a.kill()
             _pv_b.kill()
         # ---- smart placement C7: L5 smart_move + smart_transient + the shipping gate ----
@@ -3476,7 +3525,7 @@ def main():
                   and _mr["affinity_origin"].get("sticky", 0) >= 1,
                   "mv=%s gate=%s" % (_mr["moves"], _mr["release_gate_open"]))
         finally:
-            _proc_mv.terminate()
+            _term(_proc_mv)
             _mv_a.kill(); _mv_b.kill()
         _t_a, _t_b = FakeStrata(9160, "ta", hold=2.0), FakeStrata(9159, "tb", hold=0.1)
         _t_a.start(); _t_b.start()
@@ -3513,7 +3562,7 @@ def main():
             check("S7: LIVE origin=transient -- the answered overflow homed the lane and the origin column says so (§13-13)",
                   _tr["affinity_origin"].get("transient", 0) >= 1, str(_tr["affinity_origin"]))
         finally:
-            _proc_tv.terminate()
+            _term(_proc_tv)
             _t_a.kill(); _t_b.kill()
         # ---- smart placement C8: L6 smart_homecoming -- exile is not fate, but proof is the gate ----
         print("")
@@ -3595,14 +3644,107 @@ def main():
                   "b4=%s hc=%s o=%s" % (_t4[1].get("x-strata-backend"), _hr["homecomings"],
                                         _hr["affinity_origin"]))
         finally:
-            _proc_hc.terminate()
+            _term(_proc_hc)
             _hc_a.kill(); _hc_b.kill()
+
+        print("")
+        print("S9) smart L9 -- the whole-ladder matrix: 64 flag combos close the identity; no dead knobs")
+        # Docs-as-code: a knob registered in SMART_NUMS that NO read site ever
+        # reads is worse than an unknown knob (unknown ones at least
+        # warn-and-ignore). homecoming_lane_s was such a corpse -- the per-lane
+        # homecoming ceiling is tau_pp_homecoming, and the table must say so.
+        check("S9: no knob is registered that the code never reads (homecoming_lane_s is dead)",
+              "homecoming_lane_s" not in R.SMART_NUMS, str(R.SMART_NUMS))
+        _ver = subprocess.run([sys.executable, ROUTER, "--version"], capture_output=True,
+                              text=True, timeout=30).stdout.strip()
+        check("S9: --version speaks the shipped release (the bump is the release note's first line)",
+              _ver == "1.2.18", _ver)
+        _TERMS = ("sticky_hits", "new_placements", "migrations", "pinned", "last_resort",
+                  "overflow_placements", "overflow_rollbacks", "overflow_fizzles",
+                  "overflow_evictions", "operator_cancelled", "passthrough_gets",
+                  "preview_passes")
+        _FL6 = ("smart_cap_read", "smart_shadow", "smart_place",
+                "smart_preview", "smart_move", "smart_transient")
+        # 64 combinations of every action flag, each pool fed the SAME traffic:
+        # 3 lanes placed then re-visited (sticky), 2 previews (one fat), 1 pin,
+        # 1 passthrough. The closed identity is not allowed to care which rungs
+        # of the ladder are lit -- requests == SUM(12 terminals) in every combo.
+        _bad = None
+        for _mask in range(64):
+            _combo = {f: bool(_mask & (1 << _i)) for _i, f in enumerate(_FL6)}
+            _combo["smart_homecoming"] = bool(_mask & 32)
+            _bp = R.Pool([_ube("MA", mi=64), _ube("MB", mi=64)], {"smart": _combo})
+            for _r in range(2):
+                for _k in ("m0", "m1", "m2"):
+                    _bp.pick(_k, body_len=200)
+            _bp.pick("m0", preview=True)
+            _bp.pick("m1", preview=True, body_len=4096)
+            _bp.pick("m2", pin="MA")
+            _bp.pick("", passthrough=True)
+            _m = _bp.metrics
+            _why = None
+            if _m["requests"] != sum(_m.get(t, 0) for t in _TERMS):
+                _why = "identity: requests=%s sum=%s" % (_m["requests"], sum(_m.get(t, 0) for t in _TERMS))
+            elif any(len(v) != 3 or v[2] not in ("pin", "sticky", "smart", "transient")
+                     for v in _bp.affinity.values()):
+                _why = "affinity rows must be (id, ts, origin) from the named set"
+            elif _m["moves"] != 0 or _m["homecomings"] != 0:
+                _why = "no combo of this traffic may move or bring home a lane"
+            elif not any(_combo[f] for f in ("smart_shadow", "smart_move", "smart_homecoming")) and _bp._lane:
+                _why = "lane state was created with no flag that reads lanes lit"
+            if _why and _bad is None:
+                _bad = "%s: %s" % (_combo, _why)
+        check("S9: all 64 flag combinations boot, serve, close the identity and create no rogue state (D9/§13-8)",
+              _bad is None, str(_bad))
+        # targeted cross-flag pins: a rung must never SILENTLY depend on another
+        _lp = R.Pool([_ube("NA", mi=64), _ube("NB", mi=64)], {"smart": {"smart_place": True}})
+        _lp.pick("p0", body_len=200); _lp.pick("p0", body_len=200)
+        check("S9: place-alone speaks J on the FLOOR R-hat -- no lane state is born for a currency nobody measures",
+              _lp.metrics["new_placements"] >= 1 and len(_lp._lane) == 0,
+              "%s lanes=%s" % (_lp.metrics["new_placements"], len(_lp._lane)))
+        _lm = R.Pool([_ube("OA", mi=64), _ube("OB", mi=64)], {"smart": {"smart_move": True}})
+        _lm.pick("q0", body_len=200); _lm.pick("q0", body_len=200)
+        check("S9: move-alone without shadow data never moves and never even reaches the gate (predicate first, gate last)",
+              _lm.metrics["moves"] == 0 and _lm.metrics["move_gate_locked"] == 0,
+              "mv=%s lock=%s" % (_lm.metrics["moves"], _lm.metrics["move_gate_locked"]))
+        # shipping shape: every rung lit at once, one real boot
+        _la, _lb = FakeStrata(9145, "la", hold=0.1), FakeStrata(9147, "lb", hold=0.1)
+        _la.start(); _lb.start()
+        with open("smart_allon_probe.json", "w") as _ff:
+            json.dump({"listen": "127.0.0.1", "port": 9146, "status_interval": 0.2,
+                       "backends": [{"id": "la", "url": "http://127.0.0.1:9145", "max_inflight": 8},
+                                    {"id": "lb", "url": "http://127.0.0.1:9147", "max_inflight": 8}],
+                       "smart": {f: True for f in
+                                 ("smart_obs", "smart_cap_read", "smart_shadow", "smart_place",
+                                  "smart_preview", "smart_move", "smart_transient", "smart_homecoming")}}, _ff)
+        _proc_all = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_allon_probe.json",
+                                      "--log-level", "WARNING"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S9: the all-on shipping boot comes up green",
+                  wait_for(lambda: get(9146, "/healthz")[0] == 200, 25))
+            _ar = call(9146, "/v1/messages", conv("allon"), timeout=40)
+            _am = stats(9146)["router"]
+            check("S9: LIVE all-on -- traffic served, every smart panel column present, identity closed",
+                  _ar[0] == 200
+                  and all(k in _am for k in ("shadow_cycles", "release_gate_open", "affinity_origin",
+                                             "moves", "homecomings", "preview_passes", "move_gate_locked"))
+                  and _am["requests"] == sum(_am.get(t, 0) for t in _TERMS),
+                  "st=%s cols=%s rq=%s sum=%s" % (_ar[0],
+                                                  [k for k in ("shadow_cycles", "release_gate_open", "affinity_origin") if k not in _am],
+                                                  _am["requests"], sum(_am.get(t, 0) for t in _TERMS)))
+        finally:
+            _term(_proc_all)
+            _la.kill(); _lb.kill()
     finally:
-        proc.terminate()
+        _term(proc)
         try:
             proc.wait(timeout=5)
         except Exception:
-            proc.kill()
+            try:
+                proc.kill()
+            except OSError:
+                pass
         for bx2 in (a, b):
             try:
                 bx2.kill()
@@ -3610,6 +3752,11 @@ def main():
                 pass
 
     print("")
+    if FAKE_ERRORS:
+        print("FakeStrata swallowed %d handler tracebacks (last few):" % len(FAKE_ERRORS))
+        for _fe in FAKE_ERRORS[-3:]:
+            print("---- FAKE ERROR ----")
+            print(_fe)
     print("%d checks passed, %d failed" % (len(CHECKS), len(FAILS)))
     for f in FAILS:
         print("  FAILED: " + f)

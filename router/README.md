@@ -141,7 +141,9 @@ Config-only keys (no flag): `sticky_max` (`20000`, pin-table cap),
 `status_timeout` (`3.0` s), `status_paths` (`["/v1/status", "/metrics"]`),
 `backend_api_key` (`""` per backend -- prefer `--set-key` over a key in the
 file), `control_token` (`""`, optional gate for `x-strata-pin` requests),
-`tls_insecure` (`False`, https backends only: skip cert verification).
+`tls_insecure` (`False`, https backends only: skip cert verification),
+`smart` (`{}`, the placement ladder -- every knob in *The `smart.*` ladder*
+below; empty = today's behavior).
 Tiering keys (`priority`, `max_inflight`, `require_idle`) live per backend --
 see *Tiered placement* below.
 
@@ -621,6 +623,45 @@ And since `smart.smart_preview`, the sum has a twelfth term, `preview_passes`
 -- a preview answers from a real box and pays its own terminal instead of
 placing; the counter stays zero while the flag sleeps, so the formula's shape
 never changed, only grew a term.
+
+### The `smart.*` ladder: every knob, one table
+
+The ladder lives under the `smart` object in `router.json` (no CLI flags);
+empty or absent means every rung is off and the router is v1.2.16 behavior
+byte-for-byte. Unknown knobs inside `smart` warn and are ignored -- they are
+never silently trusted as something else. `router.remote.example.json` ships
+the full block with shipped defaults so an operator can lift it wholesale.
+
+| Knob | Default | What it governs |
+|------|---------|-----------------|
+| `smart_obs` | `false` | The per-box OBS telemetry line every `obs_every_polls` polls -- data collection only, zero routing effect. |
+| `smart_cap_read` | `false` | Read `cap_slots` from the box status feed (single definition of "full"); no feed value falls back to config. |
+| `smart_shadow` | `false` | Measure the J currency (`R̂×Ŵ + Ĉ + X`) and roll the shadow cycles that feed the release gate. Decisions unchanged. |
+| `smart_place` | `false` | J walks INSIDE the placement tier (ties still fall to `load_score`'s jitter floor; a `None` anywhere degrades the whole round to today's walk). |
+| `smart_preview` | `false` | `count_tokens` previews answer from a real box but book `preview_passes` -- no home written, no overflow, no exile, no lane roll. |
+| `smart_move` | `false` | The §4 mover (own-signal congestion + net inequality + un-ticked hard-gate probe), behind the release gate and per-lane cooldown. |
+| `smart_transient` | `false` | An answered overflow re-homes as `origin="transient"` (admitted, movable) instead of a permanent sticky home. |
+| `smart_homecoming` | `false` | The §5 way home: an exiled lane walks back only after home proves itself verifiably empty on TWO consecutive fresh polls. |
+| `window_n` | `10` | A T̄ window is N poll ticks; the difference fires at the boundary and the value HOLDS between boundaries. |
+| `n_min` | `20` | Filtered completions a window needs before it reports a value; fewer says "no opinion" (`None`), never a guess. |
+| `default_t_bar` | `120` | The NAMED degraded-window default (clamp-exempt): the honest number when samples ran out, distinct from a box that has no boundary yet. |
+| `t_bar_base_window_s` | `86400` | How long window means are kept for T̄_base (the rolling 24h min the clamp weighs against). |
+| `t_bar_clamp_factor` | `3.0` | T̄_used = min(window, factor × T̄_base) -- one pathological run can't redefine a box's scale. |
+| `obs_every_polls` | `10` | OBS line cadence when `smart_obs` is on. |
+| `r_hat_init` / `r_hat_min` / `r_hat_max` | `4` / `1` / `64` | Lane concurrency estimate R̂: init and the honest clamp (the weakest multiplier in J, documented as such). |
+| `kappa_hat` | `0.001` | Ĉ = body_tokens × κ̂ -- upload cost, a conservative unmeasured constant, named as one. |
+| `w_cour` | `1.0` | X = courtesy for load carried for OTHER boxes -- never a self-payment. |
+| `k_eps` | `0` | Relative band inside which J values "tie" and fall to `load_score`; `0` = exact ties only. |
+| `k_gain` | `2.0` | Move net inequality `R̂×ΔŴ > k_gain × Ĉ_target` -- the move must pay for its own settling, with margin. |
+| `tau_pp_move` / `tau_pp_transient` / `tau_pp_homecoming` | `900` | Per-lane cooldowns, one key per mechanism (move / transient-home return / homecoming) so no mechanism shortcuts another's rest. |
+| `homecoming_box_s` | `120` | Per-box homecoming throttle: a box that empties drains ONE lane per window, never its queue. |
+| `shadow_cycle_s` | `604800` | Shadow cycle length (7d -- the final report's proposal, pending owner's pin). |
+| `release_gate_shadow_cycles` / `release_gate_min_would_moves` | `2` / `20` | The release gate: the last N completed cycles at ZERO would-move loss AND a global resolved pool ≥ M. One loss re-locks. |
+
+The storm detector for `smart_move`/`smart_homecoming` is the two `/stats`
+columns (`moves`, `homecomings`) -- watch them in the first hour of any flip.
+Moves and homecomings are diagnostics: they never enter the closed identity,
+which the 64-combination flag matrix keeps closed for every ladder shape.
 
 ## Limits
 

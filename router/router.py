@@ -106,7 +106,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "1.2.17"
+VERSION = "1.2.18"
 ROUTER_STARTED = int(time.time())   # process start epoch (stats started_at/uptime_s)
 LOG = logging.getLogger("strata-router")
 
@@ -2892,7 +2892,7 @@ SMART_NUMS = ("k_gain", "tau_pp_move", "tau_pp_homecoming", "tau_pp_transient",
               "r_hat_min", "r_hat_max", "k_eps", "t_bar_clamp_factor",
               "t_bar_base_window_s", "window_n", "release_gate_shadow_cycles",
               "release_gate_min_would_moves", "shadow_cycle_s",
-              "homecoming_lane_s", "homecoming_box_s", "obs_every_polls")
+              "homecoming_box_s", "obs_every_polls")
 
 DEFAULTS = {
     "listen": "127.0.0.1",
