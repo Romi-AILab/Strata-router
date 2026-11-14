@@ -3528,11 +3528,13 @@ def main():
             _term(_proc_mv)
             _mv_a.kill(); _mv_b.kill()
         _t_a, _t_b = FakeStrata(9160, "ta", hold=2.0), FakeStrata(9159, "tb", hold=0.1)
+        _t_b.blind = True          # tb born unproven-idle (see config's require_idle)
         _t_a.start(); _t_b.start()
         with open("smart_transient_probe.json", "w") as _ff:
             json.dump({"listen": "127.0.0.1", "port": 9161, "status_interval": 0.2,
                        "backends": [{"id": "ta", "url": "http://127.0.0.1:9160", "max_inflight": 1},
-                                    {"id": "tb", "url": "http://127.0.0.1:9159", "max_inflight": 8}],
+                                    {"id": "tb", "url": "http://127.0.0.1:9159", "max_inflight": 8,
+                                     "require_idle": True}],
                        "smart": {"smart_transient": True}, "control_token": "s7ctl"}, _ff)
         _proc_tv = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_transient_probe.json",
                                      "--log-level", "WARNING"],
@@ -3540,18 +3542,22 @@ def main():
         try:
             check("S7: a legal transient boot comes up green",
                   wait_for(lambda: get(9161, "/healthz")[0] == 200, 25))
-            # determinism without coin flips: an operator pin puts turn 1 on
-            # the one-slot slow box (pin is also the honest stress of §6's
-            # claim -- the transient put must be able to RE-HOME a lane that
-            # the pin seated, because pin governs placement, not fate). Turn
-            # 2 finds the slot held by its own lane -- the cap branches it.
-            _ctl = {"x-strata-pin": "ta", "x-strata-control": "s7ctl"}
+            # determinism without coin flips: tb is fail-closed until turn 1
+            # lands (require_idle + a blind status feed the poller cannot yet
+            # prove idle), so ta is the ONLY box that can seat turn 1 -- no
+            # pin needed. And none is used: since DV-fix5 the pin law lives
+            # at the seat-write itself, and an answered overflow commit may
+            # NOT re-home a lane over a pin -- pinning here would have made
+            # the arc below test the pre-amendment law. That stress -- the
+            # commit door REFUSING over a pin -- is S15's F-1a, where the
+            # law actually lives. Turn 2 finds ta's slot held by its own
+            # lane -- the cap branches it.
             _w1 = threading.Thread(target=lambda: call(9161, "/v1/messages", conv("tlane"),
-                                                        extra=_ctl, timeout=40))
+                                                        timeout=40))
             _w1.start()
             time.sleep(0.5)              # turn 1 holds ta's only slot
             _t_b.blind = False
-            time.sleep(0.4)              # poller sees tb healthy again
+            time.sleep(0.4)              # poller proves tb idle twice -- it may take the overflow now
             _t2s, _t2h = call(9161, "/v1/messages", conv("tlane"), timeout=40)[:2]
             _w1.join()
             check("S7: second turn OVERFLOWED the capped home and answered from the peer (§6 commit-then-migrate)",
@@ -3615,11 +3621,13 @@ def main():
               and _of.affinity.get("ok")[0] == "KB")
         # -- live: the whole arc on one real boot -- exiled by cap, home empties, lane walks back
         _hc_a, _hc_b = FakeStrata(9155, "ha", hold=2.0), FakeStrata(9154, "hb", hold=0.1)
+        _hc_b.blind = True     # hb fail-closed (require_idle, feed unproven) until the lane sits at ha
         _hc_a.start(); _hc_b.start()
         with open("smart_homecoming_probe.json", "w") as _ff:
             json.dump({"listen": "127.0.0.1", "port": 9153, "status_interval": 0.2,
                        "backends": [{"id": "ha", "url": "http://127.0.0.1:9155", "max_inflight": 1},
-                                    {"id": "hb", "url": "http://127.0.0.1:9154", "max_inflight": 8}],
+                                    {"id": "hb", "url": "http://127.0.0.1:9154", "max_inflight": 8,
+                                     "require_idle": True}],
                        "smart": {"smart_homecoming": True}, "control_token": "s8ctl"}, _ff)
         _proc_hc = subprocess.Popen([sys.executable, ROUTER, "--config", "smart_homecoming_probe.json",
                                      "--log-level", "WARNING"],
@@ -3627,11 +3635,18 @@ def main():
         try:
             check("S8: a legal homecoming boot comes up green",
                   wait_for(lambda: get(9153, "/healthz")[0] == 200, 25))
-            _hc_ctl = {"x-strata-pin": "ha", "x-strata-control": "s8ctl"}
+            # seat the lane at ha WITHOUT a pin: hb is fail-closed until
+            # turn 1 lands (see config), so turn 1 has exactly one candidate.
+            # The pin the pre-DV-fix5 rig used here existed only to seat that
+            # first turn -- and the answered overflow's sticky commit then
+            # clobbered it, which is the behavior DV-fix5 (correctly) refuses.
+            # The arc itself never needed the pin.
             _w = threading.Thread(target=lambda: call(9153, "/v1/messages", conv("hclane"),
-                                                       extra=_hc_ctl, timeout=40))
+                                                       timeout=40))
             _w.start()
             time.sleep(0.5)
+            _hc_b.blind = False
+            time.sleep(0.4)              # poller proves hb idle twice -- it may take the overflow now
             call(9153, "/v1/messages", conv("hclane"), timeout=40)     # cap-refused: overflow -> hb
             _w.join()                                                  # ha's slot frees here
             time.sleep(2.0)                                            # ha verifiably empty, x2 fresh
@@ -4288,6 +4303,203 @@ def main():
                 bx2.kill()
             except Exception:
                 pass
+
+    # ---- S15 (DV-R3): the law at every door, not just the door it stood in --
+    # Convergence round 3's harvest, all personally reproduced: V3-07 was
+    # enforced at the MOVER's put (DV-fix4) but the affinity table has FOUR
+    # other seat-writers (overflow commit, migration, fresh placement, last
+    # resort) and a pin landing inside any of their windows was still clobbered
+    # -- so the law moves into the shared writer itself and every door, now
+    # and future, inherits it. The per-lane tau clock gets the same treatment
+    # F-C gave the box throttle: re-ask AND stamp inside the put. Plus the
+    # exile table's unguarded cap-eviction crash, the dead per-backend
+    # status_timeout door, the falsy-trap law's own siblings, homecoming's
+    # half-applied transient re-ask, and three doc sentences that lied.
+    # RED baseline: f437d32 (the tree CONTAINING DV-fix4 -- F-2's lane-clock
+    # twin and F-1's sibling doors are DV-fix4's own shape). RED log:
+    # strata-review-notes/ws-v1219-DV-R3-s15-RED-f437d32.log (12/12 burned,
+    # every signature incriminating its finding).
+    def _ube15(bid, serving=0.0, mi=8, state=None, tbar=100.0):
+        b15 = R.Backend(bid, "http://127.0.0.1:9", cfg={"max_inflight": mi})
+        b15.ever_reported = True
+        b15.reported = {"serving": serving, "queued": 0.0}
+        b15.status_ts = time.monotonic()
+        b15.sm["t_bar_used"] = tbar
+        b15.sm["t_bar_window"] = tbar
+        if state is not None:
+            b15.state = state
+        return b15
+
+    # F-1a: the overflow-commit door -- a pin landing after the token popped
+    _p15a = R.Pool([_ube15("HA15"), _ube15("AA15"), _ube15("PP15")], {})
+    _p15a._affinity_put("ck15", "HA15", "sticky")
+    with _p15a.lock:
+        _p15a._overflow_token += 1
+        _tok15 = _p15a._overflow_token
+        _p15a._stash_pending(_tok15, ("ck15", "HA15", "AA15"))
+    _oput15 = _p15a._affinity_put
+    _f15 = [True]
+    def _cw_put15(key, bid, origin):
+        if _f15[0] and origin != "pin":
+            _f15[0] = False
+            _oput15(key, "PP15", "pin")     # operator pins after the pop
+        return _oput15(key, bid, origin)
+    _p15a._affinity_put = _cw_put15
+    _p15a.overflow_commit("ck15", _tok15)
+    _p15a._affinity_put = _oput15
+    with _p15a.lock:
+        _o15a = _p15a.affinity.get("ck15")
+    check("S15/F-1a: the overflow-commit door re-asks the seat owner at the WRITE -- 'a late first byte from an older overflow will not move the lane back' (README) holds in BOTH orderings, and the commit's overflow_placements booking stands",
+          bool(_o15a) and len(_o15a) > 2 and _o15a[2] == "pin" and _o15a[0] == "PP15"
+          and _p15a.metrics["overflow_placements"] == 1,
+          "seat=%s ops=%s" % (_o15a and _o15a[2:], _p15a.metrics["overflow_placements"]))
+
+    # F-1b: the migration door -- pin to a LIVE box mid-migration
+    _p15b = R.Pool([_ube15("HD15", state=R.DOWN), _ube15("AC15"), _ube15("PC15")], {})
+    _p15b._affinity_put("mk15", "HD15", "sticky")
+    _odrop15 = _p15b._affinity_drop_backend
+    def _drop_pin15(bid):
+        n15 = _odrop15(bid)
+        _p15b._affinity_put("mk15", "PC15", "pin")   # pinned mid-migration
+        return n15
+    _p15b._affinity_drop_backend = _drop_pin15
+    _pk15 = _p15b.pick("mk15")
+    _p15b._affinity_drop_backend = _odrop15
+    with _p15b.lock:
+        _o15b = _p15b.affinity.get("mk15")
+    check("S15/F-1b: the migration door re-asks the seat owner at the WRITE -- a pin to a live box landing between the drop and the sticky put survives (the dead home is gone; the live operator seat is not migration's to overwrite); migrations booking stands",
+          bool(_o15b) and len(_o15b) > 2 and _o15b[2] == "pin" and _o15b[0] == "PC15"
+          and _p15b.metrics["migrations"] == 1,
+          "seat=%s mig=%s pick=%s" % (_o15b and _o15b[2:], _p15b.metrics["migrations"], _pk15[1]))
+
+    # F-1c: the law at the shared primitive -- every door inherits
+    _p15c = R.Pool([_ube15("UA15"), _ube15("UB15")], {})
+    _p15c._affinity_put("up15", "UA15", "pin")
+    _p15c._affinity_put("up15", "UB15", "sticky")          # must write NOTHING
+    with _p15c.lock:
+        _o15c = _p15c.affinity.get("up15")
+    check("S15/F-1c: ONE law at the shared writer -- _affinity_put itself refuses to clobber an operator's pin from ANY non-pin origin, so the four doors AND every future call site inherit V3-07 at the put (pin writes stay legal by definition; the mover's guarded variant delegates here)",
+          bool(_o15c) and _o15c[0] == "UA15" and _o15c[2] == "pin",
+          "seat=%s" % (_o15c and _o15c[2:],))
+
+    # F-2: two concurrent same-lane turns -- one move, never a ping-pong
+    _p15m = R.Pool([_ube15("MH15", serving=8.0), _ube15("MT15")],
+                   {"smart": {"smart_move": True}})
+    _p15m._affinity_put("mk15m", "MH15", "sticky")
+    _p15m.by_id["MH15"].sm["cong_streak"] = 2              # predicate really fires
+    _st15 = _p15m._lane_touch("mk15m")
+    _p15m._shadow_done.extend(
+        [{"cycle": i, "samples": 11, "resolved": 11, "loss": 0, "unresolved": 0}
+         for i in (1, 2)])
+    _bar15 = threading.Barrier(2)
+    def _gate15():
+        try:
+            _bar15.wait(5.0)      # both threads pass the pre-lock tau read first
+        except threading.BrokenBarrierError:
+            pass
+        return True
+    _p15m._release_gate_open = _gate15
+    def _mv15():
+        try:
+            _p15m._smart_move("mk15m", _p15m.by_id["MH15"], 8000, _st15)
+        except Exception:
+            pass
+    _t15a = threading.Thread(target=_mv15)
+    _t15b = threading.Thread(target=_mv15)
+    _t15a.start(); _t15b.start(); _t15a.join(15); _t15b.join(15)
+    check("S15/F-2: the per-lane tau cooldown is a LAW at the put -- two concurrent same-lane turns (the README's own expected overlap: an SDK retry while the turn is in flight) produce ONE move; re-ask AND stamp live inside the put's lock region (F-C made the BOX throttle atomic; the LANE clock was its unguarded twin)",
+          _p15m.metrics["moves"] == 1,
+          "moves=%s" % _p15m.metrics["moves"],)
+
+    # F-3: the exile table's cap eviction may not crash a handler thread
+    _xp15 = R.Pool([_ube15("XA15"), _ube15("XB15")], {"smart": {"smart_homecoming": True}})
+    _ein15, _erel15 = threading.Event(), threading.Event()
+    class _EvilExile15(dict):
+        def pop(self, key, *d):
+            if not hasattr(self, "_armed") or self._armed:
+                self._armed = False
+                _ein15.set()                  # "I evaluated next(iter())..."
+                _erel15.wait(5.0)             # "...opponent pops THIS key first"
+            return dict.pop(self, key, *d)
+    _xp15._exiled = _EvilExile15({("k%04d" % i): "h" for i in range(4096)})
+    _xerr15 = ["ok"]
+    def _exa15():
+        try:
+            _xp15._exile_note("zA15", "h")
+        except Exception as e15:
+            _xerr15[0] = repr(e15)
+    _t15x = threading.Thread(target=_exa15)
+    _t15x.start()
+    _landed15 = _ein15.wait(1.5)
+    if _landed15:
+        _xp15._exile_note("zB15", "h")        # opponent steals the very key
+    _erel15.set()
+    _t15x.join(15)
+    check("S15/F-3: the exile table runs its cap eviction as ONE locked region with a crash-proof pop -- two threads settling at the 4096 cap may not raise KeyError INTO the request handler (overflow_commit runs before send_response: a raise there resets a connection whose box HAD answered)",
+          _xerr15[0] == "ok" and len(_xp15._exiled) <= 4096,
+          "%s len=%d raced=%s" % (_xerr15[0], len(_xp15._exiled), _landed15))
+
+    # F-4: a knob in _KNOWN_BE_KEYS must have a per-backend READ SITE
+    _b415 = R.Backend("B415", "http://127.0.0.1:9", cfg={"status_timeout": 0})
+    _p415 = R.Pool([_b415], {})
+    _pr415 = R.validate_cfg({"backends": [{"id": "B415", "url": "http://127.0.0.1:9",
+                                           "status_timeout": 0}]}, _p415, strict=False)
+    check("S15/F-4: no dead knob behind a lying door -- per-backend status_timeout has ZERO per-backend read sites (the only read is the poller's GLOBAL cfg), so it may not sit in _KNOWN_BE_KEYS claiming 'READ from the per-backend merge' and draw a refusal quoting a read site that does not exist (C9's dead-knob doctrine, generalized past SMART_NUMS)",
+          "status_timeout" not in R._KNOWN_BE_KEYS
+          and not any(str(k).endswith(".status_timeout") for k, _w in _pr415),
+          "in_keys=%s probs=%s" % ("status_timeout" in R._KNOWN_BE_KEYS, repr(_pr415)[:110]))
+
+    # F-7: the falsy/negative law extends to the doors that share its family
+    _p715 = R.Pool([R.Backend("B715", "http://127.0.0.1:9", cfg={"max_inflight": -1})], {})
+    _pr715 = R.validate_cfg({"max_body_mb": 0, "connect_timeout": -1.0,
+                             "read_timeout": -1.0, "down_backoff": 0}, _p715, strict=False)
+    _n715 = [str(k) for k, _w in _pr715]
+    check("S15/F-7: the falsy/negative law the status_interval door codified covers its siblings -- max_body_mb=0 (`or 512`), down_backoff=0 (`or 20.0`), negative connect_timeout (its ValueError lands on a healthy box's failure ledger via _proxy's catch -- rule-4 laundering), negative read_timeout (settimeout(-1) is swallowed by open_connection's except-pass: parked streams die at connect_timeout under the never-cut README section), negative per-backend max_inflight (silently UNLIMITED) -- all refuse boot BY NAME",
+          any("max_body_mb" in k for k in _n715) and any("connect_timeout" in k for k in _n715)
+          and any("read_timeout" in k for k in _n715) and any("down_backoff" in k for k in _n715)
+          and any(k.endswith(".max_inflight") for k in _n715),
+          repr(_n715))
+
+    # F-9: the evidence snapshot is a snapshot
+    _s915 = R.Pool([_ube15("SA15")], {"smart": {"smart_shadow": True}})
+    _c915 = {"cycle": 1, "samples": 5, "resolved": 5, "loss": 0, "unresolved": 0}
+    _s915._shadow_done.append(_c915)
+    _o915 = _s915.status()
+    if _o915.get("shadow_cycles"):
+        _o915["shadow_cycles"][0]["resolved"] += 100
+    check("S15/F-9: status()'s evidence snapshot is a snapshot -- json.dumps reads those dicts AFTER the locks release, so the rows handed out may not be the live cycle objects the settle path mutates (F5's snapshot-under-its-own-lock is half-true while the snapshot shares mutable rows)",
+          _c915["resolved"] == 5,
+          "live row resolved=%s" % _c915["resolved"],)
+
+    # F-10: homecoming's put re-asks BOTH seats the pre-check stands down for
+    _hb15 = _ube15("HB15"); _hb15.sm["empty_streak"] = 2; _hb15.sm["feed_blind"] = False
+    _cb15 = _ube15("CB15", serving=1.0)
+    _hp15 = R.Pool([_hb15, _cb15], {"smart": {"smart_homecoming": True}})
+    _hp15._exiled["la15"] = "HB15"
+    _hp15._affinity_put("la15", "CB15", "sticky")
+    def _sa15():
+        _hp15._affinity_put("la15", "HA15", "transient")   # homes mid-window
+        return 5.0
+    _hb15._stale_after = _sa15                             # fires in the re-ask window
+    _hp15._homecoming("la15", _cb15, _hp15._lane_touch("la15"))
+    with _hp15.lock:
+        _o1015 = _hp15.affinity.get("la15")
+    check("S15/F-10: homecoming's put-time re-ask covers BOTH seats it stands down for at the pre-check -- a transient landing inside the decision window (transient homes belong to the MOVER, the docstring's own law) is not re-keyed to smart: nobody may steal a lane's cooldown currency (tau_pp_transient -> tau_pp_move) in a race",
+          bool(_o1015) and _o1015[2] == "transient" and _hp15.metrics["homecomings"] == 0,
+          "seat=%s hc=%s" % (_o1015 and _o1015[2:], _hp15.metrics["homecomings"]))
+
+    # F-5/F-6/F-8: the doc's law sentences tell the truth
+    _rd15 = open(os.path.join(os.path.dirname(ROUTER), "README.md"), encoding="utf-8").read()
+    _fl15 = " ".join(_rd15.split())        # line-wrap must not hide prose from text locks
+    _i15 = _rd15.find("every knob, one table")   # the heading, not its mentions
+    _ld15 = _rd15[_i15:][:5500]
+    check("S15/F-5: the ladder intro's number law names its own exception -- 'finite and > 0' while shipped k_eps is 0 BY DESIGN (the tolerance knob; the validator checks it >= 0 only)",
+          "k_eps" in _ld15[:900] or "tolerance" in _ld15[:900],
+          _ld15[:120].replace("\n", " "))
+    check("S15/F-6: the pin down-cooldown caution describes a shape the code allows -- try_place REFUSES a pin inside the cooldown (trial_open or monotonic() < down_until); the trial is consumed by a pin whose box's backoff has EXPIRED, not by one 'in its down-cooldown'",
+          "in its down-cooldown may consume" not in _fl15, "")
+    check("S15/F-8: the S-1 boot law (smart_place/smart_move refuse boot unless EVERY box declares max_inflight) is disclosed where operators read the ladder's boot laws, not only inside the validator",
+          "max_inflight" in _ld15[:900], "")
 
     print("")
     if FAKE_ERRORS:

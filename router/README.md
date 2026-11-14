@@ -126,7 +126,7 @@ Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
 | `--set-key ID` | — | — | Hidden prompt, DPAPI-stores that box's key, exits. |
 | `--probe` | — | — | Verdict table per box, exits. |
 | `--version` | — | — | Prints the version, exits. |
-| `--sticky-ttl SEC` | `sticky_ttl` | `21600` | How long a lane's pin survives before re-placement. |
+| `--sticky-ttl SEC` | `sticky_ttl` | `21600` | How long a lane's pin survives before re-placement (`0` = lanes never idle-time out). |
 | `--connect-timeout SEC` | `connect_timeout` | `5.0` | Time to get a TCP connection to a box. |
 | `--read-timeout SEC` | `read_timeout` | `3600.0` (`0` = never) | Cap on waiting for response bytes; `0` never times out a request parked in a queue. |
 | `--max-connect-failures N` | `max_connect_failures` | `3` | Connect failures that park a box (busy never counts). |
@@ -340,9 +340,15 @@ The pin overrides affinity, tier and `max_inflight` -- but **not** `require_idle
 Borrowing a peer's box still requires that box to be verifiably idle; the peer's
 courtesy is not the operator's to waive. Pinning also cancels that lane's
 in-flight provisional re-homes: you took manual control, a late first byte
-from an older overflow will not move the lane back. (Pinning a box that is in
-its down-cooldown may consume its single half-open recovery trial -- pin it
-while it is UP, or let the poller recover it first.)
+from an older overflow will not move the lane back -- and since DV-fix5 the
+law lives at the seat-write itself, so it holds whichever of the two landed
+first (the refused re-home says so in the log; its request stays booked).
+And the consequence at the seat: a lane pinned to a home that is full never
+re-homes itself -- every later turn pays the honest overflow round-trip
+(the `overflow` counters count each one) while the seat stays yours for good.
+(Pinning a box whose down-backoff has JUST EXPIRED consumes its single
+half-open recovery trial -- the pinned request IS the trial; inside the
+cooldown the pin is refused outright and the trial stays untouched.)
 
 ## Tiered placement: local first, the peer only when it is verifiably idle
 
@@ -634,8 +640,13 @@ The ladder lives under the `smart` object in `router.json` (no CLI flags);
 empty or absent means every rung is off and the router is v1.2.17 behavior
 byte-for-byte. Unknown knobs inside `smart` warn and are ignored -- they are
 never silently trusted as something else. Every number knob must be finite
-and `> 0` (a throttle cannot be zero-disabled, only made small), and tick
-counters refuse fractions by name. `router.remote.example.json` ships
+and `> 0` (a throttle cannot be zero-disabled, only made small) -- `k_eps`
+is the one named exception: it is a tolerance, and `0` (exact ties only) is
+its shipped default. Tick counters refuse fractions by name. One boot law
+reaches outside the block: with `smart_place` or `smart_move` on, EVERY box
+must declare `max_inflight` (S-1 -- J's capacity term divides by it; an
+undeclared cap would make "infinite capacity" an unexamined default), and
+boot refuses by name. `router.remote.example.json` ships
 the full block with shipped defaults so an operator can lift it wholesale.
 
 | Knob | Default | What it governs |

@@ -1034,11 +1034,10 @@ class Pool:
             with self.lock:
                 self.metrics["move_gate_locked"] += 1
             return
-        if not self._affinity_put_smart(affinity_key, tgt.id):
-            LOG.info("MOVE skipped: lane %s pinned during the decision window (V3-07 wins at the put -- seat and counters untouched)",
+        if not self._affinity_put_smart(affinity_key, tgt.id, st, now):
+            LOG.info("MOVE skipped: lane %s pinned, or stamped a move/homecoming inside tau, during the decision window (V3-07 and the lane clock win AT THE PUT -- seat and counters untouched)",
                      short(affinity_key))
             return
-        st["last_move"] = now
         with self.lock:
             self.metrics["moves"] += 1
         LOG.info("MOVE lane %s %s -> %s (streak=%d R_hat=%.1f J_home=%.1fs J_tgt=%.1fs)",
@@ -1052,9 +1051,18 @@ class Pool:
         OFF: nobody records what nobody will read."""
         if not self.smart_homecoming:
             return
-        self._exiled[key] = old_home_id
-        while len(self._exiled) > 4096:
-            self._exiled.pop(next(iter(self._exiled)))
+        # F-3 (DV-R3): ONE locked region, crash-proof eviction. _homecoming
+        # has always popped this table under pool.lock while both writers ran
+        # bare -- two threads evicting at the 4096 cap could race next(iter())
+        # against each other's pop, and the loser's KeyError thrown from
+        # overflow_commit runs BEFORE send_response: it resets a connection
+        # whose box HAD answered. Inside the region the eviction is atomic;
+        # the default is belt-and-braces (_exiled is a plain dict -- its
+        # popitem takes no `last=`, the probe caught my first draft there).
+        with self.lock:
+            self._exiled[key] = old_home_id
+            while len(self._exiled) > 4096:
+                self._exiled.pop(next(iter(self._exiled)), None)
 
     def _homecoming(self, affinity_key, home, st):
         """L6: bring an exiled lane home when home is PROVABLY empty -- the
@@ -1096,12 +1104,21 @@ class Pool:
         # of one freed box ALL passed the check before ANYONE stamped, and
         # the README's "ONE lane per window, never its queue" -- the very
         # law the storm columns rest on -- was advertised but never booked.
-        _hc_pin, _hc_ok = False, False
+        _hc_seat, _hc_ok = False, False
         _box_s = float(self.sm_cfg.get("homecoming_box_s") or 120.0)
+        _tau_hc = float(self.sm_cfg.get("tau_pp_homecoming") or 900.0)
         with self.lock:
             _hit = self.affinity.get(affinity_key)
-            if _hit is not None and len(_hit) > 2 and _hit[2] == "pin":
-                _hc_pin = True
+            _cur = _hit[2] if _hit is not None and len(_hit) > 2 else ""
+            if _cur in ("pin", "transient"):
+                _hc_seat = _cur    # F-10 (DV-R3): re-ask BOTH seats the
+                # pre-check stands down for -- a transient that landed mid-
+                # window is the MOVER's home, and re-keying it to smart in a
+                # race steals the lane's cooldown currency unasked.
+            elif now - st["last_move"] < _tau_hc:
+                pass               # F-2: a same-lane move/homecoming stamped
+                # during the decision window -- the lane clock, like the box
+                # throttle, is law inside THIS region, not before it.
             elif now - self._box_hc.get(old_id, 0.0) < _box_s:
                 pass          # another lane took this box's window -- next turn
             else:
@@ -1109,13 +1126,14 @@ class Pool:
                 self._box_hc[old_id] = now
                 self._exiled.pop(affinity_key, None)
                 self.metrics["homecomings"] += 1
+                st["last_move"] = now     # F-2: the stamp joins the region
                 _hc_ok = True
-        if _hc_pin:
-            LOG.info("HOMECOMING skipped: lane %s pinned during the decision window (V3-07 wins at the put)", short(affinity_key))
+        if _hc_seat:
+            LOG.info("HOMECOMING skipped: lane %s seat claimed by %s during the decision window (V3-07 wins at the put; transient homes belong to the mover)",
+                     short(affinity_key), _hc_seat)
             return False
         if not _hc_ok:
             return False
-        st["last_move"] = now
         LOG.info("HOMECOMING lane %s %s -> %s (home verifiably empty x%d fresh)",
                  short(affinity_key), home.id, old_id, old.sm.get("empty_streak", 0))
         return True
@@ -1157,8 +1175,16 @@ class Pool:
         # what it is -- a commit-then-migrate transient home, auditable in the
         # origin column and coolable/movable on its own tau_pp key. The
         # settlement itself is the existing commit exit: zero new terminal.
-        self._affinity_put(affinity_key, pend[2], "transient" if self.smart_transient else "sticky")
-        self._exile_note(affinity_key, pend[1])   # L6 remembers where it came from
+        # F-1 (DV-R3): the commit door respects an operator seat that landed
+        # after the token popped (the README's law holds in BOTH orderings),
+        # and exiles only when the re-home really happened -- a move that did
+        # not happen leaves no trail. The booking above stands: the answered
+        # request settled as itself; only the seat is refused.
+        if self._affinity_put(affinity_key, pend[2], "transient" if self.smart_transient else "sticky"):
+            self._exile_note(affinity_key, pend[1])   # L6 remembers where it came from
+        else:
+            LOG.info("overflow commit: lane %s keeps its operator pin -- the late first byte will not move a pinned lane back; the answered request stays booked",
+                     short(affinity_key))
 
     def overflow_rollback(self, affinity_key, token, failed_id, body_len):
         """The overflow target died BEFORE a single request byte was sent --
@@ -1308,25 +1334,55 @@ class Pool:
         # silent "sticky" that quietly makes an operator pin movable.
         # explicit None check: `or 20000` silently turned a configured 0 into
         # 20000 and a negative cap into "empty the table on every write"
-        # (R4-A/F7); validate_cfg rejects non-positive caps at boot now
+        # (R4-A/F7); validate_cfg rejects non-positive caps at boot now.
+        #
+        # F-1 (DV-R3): V3-07 lives HERE, not at any one door. The table has
+        # several non-pin writers -- overflow commit, migration, fresh
+        # placement, last-resort queue, and every future one -- and DV-fix4
+        # guarded only the mover's put. A pin landing inside any other
+        # door's window was still silently clobbered. Now ANY non-pin write
+        # that meets an operator seat at the lock REFUSES (returns False,
+        # writes nothing): callers keep their bookings (the request settled
+        # as it settled, the identity stays closed) and say the skip out
+        # loud. Pin writes stay legal by definition.
         with self.lock:
+            if origin != "pin":
+                _seat = self.affinity.get(key)
+                if _seat is not None and len(_seat) > 2 and _seat[2] == "pin":
+                    return False
             self._affinity_write_locked(key, backend_id, origin)
+        return True
 
-    def _affinity_put_smart(self, key, backend_id):
-        """F-B (V3-07 AT THE PUT): the mover checked the operator's seat at
-        DECISION time and wrote it UNCHECKED -- with the release gate's lock
-        queue in between, a pin landing inside that window was clobbered to
-        origin=smart, making an operator's seat movable FOREVER (one silent
-        overwrite, lifetime effect; invisible in /stats). The guard must live
-        where the write lives: same lock, re-asked first. Returns False and
-        writes NOTHING when a pin holds the seat -- the caller must then book
-        nothing at all (no moves, no stamp): a move that did not happen
-        may not even be counted."""
+    def _affinity_put_smart(self, key, backend_id, _st=None, _now=0.0):
+        """F-B (V3-07 AT THE PUT) + F-2 (DV-R3, the lane clock's turn).
+
+        The guard lives where the write lives: same lock, re-asked first.
+        Returns False and writes NOTHING when a pin holds the seat -- the
+        caller must then book nothing at all (no moves, no stamp): a move
+        that did not happen may not even be counted.
+
+        With st/now given, the per-LANE tau law joins the same region:
+        re-ask the cooldown, write, stamp -- atomically. Two concurrent
+        same-lane turns (the README's own expected overlap: an SDK retry
+        while the turn is in flight) used to both pass the pre-lock tau
+        read and double-move inside tau_pp, exactly the shape F-C fixed
+        at the BOX throttle with the lane clock left as its unguarded
+        twin. The cooldown currency is read from the CURRENT seat, not
+        the decision-time one (finding C: a seat that changed during the
+        decision window gets the cooldown it actually owes)."""
         with self.lock:
             hit = self.affinity.get(key)
             if hit is not None and len(hit) > 2 and hit[2] == "pin":
                 return False
+            if _st is not None:
+                _cur = hit[2] if hit is not None and len(hit) > 2 else "sticky"
+                _tau = float(self.sm_cfg.get("tau_pp_transient" if _cur == "transient"
+                                             else "tau_pp_move") or 900.0)
+                if _now - _st.get("last_move", 0.0) < _tau:
+                    return False
             self._affinity_write_locked(key, backend_id, "smart")
+            if _st is not None:
+                _st["last_move"] = _now
         return True
 
     def _affinity_drop_backend(self, backend_id):
@@ -1532,8 +1588,15 @@ class Pool:
                         "affinity %s migrating %s -> %s (dropped %d keys); one cold prompt re-read expected",
                         short(affinity_key), home.id, alt.id, dropped,
                     )
-                    self._affinity_put(affinity_key, alt.id, "sticky")
-                    self._exile_note(affinity_key, home.id)   # L6 remembers where it came from
+                    if self._affinity_put(affinity_key, alt.id, "sticky"):
+                        self._exile_note(affinity_key, home.id)   # L6 remembers where it came from
+                    else:
+                        # F-1 (DV-R3): the dead home's keys are gone, but a
+                        # pin to a LIVE box that landed mid-migration is not
+                        # migration's to overwrite; the migrated turn stays
+                        # booked (identity), the seat is the operator's.
+                        LOG.info("migration: lane %s keeps the operator pin that landed mid-migration",
+                                 short(affinity_key))
                 return alt, "migrated", True, None
         else:
             # New conversation: put it on the shallowest ACCEPTING queue and
@@ -1546,8 +1609,11 @@ class Pool:
                 if reserved:
                     self._note_gate_bypass(alt)
             if alt is not None and reserved:
-                if affinity_key and not _pv:
-                    self._affinity_put(affinity_key, alt.id, "sticky")
+                if affinity_key and not _pv and not self._affinity_put(affinity_key, alt.id, "sticky"):
+                    # F-1 (DV-R3): a pin that landed while this placement was
+                    # in flight wins the seat; the served turn stays booked.
+                    LOG.info("placement: lane %s keeps the operator pin that landed mid-placement",
+                             short(affinity_key))
                 with self.lock:
                     if _pv:
                         self.metrics["preview_passes"] += 1
@@ -1589,8 +1655,10 @@ class Pool:
                         self.metrics["preview_passes"] += 1
                     else:
                         self.metrics["passthrough_gets" if passthrough else "new_placements"] += 1
-                if affinity_key and not _pv:
-                    self._affinity_put(affinity_key, be.id, "sticky")   # "placed" means homed
+                if affinity_key and not _pv and not self._affinity_put(affinity_key, be.id, "sticky"):   # "placed" means homed
+                    # F-1 (DV-R3): same law at the last-resort door
+                    LOG.info("last-resort queue: lane %s keeps the operator pin that landed mid-race",
+                             short(affinity_key))
                 LOG.info("new placement found every gate closed mid-race; queued at live %s", be.id)
                 return be, "placed", True, None
         with self.lock:
@@ -1667,7 +1735,13 @@ class Pool:
             # whether smart_move may ship reads THIS, not a log grep
             out["release_gate_open"] = self._release_gate_open()
             with self._shadow_lock:               # snapshot the evidence table under its own lock (F5)
-                out["shadow_cycles"] = list(self._shadow_done)[-4:]
+                # F-9 (DV-R3): the ROWS too -- json.dumps reads these dicts
+                # AFTER the locks release, and the cycle objects in
+                # _shadow_done are the same ones the roll/settle paths still
+                # touch (a roll archives the dict and then settles its
+                # leftover samples into it). A snapshot sharing mutable rows
+                # is only half a snapshot.
+                out["shadow_cycles"] = [dict(c) for c in list(self._shadow_done)[-4:]]
             return out
 
 
@@ -3657,8 +3731,13 @@ _NUM_CFG = {
 _KNOWN_BE_KEYS = {"id", "url", "path_prefix", "priority", "max_inflight",
                   "require_idle", "backend_api_key", "backend_api_key_env", "probe_model",
                   # these are READ from the per-backend merge -- listing them
-                  # keeps the "IGNORED" warning honest about what actually applies
-                  "tls_insecure", "status_interval", "status_timeout"}
+                  # keeps the "IGNORED" warning honest about what actually
+                  # applies. status_timeout was KILLED here (DV-R3 F-4/B):
+                  # its only read site is the poller's GLOBAL cfg -- a door
+                  # that validates a knob no per-backend read obeys lends it
+                  # false authority; the honest shape is the IGNORED warning
+                  # (C9's dead-knob doctrine, generalized past SMART_NUMS).
+                  "tls_insecure", "status_interval"}
 
 
 def validate_cfg(cfg, pool, strict=True):
@@ -3688,10 +3767,25 @@ def validate_cfg(cfg, pool, strict=True):
         if _fv != _fv or _fv in (float("inf"), float("-inf")):
             problems.append((k, "must be finite, got %r" % (v,)))
             continue
-        if k in ("status_interval", "status_timeout") and _fv <= 0:
-            # F-A twin of the per-backend door: the read sites `or`-default
-            # these, so 0 is a value the operator wrote but nobody obeys.
+        if k in ("status_interval", "status_timeout", "connect_timeout",
+                 "down_backoff", "max_body_mb") and _fv <= 0:
+            # F-A twin of the per-backend door + F-7 (DV-R3) siblings: the
+            # read sites `or`-default these (max_body_mb `or 512`,
+            # down_backoff `or 20.0`), so 0 is a value the operator wrote
+            # and nobody obeys; and a negative connect_timeout raises
+            # ValueError from create_connection -- _proxy's ValueError catch
+            # then CHARGES IT TO A HEALTHY BOX, and after
+            # max_connect_failures of the operator's own typos a good box
+            # is ejected (rule-4 laundering). ONE law, named at boot.
             problems.append((k, "must be > 0 -- the read site's `or` would silently re-default it (%r is not what you wrote)" % (v,)))
+            continue
+        if k == "read_timeout" and _fv < 0:
+            # F-7: 0 is the DOCUMENTED never-time-out mode; negative is not
+            # it -- sock.settimeout(-1) raises INSIDE open_connection's
+            # except-pass, so every parked stream silently keeps
+            # connect_timeout, under the README section that promises parked
+            # streams are never cut. Refuse by name.
+            problems.append((k, "must be >= 0 (0 = the documented never-time-out mode), got %r" % (v,)))
             continue
         try:
             cast(v)
@@ -3715,13 +3809,20 @@ def validate_cfg(cfg, pool, strict=True):
         raw = b.cfg.get("max_inflight")
         if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int)):
             problems.append((b.id + ".max_inflight", "must be a JSON integer, got %r" % (raw,)))
+        elif raw is not None and isinstance(raw, int) and raw < 0:
+            # F-7 (DV-R3): Backend.__init__ turns ANY negative into None =
+            # UNLIMITED capacity, silently -- the opposite of a typo'd -1.
+            # (0 stays legal: accept-no-new-work, the drain shape.)
+            problems.append((b.id + ".max_inflight",
+                             "negative max_inflight silently means UNLIMITED -- omit the key if that is what you mean, got %r" % (raw,)))
         raw = b.cfg.get("require_idle")
         if raw is not None and not isinstance(raw, bool):
             problems.append((b.id + ".require_idle",
                              "must be true/false (a JSON boolean), got %r -- the string \"false\" is truthy" % (raw,)))
-        for nk in ("status_interval", "status_timeout"):
-            # these ARE read per-backend (staleness window, poll timeout) --
-            # a string here would crash inside try_place/stats after boot
+        for nk in ("status_interval",):
+            # status_interval IS read per-backend (_stale_after) -- a string
+            # here would crash inside stats after boot. status_timeout was
+            # dropped from this door with its _KNOWN_BE_KEYS entry (DV-R3).
             raw = b.cfg.get(nk)
             if raw is None:
                 continue
