@@ -295,7 +295,9 @@ With `smart.smart_preview` on, a `/v1/messages/count_tokens` preview still
 answers from a real box and reports one of those same words byte-for-byte --
 but a preview is not a conversation turn: it never writes the lane's home,
 never overflows or re-homes it, and it books the `preview_passes` terminal
-instead of `sticky_hits`/`new_placements`/`migrations`. With the flag off a
+instead of `sticky_hits`/`new_placements`/`migrations` (routing through an
+already-existing home does restamp its idle clock -- a warm seat, not a new
+one). With the flag off a
 preview behaves exactly as it always has; `x-strata-pin` on a preview is an
 operator command and keeps the full pin behavior WHEN THE PINNED BOX
 ACCEPTS IT (a pin hit writes the lane's home, origin `pin`, like any pin).
@@ -563,9 +565,13 @@ never appear in argv, in any log line, or in `/__router/stats` (which reports
 only `has_api_key`).
 
 **Facts a monitor must not guess (v1.2.14).** The top-level block carries
-`status_interval` (the interval actually in use -- the courtesy blind-window
-base, so a dashboard never hardcodes a wrong one), and `started_at` /
-`uptime_s` (a restart is a fact now, not an inference from counter rollback).
+`status_interval` (the poll cadence actually in use -- it is GLOBAL: a
+per-backend `status_interval` widens only that box's freshness WINDOW,
+`max(3 x that box's interval, 5s)`, and `/stats` publishes no per-box window,
+so for an overridden box do NOT treat this number as a blind-window base
+(R6a-F3); for boxes without the override it is exactly that base), and
+`started_at` / `uptime_s` (a restart is a fact now, not an inference from
+counter rollback).
 Per box, presence-gated extras ride along WHEN the box publishes them (never
 fabricated zeros): `reported.decode_tok_s` -- the box's own measured generation
 speed (Strata's `predicted_per_second` for the last finished request, the
@@ -642,7 +648,12 @@ exhausting its threads -- and since v1.2.11 even that is COUNTED
 `requests` minus the sum of the terminal counters, and any leftover -- whoever
 made it -- is the alarm. Since v1.2.16 keyless GET/HEAD proxies
 (monitor probes at `/v1/models` and friends) book their own terminal
-`passthrough_gets` -- `new_placements` counts real new conversations only.
+`passthrough_gets` -- `new_placements` counts real new conversations only,
+where "only" is precise about its carve-out: a keyless EMPTY POST is not a
+monitor (R6a-F1: a scanner's `POST /v1/messages` with no body and no affinity
+channel still gets a real box and books here -- the carve-out is GET/HEAD
+because a POST claims conversation intent even with an empty body, so read
+this counter as "conversations and conversation-wannabes").
 And since `smart.smart_preview`, the sum has a twelfth term, `preview_passes`
 -- a preview answers from a real box and pays its own terminal instead of
 placing; the counter stays zero while the flag sleeps, so the formula's shape
@@ -669,7 +680,7 @@ the full block with shipped defaults so an operator can lift it wholesale.
 | `smart_cap_read` | `false` | Read `cap_slots` from the box status feed (single definition of "full"); no feed value falls back to config. |
 | `smart_shadow` | `false` | Measure the J currency (`R̂×Ŵ + Ĉ + X`) and roll the shadow cycles that feed the release gate. Decisions unchanged. |
 | `smart_place` | `false` | J walks INSIDE the placement tier (ties still fall to `load_score`'s jitter floor; a `None` anywhere degrades the whole round to today's walk). Alone it speaks J on the FLOOR R̂: per-lane state is born only where lanes are READ -- the sticky branch under `smart_shadow`/`smart_move`/`smart_homecoming` -- never by placement or OBS alone. With J ON the placement face admits HEALTHY boxes only: a SUSPECT box keeps its seat in the drain/last-resort tail (`begin()` stays legal) but takes no FIRST visit while any HEALTHY box stands in the round; an all-SUSPECT round degrades to today's walk and serves normally -- SUSPECT means unproven, not dead. |
-| `smart_preview` | `false` | `count_tokens` previews answer from a real box but book `preview_passes` -- no home written, no overflow, no exile, no lane roll. |
+| `smart_preview` | `false` | `count_tokens` previews answer from a real box but book `preview_passes` -- no home written, no overflow, no exile, no lane roll. One touch IS disclosed (R6a-F4): routing through an EXISTING home restamps its idle-TTL clock like any routed read, so with a small `sticky_ttl` a previews-only lane keeps its seat warm. |
 | `smart_move` | `false` | The §4 mover (own-signal congestion + net inequality + un-ticked hard-gate probe), behind the release gate and per-lane cooldown. It moves WITHIN the home's tier -- crossing tiers stays the operator's ladder (`priority`, `x-strata-pin`). Its evidence is accrued ONLY while `smart_shadow` is lit: move-alone stands at a gate that can never open, and says so (`move_gate_locked` counts every moved-worthy denial it never got to make). |
 | `smart_transient` | `false` | An answered overflow re-homes as `origin="transient"` (admitted, movable) instead of a permanent sticky home. |
 | `smart_homecoming` | `false` | The §5 way home: an exiled lane walks back only after home proves itself verifiably empty on TWO consecutive fresh polls -- and the door RE-ASKS, live at the turn itself, that home is still healthy on a still-fresh feed (a frozen last-word "fresh" from a dead poller opens nothing). |
@@ -700,7 +711,10 @@ never silent. Every surface books it: a sticky turn's deferred shadow/move/
 homecoming work, the poller's ledger roll, and a box's per-poll smart tick
 (the poller-side catches once logged a WARNING or a per-box status string the
 next successful poll overwrote, while the panel stayed frozen at its old
-number).
+number). The three surfaces share ONE 60-second log budget (R6a-F2: the roll
+catch used to log every failing cycle -- the law reached the counter for all
+three before it reached the limiter for the third); the counter itself never
+waits for the limiter.
 
 ## Limits
 
@@ -726,9 +740,14 @@ number).
   one real exception to "the seat frees itself" -- it stays inside the
   localhost-trust model; the deployment answer is the same as for every other
   local-port tool, don't run hostile locals.
-* A **lying backend can truncate a relayed stream silently**: `content-length`
-  is forwarded as-is (byte passthrough), so a box that lies about its body
-  length hands the caller a well-formed short turn. The two boxes are trusted
+* A **lying backend can truncate a relayed stream silently** -- and the
+  mechanism is MORE silent than "byte passthrough" would suggest (R6b-P3):
+  the relay DROPS `content-length` on every response and re-frames HTTP/1.1
+  callers as chunked, so a box that promises 2 MB, sends 0, and closes gets
+  its short turn relayed with a clean chunk terminator -- completeness
+  FORGED, undetectable even as an `IncompleteRead`. (A truly-chunked box
+  that dies mid-stream is not laundered: the caller sees the unterminated
+  stream.) The two boxes are trusted
   principals here -- yours and your friend's -- same class as trusting them
   with your prompts.
 * One Python process, two threads per in-flight stream (relay + the 0.5 s
@@ -778,7 +797,7 @@ number).
 ## Tests
 
 ```powershell
-python smoke_test.py     # 405 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 414 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -854,7 +873,13 @@ untouched siblings byte-faithful.
 The adversarial stress round (v1.2.12) adds the protocol edges that review walked:
 an absolute-form request target dies at a named 400 (never relayed into the
 box's request line); the rebinding 403 must REACH a 2 MB sender (the refusal
-survives a timed graceful drain instead of being eaten by a Windows RST);
+survives a timed graceful drain instead of being eaten by a Windows RST) --
+and since R6b-FR-1 that drain law is UNIFORM: every capacity/protocol
+refusal at the body reader (the 413s, the bad-framing 400s) is written only
+after a timed discard of the bytes already queued, because closing on an
+unread body RST-flushes them on this platform and the caller learns nothing;
+a probe that reads IMMEDIATELY will systematically miss this bug class --
+delay the read before trusting the door;
 the chunked reader refuses an empty size line, a missing CRLF terminator and
 a 65-line trailer flood -- each by name -- and a chunked `HEAD` closes the
 connection rather than letting the leftovers become a second request;

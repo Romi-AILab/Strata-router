@@ -4777,6 +4777,102 @@ def main():
           _p19.metrics["smart_decision_errors"] - _m19 >= 1,
           "delta=%s" % (_p19.metrics["smart_decision_errors"] - _m19,))
 
+    # ---- S18 (DV-R6): the v1.2.12 drain law reaches the capacity/protocol
+    # doors (R6b-FR-1, P2); the ledger-roll WARNING shares the shared limiter
+    # (R6a-F2); four README sentences were made true (R6a-F1/F3/F4, R6b-P3).
+    # RED witnesses against clean f9ed0c4 (pre-fix tree, verified clean):
+    # delayed-reader live rig -- named 413 arrived 0/10 (WinError 10053 aborts,
+    # the rebinding control 10/10) [fr1_adjudicate_f9ed0c4.log]; roll WARNING
+    # unlimited -- 2 in 5s [r6_adjudicate2 run]. The lesson the behavioral
+    # face handed the program: an IMMEDIATE reader hides this whole bug class,
+    # so every refusal lock below DELAYS the read.
+    import socket as _sk18
+    with open("s18_drain_probe.json", "w") as _ff18:
+        json.dump({"listen": "127.0.0.1", "port": 9162, "status_interval": 0.5,
+                   "max_body_mb": 1,
+                   "backends": [{"id": "s18a", "url": "http://127.0.0.1:1"}]}, _ff18)
+    _proc18 = subprocess.Popen([sys.executable, ROUTER, "--config", "s18_drain_probe.json",
+                                "--log-level", "WARNING"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def _raw_refuse18(host_hdr, delay=0.3):
+        # raw send 1.2 MB, sit on our hands, THEN read: pre-fix, Windows
+        # RST-flushes the refusal on close-with-unread-body
+        try:
+            _s18 = _sk18.create_connection(("127.0.0.1", 9162), timeout=5)
+            _bd = b"x" * 1_200_000
+            _s18.sendall(("POST /v1/messages HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n"
+                          "Content-Type: application/json\r\n\r\n" % (host_hdr, len(_bd))).encode() + _bd)
+            time.sleep(delay)
+            _dt = b""
+            try:
+                while len(_dt) < 4096:
+                    _c18 = _s18.recv(65536)
+                    if not _c18:
+                        break
+                    _dt += _c18
+            except OSError:
+                pass    # reset/abort arrives IN PLACE of the refusal -- that IS the pre-fix shape
+            _s18.close()
+            return _dt
+        except OSError:
+            return b""
+    try:
+        _up18 = wait_for(lambda: get(9162, "/healthz")[0] == 200, 25)
+        _d18 = _raw_refuse18("127.0.0.1:9162") if _up18 else b""
+        check("S18/FR-1: the NAMED 413 reaches a reader who delayed 0.3s (the capacity door now drains before refusing; pre-fix this was 0/10 named -- the refusal was RST-eaten on our own platform)",
+              b"413" in _d18 and b"max_body_mb" in _d18, repr(_d18[:60]))
+        _d18c = _raw_refuse18("example.com") if _up18 else b""
+        check("S18/FR-1 control: the rebinding 403 still reaches the SAME delayed reader (the door the law always lived at -- proves the rig measures the refusal, not the luck)",
+              b"403" in _d18c and b"rebinding" in _d18c, repr(_d18c[:60]))
+    finally:
+        _term(_proc18)
+    _w18 = []
+    class _Cap18(logging.Handler):
+        def emit(self, rec):
+            try:
+                if "shadow roll failed" in rec.getMessage():
+                    _w18.append(time.monotonic())
+            except Exception:
+                pass
+    _h18 = _Cap18()
+    _lg18 = logging.getLogger("strata-router")
+    _lg18.addHandler(_h18)
+    try:
+        _c18b = _base16(status_interval=0.2, smart={"smart_shadow": True})
+        _p18b = R.make_pool(_c18b)
+        def _boom18b(*a, **k):
+            raise RuntimeError("poison roll (S18/F-2)")
+        _p18b._shadow_roll = _boom18b
+        _m18b = _p18b.metrics["smart_decision_errors"]
+        _pol18 = R.StatusPoller(_p18b, _c18b)
+        _pol18.start()
+        # the poll cycle measures ~2.5-3s here (status polls + wait); WAIT for a
+        # second booking instead of fixed-sleeping (rig lesson, DV-fix8 run 1:
+        # a 3s window saw ONE cycle and could not witness "every cycle"). The
+        # window stays far under the 60s limiter, so the warning cap holds.
+        _ok18c = wait_for(lambda: _p18b.metrics["smart_decision_errors"] - _m18b >= 2, 25)
+        _pol18.stop_evt.set()
+        _pol18.join(5)
+    finally:
+        _lg18.removeHandler(_h18)
+    _d18b = _p18b.metrics["smart_decision_errors"] - _m18b
+    check("S18/F-2: a ledger roll that fails every cycle books the counter EVERY cycle (the limiter must never gate the witness)",
+          _d18b >= 2, "delta=%s" % _d18b)
+    check("S18/F-2: but the WARNING now shares the 60s limiter with sticky/tick -- a fail-every-cycle storm logged at most ONE WARNING in the window (pre-fix: one per cycle; the README's sentence was false for this door)",
+          len(_w18) <= 1, "warnings=%d" % len(_w18))
+    check("S18/F-1: the counter guide names the keyless-EMPTY-POST exception (the bare 'only' was falsifiable by a scanner's bodyless POST)",
+          "a keyless EMPTY POST is not a monitor" in _fl15)
+    check("S18/F-3: the v1.2.14 block tells the truth (top-level number = global cadence; an overridden box must NOT use it as the blind-window base) and the old never-hardcodes lie is gone",
+          "do NOT treat this number as a blind-window base" in _fl15
+          and "never hardcodes a wrong one" not in _fl15)
+    check("S18/F-4: the preview row discloses the idle-clock restamp (a warm seat, not a new home)",
+          "restamps its idle-TTL clock" in _fl15)
+    check("S18/P3: the lying-box bullet tells the real mechanism (content-length is DROPPED and HTTP/1.1 re-framed chunked -- completeness forged) and the byte-passthrough sentence is gone",
+          "is forwarded as-is (byte passthrough)" not in _fl15
+          and "re-frames HTTP/1.1 callers as chunked" in _fl15)
+    check("S18/FR-1 law: the drain law is documented as UNIFORM across capacity/protocol refusals, with the delayed-reader probe lesson",
+          "that drain law is UNIFORM" in _fl15)
+
     print("")
     if FAKE_ERRORS:
         print("FakeStrata swallowed %d handler tracebacks (last few):" % len(FAKE_ERRORS))

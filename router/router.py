@@ -1345,8 +1345,12 @@ class Pool:
                 del self.affinity[key]
                 return None
             # idle-TTL: a live conversation keeps its pin -- ttl counts idle
-            # time since the LAST turn, not since placement, so a long working
-            # night never drifts an active session onto a cold box
+            # time since the LAST ROUTED READ of this home, not since
+            # placement, so a long working night never drifts an active
+            # session onto a cold box. (R6a-F4: every routed reader restamps,
+            # and a preview routes through the home too -- with a small
+            # sticky_ttl a lane fed only by previews keeps its seat warm;
+            # the README's preview row names that.)
             self.affinity[key] = (backend_id, time.monotonic(),
                                   hit[2] if len(hit) > 2 else "sticky")
             self.affinity.move_to_end(key)
@@ -1475,6 +1479,9 @@ class Pool:
         stash, no lane roll -- it books preview_passes, its own terminal,
         instead of sticky_hits/new_placements/migrations (S7). A pin on a
         preview is an operator command and keeps today's full pin behavior.
+        It DOES route through an existing home, and like every routed reader
+        that restamps the home row's idle clock (R6a-F4): previews keep a
+        seat warm without claiming a turn.
         """
         with self.lock:
             self.metrics["requests"] += 1
@@ -2141,9 +2148,21 @@ class StatusPoller(threading.Thread):
                     # an operator watching smart_decision_errors through a
                     # persistent ledger failure saw a frozen number. Book the
                     # witness (the sticky branch's swallow books its own).
+                    # R6a-F2: but the WARNING was UNLIMITED -- a persistent
+                    # roll failure fails every cycle, so the door logged every
+                    # cycle while the README (and the sticky/tick catches)
+                    # promise one named WARNING per minute. Third same-shape
+                    # finding in the witness subsystem DV-R5 just built: the
+                    # fix taught all three surfaces to BOOK, only two to
+                    # LIMIT. The limiter read/stamp lives under pool.lock like
+                    # the tick catch's; the counter stays unconditional.
                     with self.pool.lock:
                         self.pool.metrics["smart_decision_errors"] += 1
-                    LOG.warning("shadow roll failed (poller survives)", exc_info=True)
+                        _due18 = (time.monotonic() - self.pool._swallow_warn_at) >= 60.0
+                        if _due18:
+                            self.pool._swallow_warn_at = time.monotonic()
+                    if _due18:
+                        LOG.warning("shadow roll failed (poller survives)", exc_info=True)
             self.stop_evt.wait(max(0.2, float(self.cfg.get("status_interval") or 1.0)))
 
     def _poll(self, be):
@@ -2638,6 +2657,11 @@ class Handler(BaseHTTPRequestHandler):
                     # killing the handler with zero response bytes) and
                     # "0x21"/"1_0" forms. Hex digits only, or a named 400
                     # (review L2-2/M1).
+                    # FR-1: drain before refusing -- closing on an unread body
+                    # RST-flushes the sender's queued bytes on Windows and the
+                    # named 400 is never seen (the rebinding doors drain first;
+                    # this door's twin-law was missing).
+                    self._quiet_finish()
                     self._json(400, {"error": {"message": "strata-router: bad chunk framing"}})
                     self.close_connection = True
                     return None
@@ -2656,11 +2680,13 @@ class Handler(BaseHTTPRequestHandler):
                             # line at 4 KB, so the real bound is ~256 KB of
                             # trailer bytes -- lines are the unit, bytes are
                             # the ceiling (stress Q1/Q2A-6).
+                            self._quiet_finish()   # FR-1: reach the sender, don't RST it
                             self._json(400, {"error": {"message": "strata-router: too many trailer headers"}})
                             self.close_connection = True
                             return None
                     break
                 if used + n > limit:
+                    self._quiet_finish()   # FR-1: refuse OVER THE WIRE, not by RST
                     self._json(413, {"error": {"message": "strata-router: body over max_body_mb"}})
                     self.close_connection = True
                     return None
@@ -2670,6 +2696,7 @@ class Handler(BaseHTTPRequestHandler):
                     # strict CRLF: chunk data not followed by CRLF is framing
                     # the router never agreed to parse; the old blind
                     # readline(2) accepted anything (stress P1/F4)
+                    self._quiet_finish()   # FR-1: reach the sender, don't RST it
                     self._json(400, {"error": {"message": "strata-router: chunk data not terminated by CRLF"}})
                     self.close_connection = True
                     return None
@@ -2682,17 +2709,25 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("content-length") or 0)
         except ValueError:
+            self._quiet_finish()   # FR-1: framing is unparseable -- discard under deadline
             self._json(400, {"error": {"message": "strata-router: bad content-length"}})
             self.close_connection = True
             return None
         if n < 0:
+            self._quiet_finish()   # FR-1: reach the sender, don't RST it
             self._json(400, {"error": {"message": "strata-router: bad content-length"}})
             self.close_connection = True
             return None
         if n == 0:
             return b""
         if n > limit:
-            # check BEFORE reading: never buffer a body we will refuse
+            # check BEFORE reading: never BUFFER a body we will refuse -- and
+            # still let the refusal be READ: _drain_body consumes the unwanted
+            # bytes under a bounded deadline (discarding is not buffering), so
+            # the named 413 reaches the sender instead of being eaten by a
+            # Windows RST on close (R6b-FR-1: the v1.2.12 drain law lived at
+            # the rebinding doors only; the capacity doors were its twins).
+            self._drain_body()
             self._json(413, {"error": {"message": "strata-router: body over max_body_mb"}})
             self.close_connection = True
             return None
