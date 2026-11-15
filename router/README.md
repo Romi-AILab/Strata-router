@@ -75,6 +75,9 @@ request auto-loads the model and can outlast the probe's 60 s patience; run
 it once warm. The two questions `--probe` actually answers: does the
 Anthropic API live on `/v1/messages` or `/anthropic/v1/messages` (if the
 latter, add `--path-prefix /anthropic`), and which status field exposes load.
+The aggregate exit code is scriptable: `--probe` exits nonzero if any box
+answered on no Messages path -- a later healthy box never erases an earlier
+dead one.
 
 Point the boxes at each other over the tailnet: Strata binds ONE address
 (`--host`), and each side's own router reaches its local box on `127.0.0.1`,
@@ -797,7 +800,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 414 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 436 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -874,15 +877,23 @@ The adversarial stress round (v1.2.12) adds the protocol edges that review walke
 an absolute-form request target dies at a named 400 (never relayed into the
 box's request line); the rebinding 403 must REACH a 2 MB sender (the refusal
 survives a timed graceful drain instead of being eaten by a Windows RST) --
-and since R6b-FR-1 that drain law is UNIFORM: every capacity/protocol
-refusal at the body reader (the 413s, the bad-framing 400s) is written only
-after a timed discard of the bytes already queued, because closing on an
-unread body RST-flushes them on this platform and the caller learns nothing;
-a probe that reads IMMEDIATELY will systematically miss this bug class --
-delay the read before trusting the door;
+and since R6b-FR-1 that drain law is UNIFORM -- and since DV-fix9 it is
+TOTAL: every capacity/protocol refusal at the body reader (the 413s, the
+bad-framing 400s), every entry door that closes on a lying caller (the
+rebinding 403s included), every escape of the drain helper (bad, negative
+or under-declared Content-Length alike), the empty chunk-size refusal, and
+the GET/HEAD chunked close (what that branch was RST-eating was a
+SUCCESSFUL 200) -- all are written only after a timed discard of the bytes
+already queued, because closing on an unread body RST-flushes them on this
+platform and the caller learns nothing; a probe that reads IMMEDIATELY will
+systematically miss this bug class -- delay the read AND make the body big
+enough that the send is still in flight before trusting the door; a door
+that keeps the connection open drains NOTHING -- its pending bytes are a
+legitimately pipelined request;
 the chunked reader refuses an empty size line, a missing CRLF terminator and
-a 65-line trailer flood -- each by name -- and a chunked `HEAD` closes the
-connection rather than letting the leftovers become a second request;
+a 65-line trailer flood -- each by name -- and a chunked `GET`/`HEAD` drains
+under the quiet deadline before closing, so neither a refusal nor an answer
+is ever eaten;
 `Host: [::1]` parses; an HTTP/1.0 caller gets close-delimited framing (never
 chunk bytes it cannot parse); a LYING box's raw response cannot put
 `access-control-*` on the wire (stripped by name at the relay) while status

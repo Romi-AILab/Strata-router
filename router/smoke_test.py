@@ -4873,6 +4873,213 @@ def main():
     check("S18/FR-1 law: the drain law is documented as UNIFORM across capacity/protocol refusals, with the delayed-reader probe lesson",
           "that drain law is UNIFORM" in _fl15)
 
+    # ---- S19 (DV-R7 full round, first with the L2 red team): the drain law
+    # goes TOTAL. L1b-F1 (P2): three escapes of _drain_body (bad CL, negative
+    # CL, count-stop with undeclared bytes queued) returned WITHOUT discarding
+    # -- entry-door refusals were RST-eaten (adjudication measured 0/10 delayed
+    # arrival on every leaky shape, controls 10/10). N-1 (P2, L2): the GET/HEAD
+    # chunked close branch ate the SUCCESSFUL 200 (0/10 at 1.2 MB, 2/10 even
+    # immediate). R7a-F1: the empty chunk-size door was the last door DV-fix8
+    # missed. N-5 (L2 hazard catch) bounds the fix: a keep-alive door's pending
+    # bytes are a legitimately PIPELINED request -- only doors that close drain,
+    # and the two guards below pin that contract. R7a-F2/F3 + R7b-F2 + N-2 ride
+    # along. RED witnesses: r7/r7b/L2 adjudication logs vs clean 2cfa770 + the
+    # text burns (ws-v1219-DV-R9-RED-texts.log).
+    _BODY19 = b"x" * 1_200_000
+    _CHK19 = b"".join(b"10000\r\n" + b"Q" * 65536 + b"\r\n" for _ in range(18)) + b"0\r\n\r\n"
+    _CHK1K19 = b"400\r\n" + b"q" * 1024 + b"\r\n0\r\n\r\n"
+    with open("s19_drain_total.json", "w") as _ff19:
+        json.dump({"listen": "127.0.0.1", "port": 9163, "status_interval": 0.5,
+                   "max_body_mb": 1,
+                   "backends": [{"id": "s19a", "url": "http://127.0.0.1:9164"}]}, _ff19)
+    _fake19 = FakeStrata(9164, "s19a")
+    _fake19.start()
+    _proc19 = subprocess.Popen([sys.executable, ROUTER, "--config", "s19_drain_total.json",
+                                "--log-level", "WARNING"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def _raw19(head, body=b"", delay=0.3, read=8.0, timed=False):
+        # threaded send: a 1.2 MB sendall would block once the kernel buffer
+        # fills WHILE the server is idle (face lesson), so it rides its own
+        # thread and we simply DELAY the read (delayed-reader doctrine).
+        try:
+            _s19 = socket.create_connection(("127.0.0.1", 9163), timeout=5)
+        except OSError:
+            return (b"", 99.0) if timed else b""
+        _t019 = time.monotonic()
+        try:
+            # the headers/body blank line belongs to the SENDER (rig lesson,
+            # run 1: without it the body's first CRLF became the terminator
+            # and every big-shape probe framed an illegal request -- the
+            # engine refused the GARBAGE, not the shape under test)
+            _th19 = threading.Thread(target=_s19.sendall, args=(head + b"\r\n" + body,), daemon=True)
+            _th19.start()
+            if delay:
+                time.sleep(delay)
+            _s19.settimeout(read)
+            _d19 = b""
+            try:
+                while len(_d19) < 8192:
+                    _g19 = _s19.recv(65536)
+                    if not _g19:
+                        break
+                    _d19 += _g19
+            except (socket.timeout, OSError):
+                pass
+            _th19.join(8)
+            return (_d19, time.monotonic() - _t019) if timed else _d19
+        finally:
+            _s19.close()
+    _HOST19 = "Host: 127.0.0.1:9163\r\n"
+    _BAD19 = "Host: example.com\r\n"
+    try:
+        _up19 = wait_for(lambda: get(9163, "/healthz")[0] == 200, 25)
+        _p19 = ("POST /v1/messages HTTP/1.1\r\n" + _HOST19 +
+                "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n").encode()
+        _d19 = _raw19(_p19, b"\r\n" + _CHK19) if _up19 else b""
+        check("S19/R7a-F1: the empty chunk-size refusal DRAINS like every sibling -- the named 400 arrives at a delayed reader mid-stream (the last door DV-fix8's sweep missed; 0/10 pre-fix)",
+              b"400" in _d19 and b"hunk" in _d19, repr(_d19[:60]))
+        _d19 = _raw19(_p19, b"ZZZZ\r\n" + _CHK19) if _up19 else b""
+        check("S19/R7a-F1 control: the bad-hex chunk-size twin (which always drained) reaches the SAME delayed reader -- the rig measures delivery, not luck",
+              b"400" in _d19, repr(_d19[:60]))
+        for _shape, _hdr in (
+                ("negative CL", "Content-Length: -5\r\n"),
+                ("garbage CL", "Content-Length: abc\r\n"),
+                ("under-declared CL", "Content-Length: 1000\r\n")):
+            _d19 = _raw19(("POST /v1/messages HTTP/1.1\r\n" + _BAD19 + _hdr).encode(), _BODY19) if _up19 else b""
+            check("S19/L1b-F1: the rebinding 403 survives a %s with 1.2 MB still queued (the drain helper's escape returned WITHOUT discarding; measured 0/10 named arrivals pre-fix)" % _shape,
+                  b"403" in _d19 and b"rebinding" in _d19, repr(_d19[:60]))
+        _d19, _dt19 = _raw19(("POST /v1/messages HTTP/1.1\r\n" + _BAD19 +
+                              "Content-Length: 700000\r\n").encode(), b"x" * 700_000,
+                             timed=True) if _up19 else (b"", 99.0)
+        check("S19/L1b-F1 control: an HONEST 700 KB count pays NO quiet deadline (the count consumes it, the pending check is negative on an idle socket) -- named AND fast",
+              b"403" in _d19 and _dt19 < 1.5, "named=%s dt=%.2fs" % (b"403" in _d19, _dt19))
+        _s19p = socket.create_connection(("127.0.0.1", 9163), timeout=10)
+        _s19p.settimeout(10.0)
+        _pipe19 = b""
+        try:
+            _bd19 = json.dumps({"model": "m", "max_tokens": 1,
+                                "messages": [{"role": "user", "content": "s19 pipe"}]}).encode()
+            _req19 = ("POST /v1/messages HTTP/1.1\r\n" + _HOST19 +
+                      "Content-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(_bd19)).encode() + _bd19
+            _s19p.sendall(_req19 + _req19)          # BOTH at once: pipelined
+            while _pipe19.count(b"HTTP/1.1") < 2:
+                _g19 = _s19p.recv(65536)
+                if not _g19:
+                    break
+                _pipe19 += _g19
+        except (socket.timeout, OSError):
+            pass
+        finally:
+            _s19p.close()
+        check("S19/N-5 guard: pipelining stays supported -- two requests one write, BOTH answered (the fix must never drain a door that keeps the connection open -- the red team's hazard catch)",
+              _pipe19.count(b"HTTP/1.1 200") >= 2, repr(_pipe19[:40]) + " n=%d" % _pipe19.count(b"HTTP/1.1 200"))
+        _t019 = time.monotonic()
+        _hz19 = get(9163, "/healthz") if _up19 else (0,)
+        _hd19 = time.monotonic() - _t019
+        check("S19/N-5 guard 2: a plain healthz costs NO quiet deadline (the close-conditioned pending check never fires here) -- %.2fs" % _hd19,
+              _hz19[0] == 200 and _hd19 < 1.0, "dt=%.2fs" % _hd19)
+        _g19h = ("GET /healthz HTTP/1.1\r\n" + _HOST19 + "Transfer-Encoding: chunked\r\n").encode()
+        _d19 = _raw19(_g19h, _CHK19) if _up19 else b""
+        check("S19/N-1: a chunked GET to /healthz with 1.2 MB in flight STILL delivers its 200 (the close branch used to RST-eat the SUCCESSFUL answer -- 0/10 delayed, 2/10 even immediate)",
+              b"200" in _d19, repr(_d19[:60]))
+        _d19 = _raw19(("HEAD /v1/messages HTTP/1.1\r\n" + _HOST19 +
+                       "Transfer-Encoding: chunked\r\n").encode(), _CHK19) if _up19 else b""
+        check("S19/N-1: the chunked HEAD twin -- the status line ARRIVES (a HEAD has no body to lose, yet its ANSWER was being eaten)",
+              b"HTTP/1.1" in _d19, repr(_d19[:60]))
+        _d19 = _raw19(_g19h, _CHK1K19) if _up19 else b""
+        check("S19/N-1 control: a 1 KB chunked GET still answers (the drain is bounded by the quiet deadline, not by the size)",
+              b"200" in _d19, repr(_d19[:60]))
+
+        def _turn19(body, lane=None):
+            _c19 = http.client.HTTPConnection("127.0.0.1", 9163, timeout=15)
+            _h19 = {"content-type": "application/json", "host": "127.0.0.1:9163"}
+            if lane:
+                _h19["x-strata-affinity"] = lane
+            _c19.request("POST", "/v1/messages", body=body, headers=_h19)
+            _r19 = _c19.getresponse()
+            _r19.read()
+            _pl19 = (_r19.getheader("x-strata-placement") or "").lower()
+            _c19.close()
+            return _r19.status, _pl19
+        _st19, _pl19a = _turn19(b"", lane="s19-empty-lane") if _up19 else (0, "")
+        _st19, _pl19b = _turn19(b"", lane="s19-empty-lane") if _up19 else (0, "")
+        check("S19/N-2: the documented lane channel works BODYLESS too -- an empty POST carrying x-strata-affinity gets its placement header and the lane HOLDS (the `if body else None` short-circuit silenced it; header-first rule documented, so the channel must live)",
+              _pl19a and "stic" in _pl19b, "t1=%r t2=%r" % (_pl19a[:20], _pl19b[:20]))
+        _st19, _pl19n = _turn19(b"") if _up19 else (0, "")
+        check("S19/N-2 shape guard: a KEYLESS empty POST still opens no lane (affinity_key_of returns None for neither-header-nor-body -- the monitor exception stays true)",
+              _st19 == 200 and not _pl19n, "st=%s pl=%r" % (_st19, _pl19n[:20]))
+        _bd19t = json.dumps({"model": "m", "messages":
+                             [{"role": "user", "content": "s19 lane sequence probe"}]}).encode()
+        _st19, _pl19t1 = _turn19(_bd19t, lane="s19-body-lane") if _up19 else (0, "")
+        _st19, _pl19t2 = _turn19(_bd19t, lane="s19-body-lane") if _up19 else (0, "")
+        check("S19/N-2 guard: the with-body path is byte-for-byte unchanged (placed, then sticky on the same lane)",
+              _pl19t1 and "stic" not in _pl19t1 and "stic" in _pl19t2,
+              "t1=%r t2=%r" % (_pl19t1[:20], _pl19t2[:20]))
+    finally:
+        _term(_proc19)
+        _fake19.kill()
+
+    _pg19, _pm19 = R._probe_get, R._probe_messages
+    _io19 = __import__("io")
+    try:
+        R._probe_get = lambda be, path: (200, "{}")
+        R._probe_messages = lambda be, path: (404 if be.id == "s19dead" else 200, "")
+        def _run_probe19(cfg19):
+            _so19 = sys.stdout
+            sys.stdout = _io19.StringIO()
+            try:
+                return R.probe(cfg19)
+            finally:
+                sys.stdout = _so19
+        _rc19 = _run_probe19({"listen": "127.0.0.1", "port": 1, "backends": [
+            {"id": "s19dead", "url": "http://127.0.0.1:1"},
+            {"id": "s19ok", "url": "http://127.0.0.1:1"}]}) if True else None
+        check("S19/R7a-F2: a dead box followed by a healthy one STILL exits nonzero (the old reset line erased the verdict -- the gate CI and boot scripts trust)",
+              _rc19 != 0, "rc=%s" % _rc19)
+        _rc19 = _run_probe19({"listen": "127.0.0.1", "port": 1, "backends": [
+            {"id": "s19ok", "url": "http://127.0.0.1:1"}]})
+        check("S19/R7a-F2 control: all boxes answering exits 0", _rc19 == 0, "rc=%s" % _rc19)
+    finally:
+        R._probe_get, R._probe_messages = _pg19, _pm19
+
+    _kpf19, _rk219 = R._keys_path_for, R._read_keys_file2
+    try:
+        R._keys_path_for = lambda cfg, cp, must_exist=True: "s19-sidecar.json"
+        R._read_keys_file2 = lambda p: ({"s19a": "  ", "global": "G-KEY-S19"}, True)
+        _cfg19k = {"backends": [{"id": "s19a", "url": "http://127.0.0.1:1",
+                                 "backend_api_key_env": "S19_NO_SUCH_ENV_VAR"}]}
+        assert "S19_NO_SUCH_ENV_VAR" not in os.environ
+        _ex19 = None
+        try:
+            R.apply_keys(_cfg19k, "s19cfg.json")
+        except SystemExit as e:
+            _ex19 = str(e)
+        check("S19/R7a-F3: a WHITESPACE keys-file entry meets the env fail-loud door exactly like an empty one (pre-fix it was 'truthy': it skipped the env door AND the global fallback and silently dropped the key)",
+              _ex19 is not None and "S19_NO_SUCH_ENV_VAR" in _ex19, repr(_ex19[:80]))
+        _cfg19l = {"backends": [{"id": "s19a", "url": "http://127.0.0.1:1"}]}
+        R.apply_keys(_cfg19l, "s19cfg.json")
+        check("S19/R7a-F3: and with no env door to knock on, the whitespace entry falls THROUGH to the global key (every door in apply_keys speaks the one _usable_key law)",
+              _cfg19l["backends"][0].get("backend_api_key") == "G-KEY-S19",
+              repr(_cfg19l["backends"][0].get("backend_api_key")))
+    finally:
+        R._keys_path_for, R._read_keys_file2 = _kpf19, _rk219
+
+    for _badp19, _want, _off in ((-1, b"must be 1..65535, got -1", b"0 would bind"),
+                                 (0, b"0 would bind an ephemeral port", None)):
+        with open("s19_port%d.json" % _badp19, "w") as _fp19:
+            json.dump({"listen": "127.0.0.1", "port": _badp19,
+                       "backends": [{"id": "s19a", "url": "http://127.0.0.1:1"}]}, _fp19)
+        _pp19 = subprocess.Popen([sys.executable, ROUTER, "--config", "s19_port%d.json" % _badp19],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        _po19 = _pp19.communicate(timeout=30)[0]
+        check("S19/L1b-F2: port=%s refuses with ITS OWN reason%s" % (_badp19, " and NOT 0's story" if _off else ""),
+              _want in _po19 and (_off is None or _off not in _po19), repr(_po19[-160:]))
+
+    check("S19/doc: the README tells the drain law is TOTAL -- every closing door, every helper escape, the GET/HEAD chunked close named, and the keep-alive carve-out stated",
+          "GET/HEAD chunked close" in _fl15 and "legitimately pipelined request" in _fl15)
+    check("S19/doc: the probe paragraph publishes the exit-code contract (a dead box is never erased by a later healthy one)",
+          "exits nonzero if any box answered on no Messages path" in _fl15)
+
     print("")
     if FAKE_ERRORS:
         print("FakeStrata swallowed %d handler tracebacks (last few):" % len(FAKE_ERRORS))

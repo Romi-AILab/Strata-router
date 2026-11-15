@@ -2400,18 +2400,20 @@ class Handler(BaseHTTPRequestHandler):
             # non-origin target: this router is not a forwarding proxy, and
             # the raw target would ride into the box's request line verbatim
             # (stress P1/F2). Origin-form only, refused by name.
-            self._drain_body()
+            self.close_connection = True   # the flag goes up BEFORE the drain:
+            self._drain_body()             # _drain_body only discards queued
             self._json(400, {"error": {"message": "strata-router: request target must be origin-form (path starting with '/')"}})
-            self.close_connection = True
-            return True
+            return True                    # bytes where the connection WILL close
+                                           # (a keep-alive door must leave a
+                                           # pipelined request alone -- N-5)
         if not self.path.isascii() or re.search(r"[\x00-\x20\x7f]", self.path):
             # http.client encodes the request line as ASCII: a target with
             # high-bit or control bytes would raise UnicodeEncodeError mid-
             # relay and kill the handler with no response. Refuse at the door
             # (callers percent-encode; that stays pure ASCII).
+            self.close_connection = True   # flag first (R7b-F1, see origin-form door)
             self._drain_body()
             self._json(400, {"error": {"message": "strata-router: request path must be ASCII without control characters"}})
-            self.close_connection = True
             return True
         raw_host = (self.headers.get("host") or "").strip().lower()
         if raw_host.startswith("["):
@@ -2432,9 +2434,9 @@ class Handler(BaseHTTPRequestHandler):
             # a lot more literal (review L2-2/M4).
             allowed = (listen,) if listen else self._LOOPBACK
         if host not in allowed:
+            self.close_connection = True   # flag first (R7b-F1, see origin-form door)
             self._drain_body()
             self._json(403, {"error": {"message": "strata-router: foreign Host %r refused (rebinding guard)" % host}})
-            self.close_connection = True
             return True
         org = self.headers.get("origin") or self.headers.get("referer")
         if org:
@@ -2446,9 +2448,9 @@ class Handler(BaseHTTPRequestHandler):
             # owner; stress Q1/Q2A-4 = Q2/F5). strip("[]") then yields the
             # address exactly as the Host check above compares it.
             if (m.group(1).strip("[]").lower() if m else "") not in allowed:
+                self.close_connection = True   # flag first (R7b-F1, see origin-form door)
                 self._drain_body()
                 self._json(403, {"error": {"message": "strata-router: cross-origin caller refused (rebinding guard)"}})
-                self.close_connection = True
                 return True
         return False
 
@@ -2471,13 +2473,47 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _pending_now(self):
+        """Zero-cost, non-blocking check for bytes the caller queued but never
+        declared (or bytes already sitting in the reader's buffer). An idle
+        socket answers immediately, so honest requests pay nothing. Called ONLY
+        where the connection will close anyway -- on a keep-alive door the same
+        bytes would be a legitimately pipelined request and eating THAT was the
+        red team's N-5 catch against the naive 'drain everywhere' fix."""
+        try:
+            self.connection.settimeout(0.0)
+            try:
+                return bool(self.rfile.peek(1))
+            finally:
+                try:
+                    self.connection.settimeout(None)
+                except Exception:
+                    pass
+        except Exception:
+            return False
+
     def _drain_body(self, limit=1 << 20):
         """Consume (bounded) whatever body a non-proxy route will not use, so
-        the bytes cannot desync the next request on this keep-alive connection."""
+        the bytes cannot desync the next request on this keep-alive connection.
+        R7b-F1 (P2, ninth same-shape lesion): the law lived in this helper's
+        CHUNKED branch only -- bad / negative / under-declared Content-Length
+        each returned WITHOUT discarding, and the door then RST-flushed its own
+        named refusal (measured 0/10 delayed-arrival on every entry door). Now:
+        wherever the door is closing (close_connection set BEFORE the call),
+        pending bytes are discarded under the quiet deadline first; a door that
+        keeps the connection open is left alone -- its pending bytes are the
+        next pipelined request, not junk (N-5)."""
         try:
             n = int(self.headers.get("content-length") or 0)
         except ValueError:
             self.close_connection = True
+            if self._pending_now():        # escape 1 closed: framing garbage +
+                self._quiet_finish()       # queued bytes -> discard, THEN close
+            return
+        if n < 0:
+            self.close_connection = True
+            if self._pending_now():        # escape 2 closed: a negative CL was
+                self._quiet_finish()       # never honest framing
             return
         while n > 0:
             chunk = min(n, 65536)
@@ -2505,6 +2541,14 @@ class Handler(BaseHTTPRequestHandler):
             # Q1/Q2A-5).
             self._quiet_finish()
             self.close_connection = True
+            return
+        # escape 3 closed: the count stopped at the DECLARED length (or there
+        # was no length at all) while the caller queued MORE than they told
+        # us -- a liar's leftovers. Only touch them where this door is closing
+        # anyway (flag set before the call); a keep-alive door's pending bytes
+        # are a pipelined request and stay untouched (N-5).
+        if self.close_connection and self._pending_now():
+            self._quiet_finish()
 
     # ---- routes -----------------------------------------------------------
     def do_GET(self):
@@ -2512,9 +2556,14 @@ class Handler(BaseHTTPRequestHandler):
         if self._entry_denied():
             return
         if "chunked" in (self.headers.get("transfer-encoding") or "").lower():
-            self.close_connection = True   # no content-length to drain by: close
-                                           # rather than let leftover body bytes
-                                           # parse as the next request line
+            # N-1 (red team, P2): this branch used to close WITHOUT draining --
+            # and a close over an unread body is an RST on this platform, which
+            # was measured eating the SUCCESSFUL 200 (0/10 named arrivals for a
+            # 1.2 MB chunked GET at 0.3 s delay; even an immediate reader only
+            # got 2/10). _quiet_finish needs no length -- this helper's own
+            # chunked branch proves it. Drain, THEN close.
+            self._quiet_finish()
+            self.close_connection = True
         else:
             self._drain_body()  # GET with a body must not poison the connection
         path = self._route_path()
@@ -2545,10 +2594,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._entry_denied():
             return
         if "chunked" in (self.headers.get("transfer-encoding") or "").lower():
-            self.close_connection = True   # same as do_GET (stress P1/F4): a
-                                           # chunked HEAD body has no length
-                                           # to drain -- close, or the
-                                           # leftovers parse as a request
+            self._quiet_finish()           # N-1 (red team): drain BEFORE closing
+            self.close_connection = True   # or the RST eats the answer itself
         else:
             self._drain_body()  # a HEAD with a body must not poison the connection
         return self._proxy(b"", head=True)
@@ -2624,9 +2671,9 @@ class Handler(BaseHTTPRequestHandler):
         self._tune()
         if self._entry_denied():
             return
+        self.close_connection = True       # flag first (R7b-F1, see origin-form door)
         self._drain_body()
         self._json(405, {"error": {"message": "strata-router: no OPTIONS/CORS surface -- POST inference requests only"}})
-        self.close_connection = True
 
     def _read_body(self):
         """Buffer the body: we must hash the prompt prefix before choosing a box.
@@ -2645,6 +2692,10 @@ class Handler(BaseHTTPRequestHandler):
                     # The old code broke out of the loop silently, turning a
                     # truncated body into a "complete" request at the box
                     # (stress P1/F4) -- neither shape is legal framing.
+                    # R7a-F1: the last door DV-fix8's sweep missed -- drain
+                    # like every sibling, or the named 400 never arrives
+                    # (measured 0/10 for a delayed reader with bytes streaming).
+                    self._quiet_finish()
                     self._json(400, {"error": {"message": "strata-router: chunked body ended before the final chunk"}})
                     self.close_connection = True
                     return None
@@ -2806,7 +2857,11 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
-        key = affinity_key_of(bare, body, self.headers) if body else None
+        # N-2 (red team): NO body-shortcut -- the documented lane channel
+        # (inbound x-strata-affinity, "either alone when only one is known")
+        # works bodyless too; affinity_key_of already returns None when
+        # neither a header nor a body exists, so keyless shapes are unchanged.
+        key = affinity_key_of(bare, body, self.headers)
         pin = (self.headers.get("x-strata-pin") or "").strip() or None
         if pin and not self._control_ok():
             self._json(403, {"error": {"message": "strata-router: x-strata-pin refused -- control token required (x-strata-control)"}})
@@ -3232,7 +3287,10 @@ def probe(cfg):
                 verdict = "rejected (path exists, request refused)"
             print("  POST %-28s -> %-6s %s" % (path, code if code is not None else "ERR", verdict))
             if code is not None and code < 400:
-                rc = 0 if rc != 2 else rc
+                # R7a-F2: a later healthy box must NOT erase an earlier dead
+                # one -- the aggregate only goes up. (The old line reset rc to
+                # 0 whenever it was not 2, and NOTHING ever set 2: the tri-state
+                # was dead code and the exit gate lied for CI and boot users.)
                 break
         else:
             rc = 1
@@ -3753,7 +3811,11 @@ def apply_keys(cfg, config_path, creating=False):
             src = "keys-file"
         else:
             src = ""
-        if not k:
+        # R7a-F3: the fallback doors spoke bare `if not k:` while FIVE other
+        # sites in this function use _usable_key -- so a whitespace sidecar
+        # entry was "truthy": it skipped the env fail-loud door AND the global
+        # fallback, silently dropping the backend's key. Same law at every door.
+        if not _usable_key(k):
             var = str(spec.get("backend_api_key_env") or "").strip()
             if var:
                 k = (os.environ.get(var) or "").strip()
@@ -3761,7 +3823,7 @@ def apply_keys(cfg, config_path, creating=False):
                     raise SystemExit("backend %s: backend_api_key_env names %s, which is not set "
                                      "(export it in a private shell, or remove the field)" % (bid, var))
                 src = "env"
-        if not k:
+        if not _usable_key(k):    # R7a-F3: same law as the env door above
             k = keys.get("global")
             if _usable_key(k):
                 src = "keys-file global"
@@ -3998,7 +4060,12 @@ def validate_cfg(cfg, pool, strict=True):
             # EPHEMERAL port while the boot log swears ":0" and clients aim
             # at nothing; 70000 dies at the bind -- a raw traceback AFTER the
             # lying "listening" INFO (the file's own OS-O scar family).
-            problems.append((k, "must be 1..65535, got %r (0 would bind an ephemeral port while the log names it)" % (v,)))
+            # R7b-F2: only 0 gets 0's story -- -1/70000 must not be handed the
+            # wrong reason for their own number.
+            if _fv == 0:
+                problems.append((k, "must be 1..65535, got %r (0 would bind an ephemeral port while the log names it)" % (v,)))
+            else:
+                problems.append((k, "must be 1..65535, got %r" % (v,)))
             continue
         if k == "sticky_ttl" and _fv < 0:
             # R4-F2: a negative ttl makes the read site's `ttl > 0` False --
