@@ -1253,11 +1253,11 @@ class Pool:
         home = self.by_id.get(pend[1])
         if home is not None and home.state != DOWN and home.begin():
             # R4-F5: the ONE sibling shape that queued at a require_idle home
-            # without booking gate_bypass -- pick's home-queue door (:1561)
-            # and this function's own migrate-onward branch (:1239) both book
-            # it; the metric's documented purpose is that such admits are
-            # NEVER invisible. The helper is self-gating (a capacity-only
-            # refusal does not tick), so the call is unconditional.
+            # without booking gate_bypass -- pick's home-queue door and this
+            # function's own migrate-onward branch both book it (F-7, DV-R8:
+            # symbols are the anchor); the metric's documented purpose is that
+            # such admits are NEVER invisible. The helper is self-gating (a
+            # capacity-only refusal does not tick), so the call is unconditional.
             self._note_gate_bypass(home)
             return home, "sticky", True
         # the home died mid-request too (or raced into its cooldown): migrate
@@ -1587,8 +1587,9 @@ class Pool:
                 # steal the lane with a 502).
                 # A preview never overflows a lane: tokenizing warms no cache,
                 # and no token count may be the event that exiles a
-                # conversation (S7 -- the same doctrine :2336 already applies
-                # to the commit side). Its answer just queues at home.
+                # conversation (S7 -- the same doctrine the commit-side
+                # count_tokens skip already applies; F-7: symbol anchor).
+                # Its answer just queues at home.
                 if not _pv:
                     alt, reserved = self._place(exclude={home.id}, no_trial=True,
                                                 body_len=body_len, r_hat=self._r_hat_for(affinity_key))
@@ -2050,7 +2051,8 @@ def _k_b_of(be):
 def _l_hat_of(be, now):
     """L̂ = max(reported_fresh, inflight) (V2-02); a stale feed is a MISSING
     input (None), never a stale number -- the same freshness gate load_score
-    uses (:377-380 semantics), so cong and J cannot disagree about sight."""
+    applies in _score_locked via _stale_after (F-7, DV-R8: symbols are the
+    anchor; line numbers rot), so cong and J cannot disagree about sight."""
     if not be.ever_reported or (now - be.status_ts) > be._stale_after():
         return None
     return max(float(be.reported.get("serving") or 0.0)
@@ -2357,6 +2359,24 @@ class Handler(BaseHTTPRequestHandler):
             self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
             pass
+
+    def send_error(self, code, message=None, explain=None):
+        # DV-R8 (L1b P2-1 + red team (a), the 11th AND 13th same-shape lesions):
+        # every stdlib dispatch refusal -- unknown method 501, malformed request
+        # line 400, too-long line 414, bad version 505 -- ends HERE, and the
+        # stdlib closes the connection from here WITHOUT ever touching the bytes
+        # the caller still has queued. Windows then RST-flushes both the pending
+        # bytes AND the refusal just written (measured 0/10 named arrivals at
+        # 1.2 MB in flight, both doors, three independent rigs). After thirteen
+        # same-shape lesions the drain law is no longer taught door by door --
+        # it lives at this ONE choke point, exactly as the pin law moved into
+        # _affinity_put (DV-fix5 doctrine). No fourth per-door drain site is
+        # allowed anywhere in this file.
+        # Flag-first: the door closes regardless (the stdlib says so below).
+        self.close_connection = True
+        if self._pending_now():
+            self._quiet_finish()
+        BaseHTTPRequestHandler.send_error(self, code, message, explain)
 
     def _json(self, code, obj, extra_headers=()):
         # Optional headers emit before end_headers. First user is the R4-B1
@@ -2752,10 +2772,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     return None
             body = b"".join(parts)
-            if len(body) > limit:
-                self._json(413, {"error": {"message": "strata-router: body over max_body_mb"}})
-                self.close_connection = True
-                return None
+            # F-8 (DV-R8): the post-loop 413 twin of the per-chunk door was
+            # UNREACHABLE -- the pre-deduction above charges declared bytes
+            # BEFORE reading, so used <= limit at every loop exit and the
+            # assembled body can never exceed limit here. Dead branch deleted:
+            # dead code is where the next blind face burns its round
+            # (DV-fix9's dead probe rc, one family). 413 contract unchanged.
             return body
         try:
             n = int(self.headers.get("content-length") or 0)
@@ -2846,16 +2868,15 @@ class Handler(BaseHTTPRequestHandler):
         # R5-F3: one float(), NUMERIC zero test (see resolve_read_timeout).
         read_timeout = resolve_read_timeout(self.cfg.get("read_timeout"))
 
-        try:
-            body = self._rewrite_model(body)
-        except Exception as exc:
-            # The ONE sanctioned body edit must never bill a healthy box for
-            # the router's own trouble: rewrite happens BEFORE pick, and a
-            # body the re-encoder chokes on is the CALLER's 400, not a
-            # connect failure (review L2-2/M3).
-            self._json(400, {"error": {"message": "strata-router: model rewrite failed on this body (%s)" % type(exc).__name__}})
-            self.close_connection = True
-            return
+        # DV-R8 L2-regrade: the 400 door that used to wrap this call was DEAD
+        # proven -- the parser admits only bodies json.dumps(ensure_ascii=True)
+        # survives, and the three shapes that could have raised (normal rewrite,
+        # lone-surrogate escape, 400-deep nesting) live-forwarded 200 in BOTH
+        # the red team's and the council's rigs. _rewrite_model is now TOTAL
+        # (it forwards verbatim on any internal trouble), so there is no door
+        # to guard: the ONE sanctioned body edit can neither bill a healthy box
+        # nor stand as a closing door that never learned the drain law.
+        body = self._rewrite_model(body)
 
         # N-2 (red team): NO body-shortcut -- the documented lane channel
         # (inbound x-strata-affinity, "either alone when only one is known")
@@ -2864,8 +2885,15 @@ class Handler(BaseHTTPRequestHandler):
         key = affinity_key_of(bare, body, self.headers)
         pin = (self.headers.get("x-strata-pin") or "").strip() or None
         if pin and not self._control_ok():
-            self._json(403, {"error": {"message": "strata-router: x-strata-pin refused -- control token required (x-strata-control)"}})
+            # F-3 (DV-R8 P2): a CLOSING door among the post-buffer ones -- it
+            # drains exactly like the entry doors, or its own refusal rides the
+            # RST (the lying-CL surplus is still in flight when this fires;
+            # measured 0/10 named arrivals pre-fix -- deterministic, unlike the
+            # unparseable-502 twin below).
             self.close_connection = True
+            if self._pending_now():
+                self._quiet_finish()
+            self._json(403, {"error": {"message": "strata-router: x-strata-pin refused -- control token required (x-strata-control)"}})
             return
         is_count_tokens = bare.endswith(COUNT_TOKENS_SUFFIX)
         backend, reason, reserved, ovf_token = self.pool.pick(
@@ -2977,7 +3005,24 @@ class Handler(BaseHTTPRequestHandler):
                     if key:
                         _ex += [("x-strata-affinity", short(key)),
                                 ("x-strata-placement", reason)]
-                return self._json(200, {"input_tokens": max(1, int(len(text) / 4))}, _ex)
+                _syn = {"input_tokens": max(1, int(len(text) / 4))}
+                if head:
+                    # F-4 (DV-R8, L2 upgraded P3->P2): a HEAD carries NO body.
+                    # The rescue used to emit its JSON anyway, and a COMPLIANT
+                    # client (http.client reads a HEAD's headers and stops)
+                    # then parsed the leftover bytes as the NEXT status line:
+                    # BadStatusLine('{') -- the poison rode the same connection
+                    # to the next request (measured live, red team + council).
+                    # Header-only, like the relay's own HEAD branch: the
+                    # synthesized count travels in x-strata-input-tokens.
+                    self.send_response(200)
+                    for _hk, _hv in _ex:
+                        self.send_header(_hk, _hv)
+                    self.send_header("x-strata-input-tokens", str(_syn["input_tokens"]))
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                    return None
+                return self._json(200, _syn, _ex)
 
             _reason = resp.reason
             if _reason and re.search(r"[\r\n]", _reason):
@@ -3141,13 +3186,19 @@ class Handler(BaseHTTPRequestHandler):
                     # lie here. RemoteDisconnected is a BadStatusLine that
                     # really NEVER answered, so it keeps the stall branch.
                     backend.note_stream_error("unparseable box response: " + type(exc).__name__)
+                    # F-3 (DV-R8 P2): this door closes too -- drain BEFORE
+                    # writing. The red team caught this window as a race (the
+                    # named 502 arrived only 2/10 when a lying CL left bytes in
+                    # flight); drain-first makes every arrival deterministic.
+                    self.close_connection = True
+                    if self._pending_now():
+                        self._quiet_finish()
                     self._json(502, {"error": {
                         "message": "strata-router: backend " + backend.id + " answered with a response the router "
                                    "could not parse (" + type(exc).__name__ + "). Nothing was relayed to the caller, "
                                    "and the request is not still running on the box.",
                         "type": "backend_protocol_error",
                     }})
-                    self.close_connection = True
                     LOG.warning("%s %s -> %s UNPARSEABLE box response after %.2fs: %s",
                                 method, bare, backend.id, duration, exc)
                 elif sent:
@@ -3215,13 +3266,23 @@ class Handler(BaseHTTPRequestHandler):
             return body
         obj = _json_or_none(body)
         if isinstance(obj, dict) and isinstance(obj.get("model"), str) and obj["model"] in rules:
-            obj["model"] = rules[obj["model"]]
-            # ensure_ascii=True on purpose: a lone surrogate ANYWHERE in the
-            # body (a valid JSON escape like "\ud800") makes the utf-8 encode
-            # of an ensure_ascii=False dump raise -- and a failure after the
-            # connection opens gets charged to a healthy box, x-strata-pin
-            # included deciding WHICH box eats the charges (review L2-2/M3).
-            return json.dumps(obj, ensure_ascii=True).encode("utf-8")
+            try:
+                obj["model"] = rules[obj["model"]]
+                # ensure_ascii=True on purpose: a lone surrogate ANYWHERE in the
+                # body (a valid JSON escape like "\ud800") makes the utf-8 encode
+                # of an ensure_ascii=False dump raise -- and a failure after the
+                # connection opens gets charged to a healthy box, x-strata-pin
+                # included deciding WHICH box eats the charges (review L2-2/M3).
+                return json.dumps(obj, ensure_ascii=True).encode("utf-8")
+            except Exception as exc:
+                # DV-R8: the TOTAL form of the old dead 400 door -- internal
+                # trouble forwards the caller's bytes VERBATIM: never billed to
+                # a healthy box, and a forward opens no closing door. If the
+                # body truly troubled the router, the box answers with its own
+                # named error; the caller always learns something specific.
+                LOG.debug("model rewrite skipped on this body (%s) -- forwarding verbatim",
+                          type(exc).__name__)
+                return body
         return body
 
 
@@ -3572,7 +3633,9 @@ def _unwrap_keys(data, path):
     except Exception:
         raise SystemExit("keys file %s: the DPAPI blob does not open -- it was created by another "
                          "Windows user or on another machine (blobs never travel). "
-                         "Retype the keys with --set-key." % path)
+                         "Delete the file, then retype the keys with --set-key: while this file "
+                         "is unreadable, boot refuses BEFORE --set-key can rewrite it (F-5, DV-R8: "
+                         "the old message pointed at a door the boot gate itself locked)." % path)
     if not isinstance(out, dict):
         raise SystemExit("keys file %s: ciphertext opened to a non-object -- refusing" % path)
     return out, True
@@ -3730,6 +3793,32 @@ def _keys_path_for(cfg, config_path, must_exist=True):
     return cand if os.path.exists(cand) else ""
 
 
+_MERGED_READ_KEYS = ("priority", "max_inflight", "require_idle")
+# DV-R8 F-1 (P2): these three top-level keys are NOT in DEFAULTS, yet make_pool
+# merges every top-level field into each box's cfg (dict(cfg, **extra)) and
+# Backend.__init__ READS them -- so the unknown-top-level loop must speak their
+# truth instead of "is IGNORED" (the R4-F8d probe_model lie, same lesion).
+# This is NOT a documented top-level feature: the tiering contract stays
+# per-backend (README); a top-level spelling just sets every box's default.
+
+
+def _backend_ids(cfg):
+    """ONE id law (DV-R8 F-2 P2 + red team (c)): the ids a pool built from this
+    cfg ACTUALLY carries -- mirrors make_pool's auto-id exactly, so apply_keys'
+    known set, its apply loop and set_key can never drift from the ids the boot
+    log and /stats speak. The old per-site spellings invented ghosts:
+    str(spec.get('id')) minted the id \"None\" for an id-less dict spec (a
+    --set-key 'None' entry was ACCEPTED, stored, warned about by nobody, and
+    installed never), and string specs' real boxN ids were invisible to the
+    typo check. Thirteenth lesson of this program: the law moves INTO the
+    shared primitive."""
+    ids = []
+    for _i, spec in enumerate(cfg.get("backends") or []):
+        bid = spec.get("id") if isinstance(spec, dict) else None
+        ids.append(str(bid) if bid else "box" + str(_i + 1))
+    return ids
+
+
 def apply_keys(cfg, config_path, creating=False):
     """Fill backend keys from the safe input ports, in memory only -- the
     config file is never rewritten. Order: inline field (unless a leftover
@@ -3767,7 +3856,7 @@ def apply_keys(cfg, config_path, creating=False):
                 # and its ValueError message carries the FULL header value --
                 # straight into the 502 body, the log and stats. Refuse boot.
                 raise SystemExit("keys file %s: entry %r contains control bytes (a key must be one printable line; retype it with --set-key)" % (path, k))
-        known = {str(s.get("id")) for s in cfg.get("backends") or [] if isinstance(s, dict)} | {"global", "control"}
+        known = set(_backend_ids(cfg)) | {"global", "control"}
         for k in keys:
             if k not in known:
                 LOG.warning("keys file %s: entry %r matches no backend id (typo?)", path, k)
@@ -3799,10 +3888,21 @@ def apply_keys(cfg, config_path, creating=False):
         tok = str(keys.get("control") or "").strip()
     cfg["_control_token"] = tok
     sources = {}
-    for spec in cfg.get("backends") or []:
+    _ids2k = _backend_ids(cfg)
+    _bs2k = cfg.get("backends") or []
+    for _ik, spec in enumerate(_bs2k):
+        if isinstance(spec, str):
+            # F-2 second limb (DV-R8 GREEN-run catch -- engine-wrong this time,
+            # found by its own suite lock): a STRING spec has no dict to carry
+            # the resolved key, so the box's key chain dead-ended here even
+            # once the known set learned its real boxN id. Promote to exactly
+            # the dict form make_pool would synthesize (explicit id from the
+            # ONE law), and the loop below resolves it like any written dict
+            # spec. id/url live in _KNOWN_BE_KEYS -- no new warnings anywhere.
+            _bs2k[_ik] = spec = {"id": _ids2k[_ik], "url": spec}
         if not isinstance(spec, dict):
             continue
-        bid = str(spec.get("id") or "?")
+        bid = _ids2k[_ik]    # F-2: the ONE id law -- never "None", never "?"
         if _usable_key(spec.get("backend_api_key")):
             sources[bid] = "inline"
             continue
@@ -3845,7 +3945,7 @@ def set_key(cfg, backend_id, config_path, keys_path):
     if not path:
         base = os.path.dirname(os.path.abspath(config_path)) if config_path else os.getcwd()
         path = os.path.join(base, "router.keys.json")
-    ids = {str(s.get("id")) for s in cfg.get("backends") or [] if isinstance(s, dict)}
+    ids = set(_backend_ids(cfg))    # F-2: the ghost id "None" is DEAD -- membership speaks the ids the pool actually gets
     if ids and backend_id not in ids | {"global", "control"}:
         print("unknown backend %r -- configured: %s (or 'global'/'control')" % (backend_id, ", ".join(sorted(ids))))
         return 2
@@ -3907,6 +4007,7 @@ def make_pool(cfg):
         raise SystemExit("backends must be a LIST of URL strings or objects, got %s"
                          % type(specs).__name__)
     backends = []
+    _ids2mp = _backend_ids(cfg)     # F-2: this loop IS the id law now -- every reader sees THESE ids
     for i, spec in enumerate(specs):
         if isinstance(spec, str):
             spec = {"id": "box" + str(i + 1), "url": spec}
@@ -3918,7 +4019,7 @@ def make_pool(cfg):
                              % i)
         extra = {k: v for k, v in spec.items() if k not in ("id", "url", "path_prefix")}
         backends.append(Backend(
-            spec.get("id") or ("box" + str(i + 1)),
+            _ids2mp[i],
             spec["url"],
             spec.get("path_prefix") or cfg.get("path_prefix") or "",
             cfg=dict(cfg, **extra),
@@ -4214,7 +4315,14 @@ def validate_cfg(cfg, pool, strict=True):
                                 spec.get("id", "?"), k)
     for k in cfg:
         if k not in DEFAULTS and not k.startswith("_"):
-            LOG.warning("config: unknown top-level key %r is IGNORED", k)
+            if k in _MERGED_READ_KEYS:
+                # F-1 (DV-R8 P2): the loop used to shout "IGNORED" about keys
+                # make_pool merges into EVERY box's cfg and Backend.__init__
+                # reads -- the R4-F8d probe_model lie, same lesion, caught by
+                # the warning loop telling the truth one key short.
+                LOG.warning("config: top-level %r is applied as a DEFAULT to EVERY backend (make_pool merges it into each box's cfg and Backend reads it); move it into the per-backend spec to steer ONE box", k)
+            else:
+                LOG.warning("config: unknown top-level key %r is IGNORED", k)
     # pre-1.2.18 M/TP-P2: an empty listen binds EVERY interface (0.0.0.0) while the
     # rebinding guard keeps trusting Host: localhost -- and any remote caller can send
     # that header freely (loopback names prove nothing off-loopback, the guard's own

@@ -800,7 +800,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 436 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 461 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -878,18 +878,25 @@ an absolute-form request target dies at a named 400 (never relayed into the
 box's request line); the rebinding 403 must REACH a 2 MB sender (the refusal
 survives a timed graceful drain instead of being eaten by a Windows RST) --
 and since R6b-FR-1 that drain law is UNIFORM -- and since DV-fix9 it is
-TOTAL: every capacity/protocol refusal at the body reader (the 413s, the
-bad-framing 400s), every entry door that closes on a lying caller (the
+TOTAL, and since DV-fix10 it is ENUMERATION-PROOF: EVERY door that closes
+learns it -- every capacity/protocol refusal at the body reader (the 413s,
+the bad-framing 400s), every entry door that closes on a lying caller (the
 rebinding 403s included), every escape of the drain helper (bad, negative
-or under-declared Content-Length alike), the empty chunk-size refusal, and
-the GET/HEAD chunked close (what that branch was RST-eating was a
-SUCCESSFUL 200) -- all are written only after a timed discard of the bytes
-already queued, because closing on an unread body RST-flushes them on this
-platform and the caller learns nothing; a probe that reads IMMEDIATELY will
-systematically miss this bug class -- delay the read AND make the body big
-enough that the send is still in flight before trusting the door; a door
-that keeps the connection open drains NOTHING -- its pending bytes are a
-legitimately pipelined request;
+or under-declared Content-Length alike), the empty chunk-size refusal, the
+GET/HEAD chunked close (what that branch was RST-eating was a SUCCESSFUL
+200), the post-buffer refusals that close (a pinned request without the
+control token, an unparseable box answer), AND the whole stdlib dispatch
+family (unknown method 501, malformed request line 400, too-long line 414),
+which the router intercepts at its one overridden send_error -- including
+the stdlib send_error path was the program's 13th same-shape catch: a law
+that must be enumerated is a law the next door forgets. Every such answer
+is written only after a timed discard of the bytes already queued, because
+closing on an unread body RST-flushes them on this platform and the caller
+learns nothing; a probe that reads IMMEDIATELY will systematically miss
+this bug class -- delay the read AND make the body big enough that the send
+is still in flight before trusting the door (a small COMPLETE pending
+answers with a clean FIN); a door that keeps the connection open drains
+NOTHING -- its pending bytes are a legitimately pipelined request;
 the chunked reader refuses an empty size line, a missing CRLF terminator and
 a 65-line trailer flood -- each by name -- and a chunked `GET`/`HEAD` drains
 under the quiet deadline before closing, so neither a refusal nor an answer

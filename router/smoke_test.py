@@ -3674,7 +3674,7 @@ def main():
             _hc_a.kill(); _hc_b.kill()
 
         print("")
-        print("S9) smart L9 -- the whole-ladder matrix: 64 flag combos close the identity; no dead knobs")
+        print("S9) smart L9 -- the whole-ladder matrix: 128 flag combos close the identity; no dead knobs")
         # Docs-as-code: a knob registered in SMART_NUMS that NO read site ever
         # reads is worse than an unknown knob (unknown ones at least
         # warn-and-ignore). homecoming_lane_s was such a corpse -- the per-lane
@@ -3689,16 +3689,21 @@ def main():
                   "overflow_placements", "overflow_rollbacks", "overflow_fizzles",
                   "overflow_evictions", "operator_cancelled", "passthrough_gets",
                   "preview_passes")
-        _FL6 = ("smart_cap_read", "smart_shadow", "smart_place",
-                "smart_preview", "smart_move", "smart_transient")
-        # 64 combinations of every action flag, each pool fed the SAME traffic:
+        _FL7 = ("smart_cap_read", "smart_shadow", "smart_place",
+                "smart_preview", "smart_move", "smart_transient", "smart_homecoming")
+        # DV-R8 F-6: homecoming rode bit 5 -- smart_transient's bit -- so the 64
+        # masks explored only 32 DISTINCT shapes and the two rungs' solo shapes
+        # NEVER RAN. Seven flags now ride seven bits: 128 masks, and the distinct
+        # count is itself locked below.
+        # 128 combinations of every action flag, each pool fed the SAME traffic:
         # 3 lanes placed then re-visited (sticky), 2 previews (one fat), 1 pin,
         # 1 passthrough. The closed identity is not allowed to care which rungs
         # of the ladder are lit -- requests == SUM(12 terminals) in every combo.
         _bad = None
-        for _mask in range(64):
-            _combo = {f: bool(_mask & (1 << _i)) for _i, f in enumerate(_FL6)}
-            _combo["smart_homecoming"] = bool(_mask & 32)
+        _sh9 = set()
+        for _mask in range(128):
+            _combo = {f: bool(_mask & (1 << _i)) for _i, f in enumerate(_FL7)}
+            _sh9.add(frozenset(f for f in _FL7 if _combo[f]))
             _bp = R.Pool([_ube("MA", mi=64), _ube("MB", mi=64)], {"smart": _combo})
             for _r in range(2):
                 for _k in ("m0", "m1", "m2"):
@@ -3720,8 +3725,10 @@ def main():
                 _why = "lane state was created with no flag that reads lanes lit"
             if _why and _bad is None:
                 _bad = "%s: %s" % (_combo, _why)
-        check("S9: all 64 flag combinations boot, serve, close the identity and create no rogue state (D9/§13-8)",
+        check("S9: all 128 flag combinations boot, serve, close the identity and create no rogue state (D9/§13-8; F-6 widened 64->128 when bit 5 proved to serve two flags)",
               _bad is None, str(_bad))
+        check("S9/F-6: the matrix truly covers 128 DISTINCT shapes -- transient-solo and homecoming-solo run now (they never did on the shared bit)",
+              len(_sh9) == 128, "distinct=%d" % len(_sh9))
         # targeted cross-flag pins: a rung must never SILENTLY depend on another
         _lp = R.Pool([_ube("NA", mi=64), _ube("NB", mi=64)], {"smart": {"smart_place": True}})
         _lp.pick("p0", body_len=200); _lp.pick("p0", body_len=200)
@@ -5079,6 +5086,288 @@ def main():
           "GET/HEAD chunked close" in _fl15 and "legitimately pipelined request" in _fl15)
     check("S19/doc: the probe paragraph publishes the exit-code contract (a dead box is never erased by a later healthy one)",
           "exits nonzero if any box answered on no Messages path" in _fl15)
+
+    print("")
+    print("S20) DV-R8: the stdlib dispatch face via ONE send_error choke point (13th same-shape family), the last two live post-buffer doors, the dead doors deleted, the id law unified")
+    # Round-8 harvest (two blind faces + L2 red team; EVERY row reproduced by the
+    # council): the stdlib 501 dispatch door (L1b P2-1) and the malformed-line 400
+    # door (red team (a)) RST-ate their own refusals -- measured 0/10 at clean
+    # 48b8777 (ws-v1219-DV-R8-P21-48b8777.log, ws-v1219-DV-R8-L2adjudicate-48b8777.log).
+    # pin-403 + unparseable-502 (F-3) were the closing doors that never learned the
+    # drain law; the rewrite-400 "door" proved DEAD (all three shapes forward 200 --
+    # deleted with its dead sibling, the unreachable post-chunk 413). The fix shape
+    # is DUAL CHOKE POINT: send_error covers the whole 400/414/501/505 family, the
+    # two live doors drain flag-first, and NO fourth per-door law is allowed.
+    # Damage needs all three axes now: a METHOD whose door closes, a DELAYED reader,
+    # and bytes still IN FLIGHT (L2(b): a small complete pending answers clean -- the
+    # controls below prove it every run).
+    _H20 = "Host: 127.0.0.1:9165\r\n"
+    _BIG20 = b"x" * 1_200_000
+    _l20 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _l20.bind(("127.0.0.1", 9166))          # plain socket: no reuse, single listener (ghost-box doctrine)
+    _l20.listen(8)
+    _run20 = [True]
+    def _box20():
+        while _run20[0]:
+            try:
+                _c20, _ = _l20.accept()
+            except OSError:
+                return
+            try:
+                _c20.settimeout(5)
+                _hd20 = b""
+                while b"\r\n\r\n" not in _hd20:
+                    _g = _c20.recv(4096)
+                    if not _g:
+                        break
+                    _hd20 += _g
+                if not _hd20:
+                    continue
+                _ln20 = _hd20.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+                _parts = _ln20.split(" ")
+                _pth20 = _parts[1] if len(_parts) > 2 else "/"
+                _cl20 = 0
+                _low20 = _hd20.lower()
+                _i0 = _low20.find(b"content-length:")
+                if _i0 >= 0:
+                    _cl20 = int(_low20[_i0 + 15:].split(b"\r\n", 1)[0].strip() or 0)
+                _have20 = len(_hd20.split(b"\r\n\r\n", 1)[1])
+                while _have20 < _cl20:
+                    _g = _c20.recv(65536)
+                    if not _g:
+                        break
+                    _have20 += len(_g)
+                if "up12" in _pth20:
+                    _c20.sendall(b"XYZ 200 this is not HTTP\r\n\r\n")     # unparseable on purpose (L1a F-3 door)
+                elif "count" in _pth20:
+                    _e = b'{"error":{"message":"not served"}}'
+                    _c20.sendall(b"HTTP/1.1 404 Not Found\r\ncontent-length: %d\r\n\r\n" % len(_e) + _e)
+                elif _ln20.startswith("GET"):
+                    _j = json.dumps({"activity": {"in_flight": 0}, "state": "ready"}).encode()
+                    _c20.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: %d\r\n\r\n" % len(_j) + _j)
+                else:
+                    _j = json.dumps({"id": "s20", "content": [{"type": "text", "text": "ok"}],
+                                     "usage": {"input_tokens": 10, "output_tokens": 5}}).encode()
+                    _c20.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: %d\r\n\r\n" % len(_j) + _j)
+            except Exception:
+                pass
+            finally:
+                try:
+                    _c20.close()
+                except OSError:
+                    pass
+    threading.Thread(target=_box20, daemon=True).start()
+    with open("s20_choke.json", "w") as _ff20:
+        # control_token MUST be set for the pin door to exist: an unset control
+        # surface is open, _control_ok() answers True, and a pin to an unknown
+        # backend id just rides pick as a pin-miss 200. (Port lesson, ledger #6:
+        # the adjudication rigs set this and the suite port forgot it -- the
+        # first suite-form RED run burned 0/6 for the WRONG reason. Engine
+        # correct, rig wrong, caught by the control row's impossible 8.3s.)
+        json.dump({"listen": "127.0.0.1", "port": 9165, "status_interval": 0.5, "max_body_mb": 1,
+                   "control_token": "s20-fake-control-token",
+                   "rewrite_model": {"m": "n"},
+                   "backends": [{"id": "s20a", "url": "http://127.0.0.1:9166"}]}, _ff20)
+    _proc20 = subprocess.Popen([sys.executable, ROUTER, "--config", "s20_choke.json", "--log-level", "WARNING"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def _raw20(head, body=b"", delay=0.3, read=8.0):
+        try:
+            _s20 = socket.create_connection(("127.0.0.1", 9165), timeout=5)
+        except OSError:
+            return b"", 99.0
+        _t020 = time.monotonic()
+        try:
+            _th20 = threading.Thread(target=_s20.sendall, args=(head + b"\r\n" + body,), daemon=True)
+            _th20.start()
+            if delay:
+                time.sleep(delay)
+            _s20.settimeout(read)
+            _d20 = b""
+            try:
+                while len(_d20) < 8192:
+                    _g20 = _s20.recv(65536)
+                    if not _g20:
+                        break
+                    _d20 += _g20
+            except (socket.timeout, OSError):
+                pass
+            _th20.join(8)
+            return _d20, time.monotonic() - _t020
+        finally:
+            _s20.close()
+    def _arr20(head, body, markers, n=6, delay=0.3):
+        _ok20 = 0
+        _dts = []
+        for _ in range(n):
+            _d20, _t20b = _raw20(head, body, delay=delay)
+            if all(m in _d20 for m in markers):
+                _ok20 += 1
+            _dts.append(round(_t20b, 2))
+        return _ok20, _dts
+    try:
+        _up20 = wait_for(lambda: get(9165, "/healthz")[0] == 200, 25)
+        _ok20, _dts20 = _arr20(("TRACE /v1/messages HTTP/1.1\r\n" + _H20 + "Content-Length: 1200000\r\n").encode(),
+                               _BIG20, [b"501"]) if _up20 else (0, [])
+        check("S20/L1b-P2-1: the stdlib 501 dispatch door DRAINS first -- TRACE with 1.2 MB in flight still delivers its named 501 (measured 0/10 pre-fix: the door closed over unread bytes and RST-flushed its own answer -- the 11th same-shape lesion)",
+              _ok20 == 6, "delivered=%d/6 dts=%s" % (_ok20, _dts20[:3]))
+        _ok20, _dts20 = _arr20(("TRACE /v1/messages HTTP/1.1\r\n" + _H20).encode(),
+                               b"", [b"501"], n=3) if _up20 else (0, [])
+        check("S20/P2-1 control: 501 from a bodyless TRACE answers named AND fast (nothing pending -- the pending check is zero-cost on an idle socket; pending bytes are the ONLY axis that differs from the row above)",
+              _ok20 == 3 and max(_dts20) < 1.5 if _up20 else False, "delivered=%d/3 dts=%s" % (_ok20, _dts20))
+        _ok20, _dts20 = _arr20(("TRACE /v1/messages HTTP/1.1\r\n" + _H20 + "Content-Length: 10\r\n").encode(),
+                               b"0123456789", [b"501"], n=3) if _up20 else (0, [])
+        check("S20/P2-1 law witness (GREEN-run catch, engine-correct ledger): a DECLARED body meets the same law as surplus -- pending at a closing door, the 501 pays the honest ~2s drain and STILL arrives (the first control row demanded speed here and was retired -- the engine was right)",
+              _ok20 == 3, "delivered=%d/3 dts=%s" % (_ok20, _dts20))
+        _ok20, _dts20 = _arr20(("GARBAGE\r\nHost: 127.0.0.1:9165\r\nContent-Length: 1200000\r\n").encode(),
+                               _BIG20, [b"400", b"request syntax"]) if _up20 else (0, [])
+        check("S20/L2(a): the malformed-request-line 400 door -- the SECOND stdlib-family door -- also delivers after draining (measured 0/10 pre-fix; the 13th same-shape lesion; send_error is now where this whole family learns the law)",
+              _ok20 == 6, "delivered=%d/6 dts=%s" % (_ok20, _dts20[:3]))
+        _ok20, _dts20 = _arr20(b"GARBAGE\r\n", b"", [b"400"], n=3, delay=0.05) if _up20 else (0, [])
+        check("S20/L2(a) control: the same bare malformed line with nothing queued reaches the SAME reader (the rig measures delivery, not luck)",
+              _ok20 == 3, "delivered=%d/3 dts=%s" % (_ok20, _dts20))
+        _ok20, _dts20 = _arr20(b"A" * 70000 + b" HTTP/1.1\r\n" + _H20.encode(), b"", [b"414"], n=2, delay=0.1) if _up20 else (0, [])
+        check("S20/L2(a): the 414 too-long-line sibling rides the SAME choke point -- its refusal arrives (a closing door pays its honest ~2s when bytes sit unread; speed belongs to the controls, not the refusals)",
+              _ok20 == 2, "delivered=%d/2 dts=%s" % (_ok20, _dts20))
+        _PIN20 = ("POST /v1/messages HTTP/1.1\r\n" + _H20 +
+                  "Content-Type: application/json\r\nContent-Length: 10\r\nx-strata-pin: s20-pin\r\n").encode()
+        _ok20, _dts20 = _arr20(_PIN20, b"0123456789" + _BIG20, [b"403", b"pin refused"]) if _up20 else (0, [])
+        check("S20/F-3: the pin-403 door (post-buffer, closing) drains like the entry doors -- the named refusal survives the 1.2 MB still in flight (measured 0/10 pre-fix; the damage window is the lying CL's surplus, arriving AFTER the body was buffered)",
+              _ok20 == 6, "delivered=%d/6 dts=%s" % (_ok20, _dts20[:3]))
+        _ok20, _dts20 = _arr20(_PIN20, b"0123456789", [b"403", b"pin refused"], n=3) if _up20 else (0, [])
+        check("S20/F-3 control: pin-403 with the body fully consumed answers named AND fast -- pending is the ONLY difference from the row above",
+              _ok20 == 3 and max(_dts20) < 1.5 if _up20 else False, "delivered=%d/3 dts=%s" % (_ok20, _dts20))
+        _UNP20 = ("POST /v1/up12 HTTP/1.1\r\n" + _H20 +
+                  "Content-Type: application/json\r\nContent-Length: 10\r\n").encode()
+        _ok20, _dts20 = _arr20(_UNP20, b"0123456789" + _BIG20, [b"502", b"could not parse"]) if _up20 else (0, [])
+        check("S20/F-3: the unparseable-box 502 door drains too (the red team measured this window as a race -- drain-before-write makes it deterministic)",
+              _ok20 == 6, "delivered=%d/6 dts=%s" % (_ok20, _dts20[:3]))
+        _ok20, _dts20 = _arr20(_UNP20, b"0123456789", [b"502", b"could not parse"], n=3) if _up20 else (0, [])
+        check("S20/F-3 control: unparseable-502 with nothing pending answers named AND fast",
+              _ok20 == 3 and max(_dts20) < 1.5 if _up20 else False, "delivered=%d/3 dts=%s" % (_ok20, _dts20))
+        _st20a = _st20b = _st20c = 0
+        try:
+            _bd20 = json.dumps({"model": "m", "max_tokens": 1,
+                                "messages": [{"role": "user", "content": "s20 rewrite"}]}).encode()
+            for _i20x, _bdx in ((0, _bd20),
+                                (1, b'{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"\\ud800"}]}'),
+                                (2, b'{"model":"m","max_tokens":1,"a":' + b"[" * 400 + b"]" * 400 + b"}")):
+                _c20x = http.client.HTTPConnection("127.0.0.1", 9165, timeout=15)
+                _c20x.request("POST", "/v1/messages", body=_bdx,
+                              headers={"host": "127.0.0.1:9165", "content-type": "application/json"})
+                _r20x = _c20x.getresponse()
+                _r20x.read()
+                if _i20x == 0:
+                    _st20a = _r20x.status
+                elif _i20x == 1:
+                    _st20b = _r20x.status
+                else:
+                    _st20c = _r20x.status
+                _c20x.close()
+        except Exception:
+            pass
+        check("S20/L2-regrade: the rewrite-400 'door' is DEAD proven -- normal rewrite, lone-surrogate escape and 400-deep nesting ALL forward (a body the parser accepts survives ensure_ascii re-encoding; the except branch is unreachable and now deleted)",
+              (_st20a, _st20b, _st20c) == (200, 200, 200), "st=%s" % ((_st20a, _st20b, _st20c),))
+        _c20 = http.client.HTTPConnection("127.0.0.1", 9165, timeout=15)
+        _cl20h = _tk20h = None
+        _clean20 = False
+        try:
+            _c20.request("HEAD", "/v1/messages/count_tokens", headers={"host": "127.0.0.1:9165"})
+            _r20 = _c20.getresponse()
+            _bd20r = _r20.read()
+            _cl20h, _tk20h = _r20.getheader("content-length"), _r20.getheader("x-strata-input-tokens")
+            try:
+                _c20.request("GET", "/healthz", headers={"host": "127.0.0.1:9165"})
+                _r20b = _c20.getresponse()
+                _r20b.read()
+                _clean20 = _r20b.status == 200
+            except Exception:
+                _clean20 = False     # BadStatusLine('{') was the pre-fix witness (L2 + council, live)
+        except Exception:
+            pass
+        finally:
+            _c20.close()
+        check("S20/F-4(L2-upgraded P2): a compliant HEAD client that reads its headers and NOTHING ELSE gets a clean next response on the SAME connection (the rescue body used to poison the next status line -- BadStatusLine('{') measured)",
+              _clean20 and len(_bd20r) == 0, "clean=%s body=%dB" % (_clean20, len(_bd20r)))
+        check("S20/F-4 witness: the HEAD rescue answers header-only -- content-length: 0 and the synthesized count travels in x-strata-input-tokens (the face rule: HEAD carries no body, ever)",
+              _cl20h == "0" and _tk20h is not None, "cl=%r tok=%r" % (_cl20h, _tk20h))
+    finally:
+        _term(_proc20)
+        _run20[0] = False
+        try:
+            _l20.close()
+        except OSError:
+            pass
+
+    _src20 = open(ROUTER, encoding="utf-8").read()
+    _flat20 = " ".join(_src20.split())
+    check("S20/choke: the whole stdlib refusal family learns the law in ONE place -- send_error is overridden, flag-first, and its drain runs ONLY when bytes are pending (no fourth per-door law is allowed after 13 same-shape lesions)",
+          "def send_error" in _src20
+          and "_pending_now" in _src20[_src20.index("def send_error"):_src20.index("def send_error") + 1600]
+          and "_quiet_finish" in _src20[_src20.index("def send_error"):_src20.index("def send_error") + 1600])
+    check("S20/F-3: the DEAD rewrite-400 door is deleted, not patched -- its named refusal text is gone from the source (the body edit now either rewrites or forwards verbatim; a dead door is a liability magnet)",
+          "model rewrite failed" not in _src20)
+    check("S20/F-8: the unreachable post-chunk 413 branch is gone too (pre-deduction makes body <= limit by construction; DV-fix9 deleted a dead probe rc, this round deletes its siblings -- dead code is where the next blind face burns its round)",
+          _flat20.count("if len(body) > limit") == 0)
+    import logging as _lg20
+    _recs20 = []
+    class _Cap20(_lg20.Handler):
+        def emit(self, rec):
+            try:
+                _recs20.append(rec.getMessage())
+            except Exception:
+                pass
+    _lp20 = _lg20.getLogger("strata-router")
+    _cap20 = _Cap20()
+    _lp20.addHandler(_cap20)
+    try:
+        _cfg20 = {"listen": "127.0.0.1", "port": 1,
+                  "backends": [{"id": "s20a", "url": "http://127.0.0.1:9"}],
+                  "require_idle": True, "priority": 5, "max_inflight": 9}
+        _pl20 = R.make_pool(_cfg20)
+        _n020 = len(_recs20)
+        R.validate_cfg(_cfg20, _pl20, strict=False)
+        _w20 = [m for m in _recs20[_n020:] if any(k in m for k in ("require_idle", "priority", "max_inflight")) and "typo" not in m]
+        _lied20 = [m for m in _w20 if "IGNORED" in m]
+        _honest20 = [m for m in _w20 if "EVERY backend" in m]
+        check("S20/F-1: top-level priority/max_inflight/require_idle finally warn the TRUTH ('applied as a DEFAULT to EVERY backend') -- the log that said IGNORED while make_pool merged them into every box lied like the old probe_model line (R4-F8d kin, same lesion)",
+              len(_honest20) == 3 and not _lied20 and _pl20.backends[0].require_idle is True,
+              str([m[:80] for m in _w20][:3]))
+    finally:
+        _lp20.removeHandler(_cap20)
+    check("S20/F-1 doctrine: the merged-read trio is a NAMED set beside the reader it mirrors (Backend.__init__ reads them; the warning set and the read sites cannot drift silently)",
+          "_MERGED_READ_KEYS" in _src20 and '("priority", "max_inflight", "require_idle")' in _flat20)
+    _kpf20, _rk220, _gp20 = R._keys_path_for, R._read_keys_file2, R.getpass.getpass
+    try:
+        R._keys_path_for = lambda cfg, cp, must_exist=True: "s20-sidecar.json"
+        R._read_keys_file2 = lambda p: ({"box1": "BOX1-KEY-S20"}, True)
+        _cs20 = {"backends": ["http://127.0.0.1:9"]}
+        R.apply_keys(_cs20, "s20cfg.json")
+        _pf20 = R.make_pool(_cs20)
+        check("S20/F-2: an auto-id box finally SPEAKS to the keys chain -- a sidecar entry for 'box1' lands on the box the boot log NAMES box1 (pre-fix: a false 'typo?' warning on the real id AND the key silently never applied)",
+              _pf20.backends[0].api_key == "BOX1-KEY-S20", repr(_pf20.backends[0].api_key))
+        _cd20 = {"backends": [{"url": "http://127.0.0.1:9"}]}
+        _io20 = __import__("io")
+        _so20 = sys.stdout
+        sys.stdout = _io20.StringIO()
+        try:
+            R.getpass.getpass = lambda p="": "GHOST-KEY-S20"
+            _rc20 = R.set_key(_cd20, "None", "s20cfg.json", "s20-sidecar.json")
+            _out20 = sys.stdout.getvalue()
+        finally:
+            sys.stdout = _so20
+        check("S20/F-2 (L2-c): the ghost id dies -- 'None' (the str(spec.get('id')) artifact) is REFUSED with the REAL configured ids named, instead of a silent rc=0 'stored' entry that could never be installed -- the quietest dead key the program has caught",
+              _rc20 != 0 and "box1" in _out20, "rc=%s out=%r" % (_rc20, _out20[:90]))
+        check("S20/F-2 doctrine: the id law lives in ONE helper -- make_pool, apply_keys (known set AND apply loop) and set_key all speak _backend_ids (thirteenth lesson: the law moves INTO the shared primitive)",
+              _flat20.count("_backend_ids") >= 5, "mentions=%d" % _flat20.count("_backend_ids"))
+    finally:
+        R._keys_path_for, R._read_keys_file2, R.getpass.getpass = _kpf20, _rk220, _gp20
+    check("S20/F-5: the broken-blob message stops pointing at a locked door -- it says DELETE the file FIRST, then --set-key (the instructed fix used to be gated out by apply_keys re-reading the same broken file)",
+          "Delete the file, then retype the keys with --set-key" in _src20)
+    check("S20/F-7: the three drifting line-number anchors are gone -- the comments now name the SYMBOLS they mean (line numbers rot, symbols survive refactors; the freshness gate cited load_state_ok AS load_score)",
+          ":377-380" not in _flat20 and ":1561" not in _flat20 and ":2336" not in _flat20)
+    check("S20/doc: the README drain law is now ENUMERATION-PROOF -- every door that closes learns it, INCLUDING the stdlib send_error path, and the keep-alive carve-out still stands (a paragraph you can enumerate past is a paragraph that will be enumerated past)",
+          "including the stdlib send_error path" in _fl15 and "GET/HEAD chunked close" in _fl15
+          and "legitimately pipelined request" in _fl15)
 
     print("")
     if FAKE_ERRORS:
