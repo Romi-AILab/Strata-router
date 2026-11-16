@@ -122,7 +122,7 @@ Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
 |------|-----------|---------|---------|
 | `--config FILE` | — | — | JSON file with any keys below. |
 | `--backend ID=URL[,/prefix]` | `backends` | `[]` | One entry per box, repeat per box. |
-| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards; a wildcard -- anything inet_aton resolves to 0.0.0.0 (`0.0.0.0`/`0`/`00`/`0x0`/`*`) -- refuses boot (the guard would 403 every caller); an unresolvable value dies at the bind BY NAME, never as a traceback. Surrounding space / case are normalized once, at the door. |
+| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards; a wildcard -- anything inet_aton resolves to 0.0.0.0 (`0.0.0.0`/`0`/`00`/`0x0`/`*`) -- refuses boot (the guard would 403 every caller); an unresolvable value dies at the bind BY NAME, never as a traceback. Surrounding space / case are normalized once, at the door. And the boot never waits on a name lookup it does not need: the stdlib's `server_bind` would ask `getfqdn` of the listen address -- a reverse DNS stall of ~5 s on Windows for a bindable address with no name (measured on `127.0.0.2`, and the tailnet bind is exactly that shape) -- so the server name is taken from the one truth already in hand, the listen IP itself; bind to serving is one bind, nothing else. |
 | `--port N` | `port` | `8088` | The router's own port. |
 | `--path-prefix /P` | `path_prefix` | `""` | Prefix prepended to every backend path (e.g. `/anthropic`). |
 | `--keys-file FILE` | `keys_file` | `""` | Backend-id→key sidecar; defaults to `router.keys.json` next to `--config` (git-ignored). |
@@ -807,7 +807,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 512 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 538 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -919,13 +919,32 @@ refusal AT the deadline instead of never; and every refusal arrives framed:
 a real status line, even when the request line was too broken for the
 stdlib to assign a version at all (its class default is HTTP/0.9, which
 suppresses the status line -- five dispatch doors once answered in bare
-HTML for exactly this reason);
+HTML for exactly this reason); since DV-fix12 the framing is forced at the
+stdlib door, and since DV-fix13 it is ONE unconditional law at BOTH refusal
+faces -- the router's own `_json` doors included: whatever version the
+caller spoke, every refusal arrives framed, and the 0.9 close-delimited law
+governs what it always governed -- the relayed box body, which never passes
+through a refusal writer (the round-10 two-word-GET exemption left twenty
+sister doors bare one byte away from a framed 505: the program's 16th
+same-shape lesion);
 a door that keeps the connection open drains
 NOTHING -- its pending bytes are a legitimately pipelined request;
 the chunked reader refuses an empty size line, a missing CRLF terminator and
 a 65-line trailer flood -- each by name -- and a chunked `GET`/`HEAD` drains
-under the quiet deadline before closing, so neither a refusal nor an answer
-is ever eaten;
+under the quiet deadline before closing; a chunked body at a closing-method
+door (an OPTIONS 405) drains to EOF or the 2.0 s deadline -- chunked carries
+no number to stop at, so the bound IS the deadline -- and a chunk size
+exactly at the cap passes the strict `>` capacity door, its fill waiting on
+the caller's own read pace and socket timeout (over-cap dies named within
+the bound); since DV-fix13 every close additionally ends at ONE close-tail
+site -- flush, FIN first, a bounded final drain to EOF -- so no refusal and
+no answer is eaten by the CLOSE itself (the program's 17th same-shape
+lesion: a door could drain perfectly and still RST-eat its own delivered
+refusal, or the success 200, from the unread buffer of a caller that was
+trickling while not yet reading); the delivery boundary, stated honestly:
+a caller that keeps dribbling bytes past every bounded window and only then
+tries to read is beyond any server's reach -- the OS discards unread data
+on RST -- and nothing in this file promises otherwise;
 `Host: [::1]` parses; an HTTP/1.0 caller gets close-delimited framing (never
 chunk bytes it cannot parse); a LYING box's raw response cannot put
 `access-control-*` on the wire (stripped by name at the relay) while status

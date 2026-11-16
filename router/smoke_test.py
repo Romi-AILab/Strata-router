@@ -5671,9 +5671,10 @@ def main():
               _c21["listen"] == "localhost" and not _false21,
               "listen=%r warns=%r" % (_c21["listen"], [m[:40] for m in _false21]))
         _c21, _p21, _ww21 = _v21("192.0.2.55")
-        check("S21/N-5 control: an honest off-loopback bind (TEST-NET doc space -- a lab string) still gets its full firewall sermon and is NOT called a wildcard -- normalization must never mute the truth",
-              any("NOT loopback" in m for m in _ww21) and not any("WILDCARD" in _t21 for _f21, _t21 in _p21),
-              repr([m[:40] for m in _ww21][:1]))
+        check("S21/N-5 control re-anchored (DV-R11 C-4): an honest off-loopback listen is NOT called a wildcard -- AND validate_cfg no longer speaks the firewall sermon at all: it deferred to AFTER the bind (r11a measured it printing 'Firewall this port' for a port that would never exist -- R4-F3's bind-first doctrine covers words). S23 polices WHERE the sermon now fires.",
+              _c21["listen"] == "192.0.2.55" and not any("NOT loopback" in m for m in _ww21)
+              and not any("WILDCARD" in _t21 for _f21, _t21 in _p21),
+              repr(_p21)[:120])
     finally:
         _lp21.removeHandler(_cap21)
     check("S21/doc: the README drain law states its BOUND -- STILL-ARRIVING bytes are discarded inside ONE quiet window, nothing waits past it (a guarantee whose boundary is unstated is a guarantee that gets over-promised), and the guard paragraph now says why listen must name ONE exact address",
@@ -5892,8 +5893,9 @@ def main():
                 _s22m.close()
             except OSError:
                 pass
-        check("S22/P4 non-regression: the TRUE two-word HTTP/0.9 GET still gets its body VERBATIM -- close-delimited is the documented law for a caller that knows no framing; the compensation excludes exactly this shape (if it 'fixed' this too, the 0.9 caller gets bytes it cannot parse)",
-              (_raw22m.startswith(b"{") and b"\r\n0\r\n\r\n" not in _raw22m) if _up22 else False,
+        check("S22/P4 re-anchored (DV-R11 F-2+F-1): the two-word GET with NO Host -- the shape round 10's own log measured answering BARE -- now arrives FRAMED and NAMED (it dies at the rebinding guard, and a refusal is owed a status line). The old lock asserted 'VERBATIM 0.9 body' on this request: it never reached the documented relay law -- the bare 403 body happened to satisfy all three of its markers. Lesson #6's suite cousin: a lock that polices the wrong door is a blindfold with a green tick.",
+              _raw22m.startswith(b"HTTP/1.") and b"403" in _raw22m.split(b"\r\n", 1)[0]
+              and b"rebinding guard" in _raw22m,
               repr(_raw22m[:40]))
         # ---- R10-P5: the wildcard family beyond the exact tuple -- the law is
         # whatever inet_aton resolves (glibc semantics: "0.0", "00", "0x0" all
@@ -5970,6 +5972,407 @@ def main():
           "any spelling of" not in _fl15 and "inet_aton" in _fl15, "")
     check("S22/doc: the framing guarantee is STATED -- every refusal arrives framed (a real status line): what round 10 measured as five doors answering in bare HTML is now a written contract the locks police",
           "every refusal arrives framed" in _fl15, "")
+
+    print("")
+    print("S23) DV-R11: one framing law at BOTH refusal faces (16th same-shape lesion -- _json answered the same caller BARE one door from a framed 505), the handler's ONE close-tail (17th same-shape lesion -- a perfect door could still RST-eat its OWN delivered refusal, and the success 200, from a caller trickling while not yet reading), the delivery boundary stated, the sermon after the bind")
+    # Round-11 harvest (L1a fidelity + L1b behavioral + L2 red team; the council
+    # reproduced EVERY row -- ws-v1219-DV-R11-council-r11a/r11b archives): the
+    # round-10 framing compensation lived ONLY in the send_error override while
+    # the router's own _json primitive (~20 doors) stayed bare under HTTP/0.9
+    # (r11a BARE@0.40 x3 vs FRAMED@2.01). Ruling A': one UNCONDITIONAL law at
+    # both faces; the 0.9 close-delimited law governs relayed bodies only (the
+    # relay never passes a refusal writer -- rows below keep it VERBATIM). And
+    # the drain law's final mile: at the deadline close, a caller still
+    # trickling and not yet reading lost the ANSWER to the Windows RST --
+    # reader timing was the determining variable (8/8 EATEN read-later vs 8/8
+    # FRAMED read-now, five doors including the dispatch 400 and the success
+    # 200). One close-tail at handle()'s exit: flush, FIN first, bounded drain
+    # to EOF. The shape no server can save (dribble past every window, read
+    # only afterwards) is now README law, not a silent promise.
+    _H23 = b"Host: 127.0.0.1:9174\r\n"
+    _lb23 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _lb23.bind(("127.0.0.1", 9175))          # plain socket, no reuse, single listener
+    _lb23.listen(8)
+    _run23 = [True]
+    def _box23():
+        while _run23[0]:
+            try:
+                _c23b, _ = _lb23.accept()
+            except OSError:
+                return
+            try:
+                _c23b.settimeout(5)
+                _hd23b = b""
+                while b"\r\n\r\n" not in _hd23b:
+                    _g23b = _c23b.recv(4096)
+                    if not _g23b:
+                        break
+                    _hd23b += _g23b
+                if not _hd23b:
+                    continue
+                _ln23b = _hd23b.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+                if _ln23b.startswith("GET"):
+                    _j23b = json.dumps({"object": "list", "data": ["s23box-marker"]}).encode()
+                else:
+                    _j23b = json.dumps({"id": "s23", "content": [{"type": "text", "text": "ok"}],
+                                        "usage": {"input_tokens": 10, "output_tokens": 5}}).encode()
+                _c23b.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: %d\r\n\r\n" % len(_j23b) + _j23b)
+            except Exception:
+                pass
+            finally:
+                try:
+                    _c23b.close()
+                except OSError:
+                    pass
+    threading.Thread(target=_box23, daemon=True).start()
+    with open("s23_live.json", "w") as _ff23:
+        json.dump({"listen": "127.0.0.1", "port": 9174, "status_interval": 0.5,
+                   "control_token": "s23-fake-control-token", "max_body_mb": 1,
+                   "backends": [{"id": "s23a", "url": "http://127.0.0.1:9175"}]}, _ff23)
+    _proc23 = subprocess.Popen([sys.executable, ROUTER, "--config", "s23_live.json", "--log-level", "WARNING"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def _probe23(raw, hold=6.0, halfclose=False):
+        try:
+            _s23p = socket.create_connection(("127.0.0.1", 9174), timeout=5)
+        except OSError:
+            return b"", 99.0
+        _s23p.sendall(raw)
+        if halfclose:
+            try:
+                _s23p.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+        _s23p.settimeout(hold)
+        _got23p = b""
+        _t023p = time.monotonic()
+        try:                                    # read to EOF -- body markers
+            while len(_got23p) < 8192:
+                _g23p = _s23p.recv(65536)
+                if not _g23p:
+                    break
+                _got23p += _g23p
+        except Exception:
+            pass
+        _secs23p = round(time.monotonic() - _t023p, 2)
+        try:
+            _s23p.close()
+        except OSError:
+            pass
+        return _got23p, _secs23p
+    def _drip23_late(head, prefix=b"", stop_at=2.3, read_at=2.55, hold=4.0):
+        """DV-R11 C-1 shape: trickle 1 byte / 0.3 s, the writer STOPS at
+        stop_at (just AFTER the router's deadline -- the band that used to
+        race; close-tail absorbs it), the client only STARTS READING at
+        read_at. Pre-fix the deadline close RST-ate the already-written
+        answer (8/8 per door in council r11a/r11b)."""
+        try:
+            _s23l = socket.create_connection(("127.0.0.1", 9174), timeout=hold + 2)
+        except OSError:
+            return b"", 99.0, None
+        _t023l = time.monotonic()
+        _st23l = [False]
+        def _w23l():
+            _s23l.sendall(head + prefix)
+            while not _st23l[0] and time.monotonic() - _t023l < stop_at:
+                try:
+                    _s23l.sendall(b"x")
+                except OSError:
+                    return
+                _w23lt = 0.0
+                while _w23lt < 0.3 and not _st23l[0]:
+                    time.sleep(0.05)
+                    _w23lt += 0.05
+        threading.Thread(target=_w23l, daemon=True).start()
+        _got23l = b""
+        _t23first = None
+        try:
+            time.sleep(read_at)
+            _s23l.settimeout(hold)
+            while True:
+                _g23l = _s23l.recv(65536)
+                if not _g23l:
+                    break
+                if _t23first is None:
+                    _t23first = round(time.monotonic() - _t023l, 2)
+                _got23l += _g23l
+        except Exception:
+            pass
+        _secs23l = round(time.monotonic() - _t023l, 2)
+        _st23l[0] = True
+        try:
+            _s23l.close()
+        except OSError:
+            pass
+        return _got23l, _secs23l, _t23first
+    def _drip23_live(head, prefix=b"", cap=3.6):
+        """control shape: the reader is LIVE from t=0 -- this is what saved
+        the answer in round 11's head-to-head; the close-tail must keep it
+        saved at every door."""
+        try:
+            _s23v = socket.create_connection(("127.0.0.1", 9174), timeout=cap + 2)
+        except OSError:
+            return b"", 99.0
+        _t023v = time.monotonic()
+        _st23v = [False]
+        def _w23v():
+            _s23v.sendall(head + prefix)
+            while not _st23v[0]:
+                try:
+                    _s23v.sendall(b"x")
+                except OSError:
+                    return
+                time.sleep(0.3)
+        threading.Thread(target=_w23v, daemon=True).start()
+        _got23v = b""
+        try:
+            _s23v.settimeout(0.2)
+            while time.monotonic() - _t023v < cap:
+                try:
+                    _g23v = _s23v.recv(65536)
+                except socket.timeout:
+                    continue
+                if not _g23v:
+                    break
+                _got23v += _g23v
+                if b"\r\n\r\n" in _got23v:
+                    break
+        except Exception:
+            pass
+        _secs23v = round(time.monotonic() - _t023v, 2)
+        _st23v[0] = True
+        try:
+            _s23v.close()
+        except OSError:
+            pass
+        return _got23v, _secs23v
+    def _hz23():
+        try:
+            return get(9174, "/healthz")[0] == 200
+        except Exception:
+            return False
+    try:
+        _up23 = wait_for(_hz23, 25)
+        _d23f1, _ = _probe23(b"GET /nope HTTP/0.9\r\n" + _H23 + b"\r\n") if _up23 else (b"", 99.0)
+        check("S23/F-1: an EXPLICIT HTTP/0.9 caller's 404 arrives FRAMED -- one unconditional law at BOTH refusal faces (baseline r11a: this exact request got a BARE body at 0.40 s from _json while its sibling 505 stood framed: the round-10 compensation taught one door and left the router's own ~20-door refusal primitive untaught -- the 16th same-shape lesion)",
+              _d23f1.startswith(b"HTTP/1.") and b"404" in _d23f1.split(b"\r\n", 1)[0] and b"no route" in _d23f1,
+              repr(_d23f1[:44]))
+        _d23f2, _ = _probe23(b"OPTIONS /v1/messages HTTP/0.9\r\n" + _H23 + b"\r\n") if _up23 else (b"", 99.0)
+        check("S23/F-1: the 405 face too -- explicit-0.9 meets a framed named refusal (the OPTIONS door never had the compensation)",
+              _d23f2.startswith(b"HTTP/1.") and b"405" in _d23f2.split(b"\r\n", 1)[0] and b"OPTIONS/CORS" in _d23f2,
+              repr(_d23f2[:44]))
+        _d23f3, _ = _probe23(b"GET /v1/models HTTP/0.9\r\nHost: evil.invalid\r\n\r\n") if _up23 else (b"", 99.0)
+        check("S23/F-1: the guard family under explicit 0.9: rebinding 403 FRAMED and NAMED (a caller owed a status line whatever version it spoke)",
+              _d23f3.startswith(b"HTTP/1.") and b"403" in _d23f3.split(b"\r\n", 1)[0] and b"rebinding guard" in _d23f3,
+              repr(_d23f3[:44]))
+        _raw23v = b""
+        if _up23:
+            try:
+                _s23v0 = socket.create_connection(("127.0.0.1", 9174), timeout=8)
+                _s23v0.sendall(b"GET /v1/models\r\n" + _H23 + b"\r\n")
+                _s23v0.settimeout(6)
+                try:
+                    while True:
+                        _g23v0 = _s23v0.recv(65536)
+                        if not _g23v0:
+                            break
+                        _raw23v += _g23v0
+                except Exception:
+                    pass
+                _s23v0.close()
+            except OSError:
+                pass
+        check("S23/F-1 control: the two-word GET + Host STILL gets its body VERBATIM -- the 0.9 close-delimited law lives where it always lived: the RELAY, which never passes a refusal writer (the exemption died here was ONLY ever owed to refusals; S21 lineage, the council's LAW row reproduced)",
+              _raw23v.startswith(b"{") and b"s23box-marker" in _raw23v and b"\r\n0\r\n\r\n" not in _raw23v,
+              repr(_raw23v[:50]))
+        _raw23v09 = b""
+        if _up23:
+            try:
+                _s23v1 = socket.create_connection(("127.0.0.1", 9174), timeout=8)
+                _s23v1.sendall(b"GET /v1/models HTTP/0.9\r\n" + _H23 + b"\r\n")
+                _s23v1.settimeout(6)
+                try:
+                    while True:
+                        _g23v1 = _s23v1.recv(65536)
+                        if not _g23v1:
+                            break
+                        _raw23v09 += _g23v1
+                except Exception:
+                    pass
+                _s23v1.close()
+            except OSError:
+                pass
+        check("S23/F-1 control: explicit-0.9 + Host relay VERBATIM too -- framing was forced at the refusal faces, NEVER at the body path",
+              _raw23v09.startswith(b"{") and b"s23box-marker" in _raw23v09 and not _raw23v09.startswith(b"HTTP/1."),
+              repr(_raw23v09[:50]))
+        _mx23 = 0.0
+        _hz23s = 0
+        for _ in range(8):
+            _t023h = time.monotonic()
+            try:
+                _hz23s = get(9174, "/healthz")[0]
+            except Exception:
+                _hz23s = 0
+            _mx23 = max(_mx23, time.monotonic() - _t023h)
+        check("S23/guard: 8 plain /healthz pay NOTHING to the close-tail -- FIN-first means a closing door's honest client sees EOF EARLIER, and keep-alive never reaches the tail between requests (N-5 hot-path law, S21/S22 lineage)",
+              _hz23s == 200 and _mx23 < 1.0, "max=%.2fs" % _mx23)
+        _d23t1, _t23t1, _f23t1 = _drip23_late(b"@@@ bad request line\r\n") if _up23 else (b"", 99.0, None)
+        check("S23/C-1: dispatch-400 + trickle stopping JUST after the deadline (2.3 s), reader not started until 2.55 s: the 400 ARRIVES framed (baseline council r11b: 8/8 EATEN -- the deadline close RST-discarded the caller's unread buffer, and this stdlib door is NOT immune; the close-tail's FIN-first + bounded drain is what absorbs the late bytes)",
+              _d23t1.startswith(b"HTTP/1.") and b"400" in _d23t1.split(b"\r\n", 1)[0] and _t23t1 <= 4.0,
+              "t=%.2fs first=%r" % (_t23t1, _d23t1.split(b"\r\n", 1)[0][:44]))
+        _d23t2, _t23t2 = _drip23_live(b"@@@ bad request line\r\n") if _up23 else (b"", 99.0)
+        check("S23/C-1 control: the same door with a LIVE reader answers at the bound -- read-now was round 11's saving variable and stays green (8/8 FRAMED @2.00 in r11b)",
+              _d23t2.startswith(b"HTTP/1.") and b"400" in _d23t2.split(b"\r\n", 1)[0] and _t23t2 <= 3.0,
+              "t=%.2fs first=%r" % (_t23t2, _d23t2.split(b"\r\n", 1)[0][:44]))
+        _d23t3, _t23t3, _f23t3 = _drip23_late(b"GET /healthz HTTP/1.1\r\n" + _H23 +
+                                              b"transfer-encoding: chunked\r\n\r\n",
+                                              prefix=b"3\r\nabc\r\n") if _up23 else (b"", 99.0, None)
+        check("S23/C-1+L2: a SUCCESS 200 is owed the SAME protection -- GET+chunked, trickle stops at 2.3, reader wakes at 2.55: the 200 ARRIVES (baseline r11b: 8/8 EATEN -- this falsifies the round-9 README sentence 'neither a refusal nor an answer is ever eaten', which DV-fix13 replaces with the stated delivery boundary)",
+              _d23t3.startswith(b"HTTP/1.") and b"200" in _d23t3.split(b"\r\n", 1)[0] and _t23t3 <= 4.0,
+              "t=%.2fs first=%r" % (_t23t3, _d23t3.split(b"\r\n", 1)[0][:44]))
+        _d23t4, _t23t4 = _drip23_live(b"GET /healthz HTTP/1.1\r\n" + _H23 +
+                                      b"transfer-encoding: chunked\r\n\r\n",
+                                      prefix=b"3\r\nabc\r\n") if _up23 else (b"", 99.0)
+        check("S23/C-1 control: chunked GET success with a LIVE reader answers named (N-1's original law, now also tail-guarded)",
+              _d23t4.startswith(b"HTTP/1.") and b"200" in _d23t4.split(b"\r\n", 1)[0] and _t23t4 <= 3.0,
+              "t=%.2fs" % _t23t4)
+        _d23c1, _t23c1 = _probe23(b"POST /v1/chat/completions HTTP/1.1\r\nHost: evil.invalid\r\n" +
+                                  b"content-type: application/json\r\ncontent-length: 10\r\n\r\n0123456789") if _up23 else (b"", 99.0)
+        check("S23/control: the honest fast door is NOT slower with the tail -- rebinding-403 fully delivered still pays EXACTLY one quiet window (<1.5 s; the tail runs AFTER the answer and honest clients read from the FIN)",
+              b"403" in _d23c1 and b"rebinding guard" in _d23c1 and _t23c1 < 1.5, "t=%.2fs" % _t23c1)
+        _d23c2, _t23c2 = _probe23(b"POST /v1/messages HTTP/1.1\r\n" + _H23 +
+                                  b"content-type: application/json\r\ncontent-length: 2000000000\r\n\r\nab",
+                                  halfclose=True) if _up23 else (b"", 99.0)
+        check("S23/control: the giant-CL half-close still releases at EOF (<1.5 s) -- the close-tail must never slow the caller who closes on its own",
+              b"413" in _d23c2 and _t23c2 < 1.5, "t=%.2fs" % _t23c2)
+        _boot23_base = {"listen": "127.0.0.1", "port": 9176, "status_interval": 5,
+                        "backends": [{"id": "s23b", "url": "http://127.0.0.1:9"}]}
+        def _boot23(_nm23, _cfg23, _secs23=2.0, _until23=None):
+            _p23 = "s23_boot_%s.json" % _nm23
+            _e23 = "s23_boot_%s.err" % _nm23
+            with open(_p23, "w") as _f23:
+                json.dump(_cfg23, _f23)
+            with open(_e23, "wb") as _fe23:
+                _t023 = time.time()
+                _pr23 = subprocess.Popen([sys.executable, ROUTER, "--config", _p23, "--log-level", "WARNING"],
+                                         stdout=subprocess.DEVNULL, stderr=_fe23)
+                _tm23 = None
+                _al23 = True
+                while True:
+                    if _pr23.poll() is not None:
+                        _al23 = False
+                        break
+                    if _until23 is not None:
+                        try:
+                            with open(_e23, "rb") as _fp23:
+                                if _until23 in _fp23.read():
+                                    _tm23 = time.time() - _t023
+                                    break
+                        except OSError:
+                            pass
+                    if time.time() - _t023 >= _secs23:
+                        break
+                    time.sleep(0.1)
+                if _al23:
+                    _pr23.terminate()
+                    try:
+                        _pr23.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        _pr23.kill()
+                        _pr23.wait(timeout=10)
+                else:
+                    _pr23.wait(timeout=10)
+            with open(_e23, "rb") as _fr23:
+                return (0 if _al23 else _pr23.returncode), _fr23.read().decode("utf-8", "replace"), _tm23
+        _rc23g, _out23g, _ = _boot23("gai", dict(_boot23_base, listen="nope.s23.invalid"))
+        check("S23/C-4: an unresolvable listen dies NAMED and is NOT preached at -- the firewall sermon now speaks only where the port EXISTS (baseline r11a: 'Firewall this port' printed BEFORE the named death, advice for a port that never came up)",
+              _rc23g not in (0, None) and "could not be resolved" in _out23g and "NOT loopback" not in _out23g,
+              "rc=%s %s" % (_rc23g, _out23g[:110]))
+        _rc23w, _out23w, _tm23w = _boot23("fire", dict(_boot23_base, listen="127.0.0.2"),
+                                          _secs23=8.0, _until23=b"NOT loopback")
+        check("S23/C-4 control: an off-loopback listen that BINDS (127.0.0.2 -- bindable, outside the loopback triple) still gets its FULL sermon, now spoken after the bind -- normalization must never mute the truth",
+              _rc23w == 0 and "NOT loopback" in _out23w and "127.0.0.2" in _out23w,
+              "rc=%s t=%s %s" % (_rc23w, _tm23w, _out23w[:110]))
+        # DV-R13, found BY THIS SUITE'S GREEN RUN (lesson #6 ran its full course:
+        # rig suspected first, then DBG markers + phase timing, then faulthandler
+        # named it): Python 3.13's HTTPServer.server_bind ends with
+        #     self.server_name = socket.getfqdn(host)
+        # and on Windows the reverse lookup of a bindable-but-nameless address
+        # -- 127.0.0.2 here, the DOCUMENTED tailnet listen in production --
+        # stalls ~5 s (measured 4.96 s, twice) with the socket BOUND but NOT
+        # YET LISTENING (server_activate comes after). The clock law below is
+        # the lock: baseline refuses at t=3.0 s; the bypass serves in <1 s.
+        _pt23t = "s23_boot_timing.json"
+        _et23t = "s23_boot_timing.err"
+        with open(_pt23t, "w") as _f23t:
+            json.dump(dict(_boot23_base, listen="127.0.0.2"), _f23t)
+        _t023t = time.time()
+        _srv23t = None
+        with open(_et23t, "wb") as _fe23t:
+            _pr23t = subprocess.Popen([sys.executable, ROUTER, "--config", _pt23t, "--log-level", "WARNING"],
+                                      stdout=subprocess.DEVNULL, stderr=_fe23t)
+            try:
+                while time.time() - _t023t < 3.0:
+                    if _pr23t.poll() is not None:
+                        break
+                    try:
+                        _cx23t = socket.create_connection(("127.0.0.2", 9176), timeout=0.5)
+                        _cx23t.close()
+                        _srv23t = time.time() - _t023t
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+            finally:
+                if _pr23t.poll() is None:
+                    _pr23t.terminate()
+                    try:
+                        _pr23t.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        _pr23t.kill()
+                        _pr23t.wait(timeout=10)
+        check("S23/boot-time (DV-R13 -- the lesion THIS suite's own GREEN run caught): a bindable nameless listen is SERVING within 3.0 s of spawn -- HTTPServer.server_bind's socket.getfqdn(host) stalls ~5 s on Windows for an address with no name (faulthandler: socket.py:807 getfqdn <- http/server.py:138; measured 4.96 s x2), leaving the socket bound but un-listening while the boot says NOTHING; the bypass sets server_name from the ONE truth already in hand (the listen IP itself -- the router never reads server_name). Bind-first doctrine keeps its promise about clocks too, on the documented tailnet path",
+              _srv23t is not None, "serving_at=%s" % _srv23t)
+        _rc23lh, _out23lh, _ = _boot23("lochi", dict(_boot23_base, listen="Localhost", port=9177))
+        check("S23/C-4 control: 'Localhost' binds and earns NO sermon -- N-5's normalization truth rode the move intact (the loopback triple reads the ONE normalized source)",
+              _rc23lh == 0 and "NOT loopback" not in _out23lh,
+              "rc=%s %s" % (_rc23lh, _out23lh[:110]))
+    finally:
+        _run23[0] = False
+        _term(_proc23)
+        try:
+            _lb23.close()
+        except OSError:
+            pass
+    _src23 = open(ROUTER, encoding="utf-8").read()
+    def _win23(a23, b23):
+        _i23 = _src23.find(a23)
+        _j23 = _src23.find(b23, _i23 + 1) if _i23 >= 0 else -1
+        return _src23[_i23:_j23] if _i23 >= 0 and _j23 > _i23 else ""
+    check("S23/C-1 doctrine: the close tail is ONE site -- exactly one shutdown(socket.SHUT_WR in the file (the tail's FIN-first), and handle()'s finally is its only caller; per-door close tails are the illegal shape this program has now measured sixteen times",
+          _src23.count("shutdown(socket.SHUT_WR") == 1
+          and _src23.count("self._close_tail()") == 1
+          and "def _close_tail(self" in _src23,
+          "n_shutwr=%d n_call=%d" % (_src23.count("shutdown(socket.SHUT_WR"), _src23.count("self._close_tail()")))
+    check("S23/C-1 choke law: the tail hangs off the handler's ONE exit -- handle() overridden with the tail in a finally, so every door, method and stdlib path inherits (the send_error precedent, one level DOWN again: the law now owns the close itself)",
+          "self._close_tail()" in _win23("def handle(self):", "def _drain_body"))
+    check("S23/F-1 law: the two-word-GET exemption is DEAD TEXT -- the file carries no _w09 shape predicate anywhere; framing at the refusal faces is UNCONDITIONAL (the 0.9 law's true home -- the relay -- is locked VERBATIM above)",
+          "_w09" not in _src23)
+    check("S23/F-1 control: the send_error face still forces framing while request_version is the stdlib default 0.9 (round 10's law, minus its dead exemption)",
+          'self.request_version = "HTTP/1.1"' in _win23("def send_error", "def _json"))
+    check("S23/F-1 choke law: _json -- the router's OWN refusal primitive, ~20 doors -- carries the SAME unconditional force (baseline: twenty doors bare at 0.40 s while one sister door stood framed: a law enumerated door by door is a law the next door forgets)",
+          'self.request_version = "HTTP/1.1"' in _win23("def _json(self", "def _route_path"))
+    check("S23/F-3: _probe_get closes its connection in a FINALLY (baseline: close() inside the try -- a throw after open_connection skipped it and leaked the connection)",
+          "finally:" in _win23("def _probe_get", "def _probe_messages")
+          and "conn.close()" in _win23("def _probe_get", "def _probe_messages"))
+    check("S23/F-3: _probe_messages rides the same close-in-finally law",
+          "finally:" in _win23("def _probe_messages", "\n# config")
+          and "conn.close()" in _win23("def _probe_messages", "\n# config"))
+    check("S23/doc: the framing promise is now UNIVERSAL at the refusal faces -- 'whatever version the caller spoke', and the 0.9 close-delimited law is stated for what it governs: the relayed body",
+          "governs what it always governed" in _fl15, "")
+    check("S23/doc: the delivery boundary is STATED -- the shape no server can save (dribble past every window, read only afterwards) is written as the OS limit it is, not silently promised away (the round-9 'never eaten' absolute was the over-promise this sentence replaces)",
+          "beyond any server's reach" in _fl15, "")
+    check("S23/doc: the chunked waiting laws are on the record -- a chunked body at a closing door drains to EOF-or-deadline (the bound IS the deadline), and an at-cap chunk size passes the strict door with its fill waiting on the caller's own read pace (C-2/C-3: measured SILENT 9 s and 2.0-vs-0.4 s in r11a)",
+          "chunked carries no number to stop at" in _fl15
+          and "its fill waiting on the caller's own read pace" in _fl15, "")
 
     print("")
     if FAKE_ERRORS:

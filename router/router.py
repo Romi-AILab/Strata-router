@@ -97,6 +97,7 @@ import re
 import select
 import signal
 import socket
+import socketserver
 import ssl
 import subprocess
 import sys
@@ -2383,26 +2384,34 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self._close_drain()
         if self.request_version == "HTTP/0.9":
-            # DV-R10 (L1b-F-1 + red team, the suite-blind P3): FIVE stdlib
-            # dispatch doors -- malformed-line 400, bad-syntax 400, 505 (x2
-            # versions), two-word non-GET 400 -- fire BEFORE http/server.py
-            # assigns request_version (3.13: that assignment is at line 320,
-            # BELOW all of them). While it still holds the CLASS DEFAULT
-            # 'HTTP/0.9', send_response_only/send_header/end_headers suppress
-            # the status line and every header: the caller got bare HTML and
-            # http.client ate a BadStatusLine. A TRUE two-word GET is a real
-            # 0.9 caller -- for it, close-delimited body IS the documented law
-            # (N-2, suite-locked) -- so the compensation excludes exactly that
-            # shape; everything else arriving here with the default wrote
-            # modern HTTP and is owed a framed refusal. The chunk gate has
-            # owned this stdlib default since DV-fix11; this is its OUT-
-            # framing twin, one round later.
-            _w09 = (self.requestline or "").split()
-            if not (len(_w09) == 2 and _w09[0] == "GET"):
-                self.request_version = "HTTP/1.1"
+            # DV-R11 F-1 (L1a fidelity face + L2 red team, the 16th same-shape
+            # lesion): round 10 built this compensation with a two-word-GET
+            # exemption -- and left the router's OWN refusal primitive (_json,
+            # some twenty doors) untaught. The same caller then stood one door
+            # away from a framed 505 and got a bare body back (r11a live:
+            # BARE@0.40 x3 vs FRAMED@2.01; README's own sentence called the
+            # file dishonest). The council ruling: the 0.9 close-delimited law
+            # governs RELAYED BODIES -- a path that never passes through a
+            # refusal writer (two-word GET + Host that wants a body gets it
+            # verbatim; S21's relay lock polices it as a control) -- so the
+            # REFUSAL face frames UNCONDITIONALLY, here and in _json: one law,
+            # two faces, no shape predicate. A refusal is owed a status line
+            # to every caller; the exemption's old text is suite-forbidden.
+            self.request_version = "HTTP/1.1"
         BaseHTTPRequestHandler.send_error(self, code, message, explain)
 
     def _json(self, code, obj, extra_headers=()):
+        # DV-R11 F-1 (the 16th same-shape lesion, council ruling A'): framing was
+        # built at the send_error door only, and THIS -- the router's own
+        # refusal primitive, some twenty doors -- answered explicit-HTTP/0.9
+        # and default-version callers in bare body, one door away from a
+        # framed 505. One law, both faces: while the version is 0.9 the answer
+        # is forced through HTTP/1.1 framing. The 0.9 close-delimited law
+        # governs RELAYED box bodies (the relay never passes through here on
+        # success); a refusal owed a status line to every caller. See
+        # send_error for the full ruling.
+        if self.request_version == "HTTP/0.9":
+            self.request_version = "HTTP/1.1"
         # Optional headers emit before end_headers. First user is the R4-B1
         # (DV-R4) fix: the synth count_tokens rescue must answer through the
         # SAME header face as the relay it replaces -- README promises a
@@ -2592,6 +2601,64 @@ class Handler(BaseHTTPRequestHandler):
                 self.connection.settimeout(None)
             except Exception:
                 pass
+
+    def _close_tail(self, secs=0.6):
+        """The drain law's FINAL MILE (DV-R11 C-1 + L2 N-R11-1, the 17th
+        same-shape lesion and the first that bites AFTER the answer): a door
+        may drain perfectly before writing and still be RST-eaten after it.
+        When the router closed at its deadline, the caller could STILL be
+        trickling and not reading yet -- a Windows close over inbound still
+        arriving answers with an RST, and the RST discards the caller's
+        UNREAD receive buffer: the named refusal, and on the success doors
+        the 200 itself (council r11a/r11b: 8/8 EATEN per door, five doors --
+        the dispatch 400 included; reader timing was the determining
+        variable: same shape, read-now 8/8 FRAMED). The law is at every door
+        and inside every read; this is its single site at the handler's
+        close: flush, FIN FIRST (shutdown(SHUT_WR)) so a compliant slow
+        reader holds bytes+EOF while we wait, then a bounded drain to EOF
+        that absorbs the caller's last arrivals and lets the close be clean.
+        The physical limit is documented, not promised away (README, the
+        delivery boundary): a caller that keeps dribbling past every bounded
+        window AND hands the socket to a reader only afterwards cannot be
+        saved by ANY server -- the OS RST law owns that shape. Single site:
+        handle()'s finally -- every door, method and stdlib path inherits;
+        per-door close tails are the illegal shape this program has now
+        measured sixteen times. Keep-alive pays nothing: the request loop
+        never returns here between pipelined requests (N-5 intact), and a
+        closing door's honest client sees FIN the instant the answer is
+        written -- its EOF-read returns earlier, not later."""
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
+        _end = time.monotonic() + secs
+        while True:
+            _left = _end - time.monotonic()
+            if _left <= 0:
+                break
+            try:
+                self.connection.settimeout(_left)
+                if not self.connection.recv(65536):
+                    break          # the caller's FIN: inbound done -- clean close
+            except Exception:
+                break              # deadline, RST-in, or already gone
+        try:
+            self.connection.settimeout(None)
+        except Exception:
+            pass
+
+    def handle(self):
+        # DV-R11: the close tail hangs off the handler's ONE exit -- not off
+        # any door (the sixteen-lesion doctrine: law at the shared surface).
+        # Runs after the request loop ends, before socketserver closes down.
+        try:
+            BaseHTTPRequestHandler.handle(self)
+        finally:
+            self._close_tail()
 
     def _drain_body(self, limit=1 << 20):
         """Consume (bounded) whatever body a non-proxy route will not use, so
@@ -3400,7 +3467,23 @@ class Router(ThreadingHTTPServer):
                 self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             except OSError:
                 pass
-        super().server_bind()
+        # DV-R13 (a NEW lesion caught live by DV-fix13's GREEN run -- lesson #6
+        # ran its course the other way this time: rig suspected first, engine
+        # stood charged; faulthandler stack named it inside server_bind):
+        # Python 3.13's HTTPServer.server_bind ends with
+        #     self.server_name = socket.getfqdn(host)
+        # and on Windows the reverse lookup of a bindable-but-nameless address
+        # -- 127.0.0.2 in the lab, and the DOCUMENTED tailnet listen in
+        # production -- stalls ~5 s (measured 4.96 s x2) between the bind and
+        # every boot sentence. Bind-first doctrine says the boot may not hang
+        # on anything the bind itself does not need; the router never reads
+        # server_name (the Server header comes from server_version, the
+        # handler log uses address_string). So the stdlib's attributes are set
+        # from the ONE truth already in hand -- the name of a listen address
+        # is that IP -- and the resolver call is skipped.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
 
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
@@ -3462,21 +3545,29 @@ def probe(cfg):
 
 
 def _probe_get(be, path):
+    conn = None   # DV-R11 F-3 (L1a P3): close() used to sit INSIDE the try --
+    # any throw after open_connection skipped it and leaked the connection.
     try:
         conn = open_connection(be, 3.0, 6.0)
         conn.request("GET", be.prefix + path, headers=backend_headers(be.cfg, None, be))
         r = conn.getresponse()
         body = r.read(4000).decode("utf-8", "replace")
-        conn.close()
         return r.status, body
     except Exception as exc:
         return None, str(exc)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _probe_messages(be, path):
     model = be.cfg.get("probe_model") or "probe"
     body = json.dumps({"model": model, "max_tokens": 1, "stream": True,
                        "messages": [{"role": "user", "content": "ping"}]}).encode()
+    conn = None   # DV-R11 F-3: same close-in-finally law as _probe_get
     try:
         conn = open_connection(be, 3.0, 60.0)
         hdrs = backend_headers(be.cfg, None, be)
@@ -3492,10 +3583,15 @@ def _probe_messages(be, path):
         # makes the box cancel it at its next beat (<= ~10 s), seat freed.
         r = conn.getresponse()
         status = r.status
-        conn.close()
         return status, ""
     except Exception as exc:
         return None, str(exc)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -4521,14 +4617,13 @@ def validate_cfg(cfg, pool, strict=True):
     # DV-R9 N-5: `_ln` is the NORMALIZED string written back above -- this loopback test
     # now agrees with the guard's (also-normalized) view, so "Localhost" earns no false
     # "admits ONLY Host: Localhost / IS NOT loopback" sentence.
-    if _ln is not None and _ln not in ("127.0.0.1", "localhost", "::1"):
-        LOG.warning(
-            "listen=%s is NOT loopback: this router has no auth of its own and injects "
-            "backend keys for callers that send none. Firewall this port to known peers now. "
-            "The rebinding guard admits ONLY Host: %s (loopback names prove nothing off-loopback) "
-            "-- and gate the control surface: --set-key control.",
-            _ln, _ln,
-        )
+    # DV-R11 C-4 (L1b P3): the firewall sermon MOVED off this line. It used to
+    # print HERE -- before the bind -- so an unresolvable listen got "Firewall
+    # this port" advice for a port that would never exist (r11a live: sermon
+    # line, then the named death). R4-F3's bind-first doctrine covers WORDS
+    # too: main() prints the sermon only after the bind SUCCEEDED. The
+    # normalizing write-back above stays the single source; the value's
+    # loopback status is tested where it is spoken, against this same triple.
     # ---- smart ladder section (design v4.1 S9/S-1) ------------------------
     _sm_sec = cfg.get("smart")
     if _sm_sec is not None:
@@ -4633,6 +4728,21 @@ def main(argv=None):
               "name the ONE address your clients use (wildcards and their inet_aton shorthands are refused by name at the config door)"
               % (cfg["listen"], cfg["port"], type(_be).__name__, _be), file=sys.stderr)
         return 1
+    # DV-R11 C-4: the firewall sermon speaks only where the port EXISTS --
+    # after the bind succeeded (it used to fire inside validate_cfg, before
+    # this try: an unresolvable listen got firewall advice for a port that
+    # never came up). Same text, same triple as the guard's loopback view;
+    # validate_cfg wrote the normalized listen back, so this reads the ONE
+    # truth the guard also reads.
+    _ln_firewall = str(cfg["listen"])
+    if _ln_firewall not in ("127.0.0.1", "localhost", "::1"):
+        LOG.warning(
+            "listen=%s is NOT loopback: this router has no auth of its own and injects "
+            "backend keys for callers that send none. Firewall this port to known peers now. "
+            "The rebinding guard admits ONLY Host: %s (loopback names prove nothing off-loopback) "
+            "-- and gate the control surface: --set-key control.",
+            _ln_firewall, _ln_firewall,
+        )
     LOG.info(
         "listening on http://%s:%s -- affinity+least-queued passthrough, no rate limiting, "
         "queue stays in the backends", cfg["listen"], cfg["port"],
