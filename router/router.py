@@ -123,9 +123,10 @@ CLIENT_WATCH_S = 0.5
 GHOST_GRACE_S = 12.0
 RECENT_TTFB_WINDOW = 30    # per-box rolling window of finished-request ttfb (v1.2.14)
 
-# Paths accepted for generation (POST). Router path == backend path unless a
-# per-backend path_prefix is set (some builds serve only /anthropic/v1/messages).
-POST_PATHS = ("/v1/messages", "/v1/responses", "/v1/chat/completions", "/v1/completions")
+# (DV-R10 R10-P3: POST_PATHS -- "Paths accepted for generation" -- died here:
+# zero loads since v4.1, do_POST proxies ANY path; a constant whose comment
+# lies is a future bug's invitation. GET_PATHS stays: its /health member is
+# genuinely loaded.)
 GET_PATHS = ("/v1/models", "/models", "/health")
 COUNT_TOKENS_SUFFIX = "/count_tokens"
 
@@ -2381,6 +2382,24 @@ class Handler(BaseHTTPRequestHandler):
         # for bytes that are still arriving.
         self.close_connection = True
         self._close_drain()
+        if self.request_version == "HTTP/0.9":
+            # DV-R10 (L1b-F-1 + red team, the suite-blind P3): FIVE stdlib
+            # dispatch doors -- malformed-line 400, bad-syntax 400, 505 (x2
+            # versions), two-word non-GET 400 -- fire BEFORE http/server.py
+            # assigns request_version (3.13: that assignment is at line 320,
+            # BELOW all of them). While it still holds the CLASS DEFAULT
+            # 'HTTP/0.9', send_response_only/send_header/end_headers suppress
+            # the status line and every header: the caller got bare HTML and
+            # http.client ate a BadStatusLine. A TRUE two-word GET is a real
+            # 0.9 caller -- for it, close-delimited body IS the documented law
+            # (N-2, suite-locked) -- so the compensation excludes exactly that
+            # shape; everything else arriving here with the default wrote
+            # modern HTTP and is owed a framed refusal. The chunk gate has
+            # owned this stdlib default since DV-fix11; this is its OUT-
+            # framing twin, one round later.
+            _w09 = (self.requestline or "").split()
+            if not (len(_w09) == 2 and _w09[0] == "GET"):
+                self.request_version = "HTTP/1.1"
         BaseHTTPRequestHandler.send_error(self, code, message, explain)
 
     def _json(self, code, obj, extra_headers=()):
@@ -2486,10 +2505,24 @@ class Handler(BaseHTTPRequestHandler):
         bytes the sender still has queued and the caller learns nothing at
         all (stress P1/F3, Q1/Q2A-5)."""
         try:
-            self.connection.settimeout(secs)
             deadline = time.monotonic() + secs
-            while time.monotonic() < deadline and self.rfile.read(65536):
-                pass
+            while True:
+                _left = deadline - time.monotonic()
+                if _left <= 0:
+                    break
+                self.connection.settimeout(_left)
+                try:
+                    # DV-R10 (R10-F-2, the 15th same-shape lesion): the deadline
+                    # is checked AROUND EACH READ. read(65536) accumulated until
+                    # 65536 bytes / EOF / one raw gap longer than the timeout --
+                    # a sender trickling faster than that gap never let the loop
+                    # regain control, and the "bounded" wait was unbounded. read1
+                    # returns after one raw read; the per-op arm bounds the op,
+                    # the deadline bounds the whole.
+                    if not self.rfile.read1(65536):
+                        break
+                except Exception:
+                    break        # deadline expiry, or trouble
         except Exception:
             pass
         finally:
@@ -2537,11 +2570,20 @@ class Handler(BaseHTTPRequestHandler):
         this, so pipelining stays untouched (N-5) and the hot paths stay at
         0.00 s (healthz guards ride the suite)."""
         try:
-            self.connection.settimeout(secs if self._pending_now() else window)
+            arm = secs if self._pending_now() else window
             deadline = time.monotonic() + secs
-            while time.monotonic() < deadline:
+            while True:
+                _left = deadline - time.monotonic()
+                if _left <= 0:
+                    break
+                # DV-R10 (R10-F-2): per-operation arm -- the window/deadline
+                # choice survives (honest empty door = EXACTLY one window: the
+                # first op is armed `window` and silence expires it), but the
+                # deadline is now checkable BETWEEN ops because each op is one
+                # raw read (read1), not an accumulation the trickle outruns.
+                self.connection.settimeout(arm if arm < _left else _left)
                 try:
-                    if not self.rfile.read(65536):
+                    if not self.rfile.read1(65536):
                         break
                 except Exception:
                     break        # quiet-window / deadline expiry, or trouble
@@ -2572,13 +2614,21 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._close_drain()          # escape 2 closed: a negative CL was
             return                       # never honest framing
-        while n > 0:
-            chunk = min(n, 65536)
-            try:
-                got = self.rfile.read(chunk)
-            except Exception:
+        _clock = time.monotonic() + 2.0   # DV-R10 (R10-F-1): the count loop carried
+        while n > 0:                      # the file's ONLY unbounded wait -- an
+            chunk = min(n, 65536)         # honest-but-undelivered CL pinned the
+            _left = _clock - time.monotonic()
+            if _left <= 0:                # refusal door (thread-starvation door:
+                self.close_connection = True   # one stalled sender = one dead
+                return                    # thread forever, named refusal never
+            try:                          # written). A declared length is a
+                self.connection.settimeout(_left)   # NUMBER TO STOP AT, not a
+                got = self.rfile.read1(chunk)       # promise the door must honor
+            except Exception:             # waiting on. Nine call sites inherit
                 self.close_connection = True
                 return
+            finally:
+                self.connection.settimeout(None)
             if not got:
                 self.close_connection = True
                 return
@@ -2838,9 +2888,14 @@ class Handler(BaseHTTPRequestHandler):
             # the named 413 reaches the sender instead of being eaten by a
             # Windows RST on close (R6b-FR-1: the v1.2.12 drain law lived at
             # the rebinding doors only; the capacity doors were its twins).
+            # DV-R10 (R10-F-3): flag FIRST like every sibling -- this was the
+            # family's last flag-LAST door, and the comment above was a lie
+            # waiting to happen: an under-delivered giant CL pinned the drain
+            # (silent 30s measured) because the count loop had no deadline and
+            # the drain could not even SEE that the door was closing.
+            self.close_connection = True
             self._drain_body()
             self._json(413, {"error": {"message": "strata-router: body over max_body_mb"}})
-            self.close_connection = True
             return None
         return self.rfile.read(n)
 
@@ -4420,7 +4475,20 @@ def validate_cfg(cfg, pool, strict=True):
         if ":" in _ln:
             problems.append(("listen", "must be an IPv4 address or hostname (this stdlib server is AF_INET "
                                        "only, IPv6 cannot bind); use 127.0.0.1"))
-        if _ln in ("0.0.0.0", "0", "*"):
+        _wv4 = None
+        try:
+            _wv4 = socket.inet_aton(_ln)     # the resolver's law, not hand-typed strings
+        except OSError:
+            pass
+        if _ln == "*" or _wv4 == b"\x00\x00\x00\x00":
+            # DV-R10 (R10-P5): the wildcard FAMILY is what the resolver AGREES it
+            # is -- inet_aton is glibc semantics on every platform ("0.0",
+            # "0.0.0", "00", "0x0" all resolve to INADDR_ANY; measured here on
+            # Windows, where they then died at getaddrinfo as raw gaierrors; on
+            # Linux the BIND obeys the same rules, so the old exact tuple left
+            # these spellings binding the whole network in F-9a's shape).
+            # Values inet_aton cannot parse and the resolver cannot resolve
+            # ("0.", typos) die at the bind -- NAMED now, never as a traceback.
             # F-9a/N-3 (DV-R9, the wildcard family): binding EVERY interface while
             # the rebinding guard admits only Host == the listen STRING locks out
             # every real client -- nobody sends Host: 0.0.0.0, loopback included --
@@ -4554,7 +4622,17 @@ def main(argv=None):
     # same family was live here: a bad port logged "listening", started the
     # poller, and only then died at the bind. If the bind fails, nothing was
     # claimed and no sentence lied.
-    httpd = Router((str(cfg["listen"]), int(cfg["port"])), Handler)
+    try:
+        httpd = Router((str(cfg["listen"]), int(cfg["port"])), Handler)
+    except OSError as _be:
+        # DV-R10 (R10-P5): a listen the resolver cannot place ("0.", typos,
+        # dead names) is a BOOT DEATH with a name, not an unhandled gaierror
+        # the operator reads as a crash -- the doctrine every other boot door
+        # already honors (S21/N-3: "dies NAMED, no traceback").
+        print("router: listen %r port %s could not be resolved or bound (%s: %s) -- refusing boot; "
+              "name the ONE address your clients use (wildcards and their inet_aton shorthands are refused by name at the config door)"
+              % (cfg["listen"], cfg["port"], type(_be).__name__, _be), file=sys.stderr)
+        return 1
     LOG.info(
         "listening on http://%s:%s -- affinity+least-queued passthrough, no rate limiting, "
         "queue stays in the backends", cfg["listen"], cfg["port"],

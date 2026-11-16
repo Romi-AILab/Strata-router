@@ -122,7 +122,7 @@ Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
 |------|-----------|---------|---------|
 | `--config FILE` | — | — | JSON file with any keys below. |
 | `--backend ID=URL[,/prefix]` | `backends` | `[]` | One entry per box, repeat per box. |
-| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards; a wildcard (`0.0.0.0`/`0`/`*`) refuses boot (the guard would 403 every caller). Surrounding space / case are normalized once, at the door. |
+| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards; a wildcard -- anything inet_aton resolves to 0.0.0.0 (`0.0.0.0`/`0`/`00`/`0x0`/`*`) -- refuses boot (the guard would 403 every caller); an unresolvable value dies at the bind BY NAME, never as a traceback. Surrounding space / case are normalized once, at the door. |
 | `--port N` | `port` | `8088` | The router's own port. |
 | `--path-prefix /P` | `path_prefix` | `""` | Prefix prepended to every backend path (e.g. `/anthropic`). |
 | `--keys-file FILE` | `keys_file` | `""` | Backend-id→key sidecar; defaults to `router.keys.json` next to `--config` (git-ignored). |
@@ -314,8 +314,10 @@ configured `listen` address) and rejects browser `Origin`/`Referer` from
 elsewhere -- the standard DNS-rebinding move (a web page re-resolving its own
 domain onto `127.0.0.1`) gets 403. That guard is why `listen` must name the
 ONE exact address your clients use: booting with a non-loopback `listen` logs
-a loud warning, and a wildcard `listen` (`0.0.0.0`, `0`, `*`, any spelling of
-them) refuses boot by name -- it would bind the whole network while the guard
+a loud warning, and a wildcard `listen` -- every spelling the resolver
+agrees is INADDR_ANY under inet_aton rules (`0.0.0.0`, `0`, `0.0`, `00`,
+`0x0`, `*`) -- refuses boot by name: the rule IS the resolver's, not three
+hand-typed strings -- it would bind the whole network while the guard
 admits only `Host: 0.0.0.0`, which no caller ever sends: every real client,
 loopback included, would be 403-locked out (and `0`/`*` bind nothing even
 before that). If you must bind off-loopback, firewall the port first.
@@ -711,7 +713,7 @@ the full block with shipped defaults so an operator can lift it wholesale.
 The storm detector for `smart_move`/`smart_homecoming` is the two `/stats`
 columns (`moves`, `homecomings`) -- watch them in the first hour of any flip.
 Moves and homecomings are diagnostics: they never enter the closed identity,
-which the 64-combination flag matrix keeps closed for every ladder shape.
+which the 128-combination flag matrix keeps closed for every ladder shape.
 `smart_decision_errors` is the decision layer's own witness: a crash inside
 the smart block never touches the request in flight, but it books here (and
 logs one named WARNING per minute) -- a decision failure can be swallowed,
@@ -805,7 +807,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 485 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 512 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -908,6 +910,16 @@ open for one quiet window after it fires and discards what lands inside the
 window as well; bytes later than one window are OUTSIDE the guarantee --
 nothing may wait on a socket unbounded (that is a thread-starvation door),
 so the stated bound is deliberate and this sentence is its boundary;
+since DV-fix12 that bound is enforced PER OPERATION -- the loop's deadline
+is checked between bounded `read1` calls, because an accumulating read a
+trickling sender outruns used to pin a refusal door past any deadline (the
+program's 15th same-shape lesion, the 2nd inside the drain mechanism), and
+even an honest-but-undelivered giant `Content-Length` now meets its named
+refusal AT the deadline instead of never; and every refusal arrives framed:
+a real status line, even when the request line was too broken for the
+stdlib to assign a version at all (its class default is HTTP/0.9, which
+suppresses the status line -- five dispatch doors once answered in bare
+HTML for exactly this reason);
 a door that keeps the connection open drains
 NOTHING -- its pending bytes are a legitimately pipelined request;
 the chunked reader refuses an empty size line, a missing CRLF terminator and

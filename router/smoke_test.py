@@ -5200,7 +5200,11 @@ def main():
         _dts = []
         for _ in range(n):
             _d20, _t20b = _raw20(head, body, delay=delay)
-            if all(m in _d20 for m in markers):
+            # DV-R10 (L1b-F-1 re-anchor): byte markers alone were the blindfold --
+            # the stdlib's UNFRAMED HTML page contains the code digits, so these
+            # locks passed with no status line at all. A refusal counts only when
+            # it arrives FRAMED (first line starts with HTTP/1.).
+            if _d20.startswith(b"HTTP/1.") and all(m in _d20 for m in markers):
                 _ok20 += 1
             _dts.append(round(_t20b, 2))
         return _ok20, _dts
@@ -5487,7 +5491,7 @@ def main():
         _okc21, _dts21 = 0, []
         for _ in range(n):
             _d21, _t21b = _late21(head, body, late, reader=reader)
-            if all(m in _d21 for m in markers):
+            if _d21.startswith(b"HTTP/1.") and all(m in _d21 for m in markers):  # DV-R10 framing re-anchor (see S20/_arr20)
                 _okc21 += 1
             _dts21.append(round(_t21b, 2))
         return _okc21, _dts21
@@ -5674,6 +5678,298 @@ def main():
         _lp21.removeHandler(_cap21)
     check("S21/doc: the README drain law states its BOUND -- STILL-ARRIVING bytes are discarded inside ONE quiet window, nothing waits past it (a guarantee whose boundary is unstated is a guarantee that gets over-promised), and the guard paragraph now says why listen must name ONE exact address",
           "one quiet window" in _fl15 and "STILL ARRIVING" in _fl15 and "403-locked out" in _fl15)
+
+    print("")
+    print("S22) DV-R10: bounded waits at the SINGLE blocking operation (15th same-shape lesion -- the law must live INSIDE the read, not between reads), the 413 door flag-FIRST, every dispatch refusal FRAMED, every bind death NAMED")
+    # Round-10 harvest (L1a fidelity + L1b behavioral + L2 red team; the council
+    # reproduced EVERY row at 5a2741d -- ws-v1219-DV-R10-council-r10a/r10b/r10c
+    # archives): _drain_body's honest-CL count loop and both drain primitives
+    # checked their deadline only BETWEEN blocking rfile.read(65536) calls -- a
+    # BufferedReader accumulates until 65536 bytes / EOF / one raw gap LONGER
+    # than the socket timeout, so a sender trickling faster than the gap keeps
+    # a "bounded" door pinned past every deadline (R10-F-1/F-2: the 15th
+    # same-shape lesion and the SECOND one inside the mechanism; the law moves
+    # one level DOWN again -- INTO the read loop, per operation, where the nine
+    # _drain_body call sites and all six closing sites inherit). The 413 door
+    # was the family's ONLY flag-LAST door (R10-F-3): an under-delivered giant
+    # CL pinned it silent for 30s while its own comment promised a bounded
+    # named 413. Five stdlib dispatch doors fired while request_version was
+    # still the class default 'HTTP/0.9' -- the stdlib then SUPPRESSES the
+    # status line (R10-P4/P6: raw HTML, no framing; the suite's byte-marker
+    # locks ate the DOCTYPE's code digits and called it delivered -- re-anchored
+    # to framing locks in _arr20/_arr21). And the wildcard family's inet_aton
+    # shorthands ("0.0", "00", "0x0") strolled past the exact-tuple door and
+    # died at the bind as a raw gaierror traceback (R10-P5).
+    _H22 = b"Host: 127.0.0.1:9171\r\n"
+    _lb22 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _lb22.bind(("127.0.0.1", 9172))          # plain socket, no reuse, single listener
+    _lb22.listen(8)
+    _run22 = [True]
+    def _box22():
+        while _run22[0]:
+            try:
+                _c22b, _ = _lb22.accept()
+            except OSError:
+                return
+            try:
+                _c22b.settimeout(5)
+                _hd22b = b""
+                while b"\r\n\r\n" not in _hd22b:
+                    _g22b = _c22b.recv(4096)
+                    if not _g22b:
+                        break
+                    _hd22b += _g22b
+                if not _hd22b:
+                    continue
+                _ln22b = _hd22b.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+                if _ln22b.startswith("GET"):
+                    _j22b = json.dumps({"activity": {"in_flight": 0}, "state": "ready"}).encode()
+                    _c22b.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: %d\r\n\r\n" % len(_j22b) + _j22b)
+                else:
+                    _j22b = json.dumps({"id": "s22", "content": [{"type": "text", "text": "ok"}],
+                                        "usage": {"input_tokens": 10, "output_tokens": 5}}).encode()
+                    _c22b.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: %d\r\n\r\n" % len(_j22b) + _j22b)
+            except Exception:
+                pass
+            finally:
+                try:
+                    _c22b.close()
+                except OSError:
+                    pass
+    threading.Thread(target=_box22, daemon=True).start()
+    with open("s22_live.json", "w") as _ff22:
+        # control_token MUST be set (lesson #6): an open control surface answers
+        # _control_ok() True and the pin door -- the row under test -- never fires.
+        json.dump({"listen": "127.0.0.1", "port": 9171, "status_interval": 0.5,
+                   "control_token": "s22-fake-control-token", "max_body_mb": 1,
+                   "backends": [{"id": "s22a", "url": "http://127.0.0.1:9172"}]}, _ff22)
+    _proc22 = subprocess.Popen([sys.executable, ROUTER, "--config", "s22_live.json", "--log-level", "WARNING"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def _probe22(raw, hold=6.0, halfclose=False):
+        try:
+            _s22 = socket.create_connection(("127.0.0.1", 9171), timeout=5)
+        except OSError:
+            return b"", 99.0
+        _s22.sendall(raw)
+        if halfclose:
+            try:
+                _s22.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+        _s22.settimeout(hold)
+        _got22 = b""
+        _t022 = time.monotonic()
+        # Read to EOF/timeout, NOT to the blank line: the markers this section
+        # polices ("pin refused", "max_body_mb", "OPTIONS") live in the BODY,
+        # and a header-only break silently made the honest-door control row
+        # read as a failure in the RED burn (lesson #6 again -- rig wrong,
+        # engine right). Every door probed here closes after answering, so EOF
+        # arrives with the response and the timing stays honest.
+        try:
+            while len(_got22) < 8192:
+                _g22 = _s22.recv(65536)
+                if not _g22:
+                    break
+                _got22 += _g22
+        except Exception:
+            pass
+        _secs22 = round(time.monotonic() - _t022, 2)
+        try:
+            _s22.close()
+        except OSError:
+            pass
+        return _got22, _secs22
+    def _drip22(head, ndrip=12, gap=0.3, hold=6.0):
+        """Send `head`, then TRICKLE one byte every `gap` s -- each byte faster
+        than any quiet window could expire. A door whose deadline is checked
+        only BETWEEN blocking read(65536) calls never regains control (the
+        reader accumulates toward 65536); the door pinned, the refusal never
+        written (r10a T2/T3: STILL BLOCKED past 6 s)."""
+        try:
+            _s22d = socket.create_connection(("127.0.0.1", 9171), timeout=5)
+        except OSError:
+            return b"", 99.0
+        _s22d.sendall(head)
+        _stop22 = [False]
+        def _dr22():
+            for _ in range(ndrip):
+                if _stop22[0]:
+                    return
+                try:
+                    _s22d.sendall(b"x")
+                except OSError:
+                    return
+                _wt22 = 0.0
+                while _wt22 < gap and not _stop22[0]:
+                    time.sleep(0.05)
+                    _wt22 += 0.05
+        threading.Thread(target=_dr22, daemon=True).start()
+        _s22d.settimeout(hold)
+        _got22d = b""
+        _t022d = time.monotonic()
+        try:
+            while len(_got22d) < 8192:        # to EOF -- body markers (see _probe22)
+                _g22d = _s22d.recv(65536)
+                if not _g22d:
+                    break
+                _got22d += _g22d
+        except Exception:
+            pass
+        _secs22d = round(time.monotonic() - _t022d, 2)
+        _stop22[0] = True
+        try:
+            _s22d.close()
+        except OSError:
+            pass
+        return _got22d, _secs22d
+    def _hz22():
+        try:
+            return get(9171, "/healthz")[0] == 200
+        except Exception:
+            return False
+    try:
+        _up22 = wait_for(_hz22, 25)
+        # ---- R10-F-1: the honest-CL count loop is a refusal door's longest
+        # step -- declared-but-undelivered bytes pinned the thread and the
+        # named answer was never written (all nine call sites inherit). ----
+        _d22o, _t22o = _probe22(b"OPTIONS /v1/messages HTTP/1.1\r\n" + _H22 +
+                                b"content-length: 1000000\r\n\r\nab") if _up22 else (b"", 99.0)
+        check("S22/R10-F-1: OPTIONS with a giant HONEST declared body it never delivers: the named 405 arrives anyway -- the count loop's per-iteration deadline bounds the wait (baseline: the door blocked in rfile.read() forever, 405 never written, one pinned thread per stalled sender)",
+              b"405" in _d22o and b"OPTIONS" in _d22o and _t22o <= 3.5, "t=%.2fs head=%r" % (_t22o, _d22o[:40]))
+        _d22g, _t22g = _probe22(b"POST /v1/messages HTTP/1.1\r\n" + _H22 +
+                                b"content-type: application/json\r\ncontent-length: 2000000000\r\n\r\nab") if _up22 else (b"", 99.0)
+        check("S22/R10-F-3+F-1: the 413 capacity door meets an under-delivered giant CL and STILL answers named within the bound -- flag-FIRST (the family's last flag-LAST door; its own comment promised this) plus the bounded count loop (baseline: SILENT 30s while read_timeout sat unused on the box side)",
+              b"413" in _d22g and b"max_body_mb" in _d22g and _t22g <= 3.5, "t=%.2fs head=%r" % (_t22g, _d22g[:40]))
+        _d22t, _t22t = _drip22(b"POST /v1/chat/completions HTTP/1.1\r\nHost: evil.invalid\r\n" +
+                               b"content-type: application/json\r\ncontent-length: 50\r\n\r\n0123456789") if _up22 else (b"", 99.0)
+        check("S22/R10-F-2: the rebinding-403 door (the family's shape: it refuses BEFORE reading any body) meets a trickle (1 byte / 0.3 s) and still answers named at the deadline -- the law lives INSIDE the read loop now (read1 + per-op deadline), not between blocking read(65536) calls the trickle never lets return (baseline: accumulation pinned past 6 s, refusal never written)",
+              b"403" in _d22t and b"rebinding guard" in _d22t and _t22t <= 3.5, "t=%.2fs head=%r" % (_t22t, _d22t[:40]))
+        _d22x, _t22x = _drip22(b"@@@ bad request line\r\n") if _up22 else (b"", 99.0)
+        check("S22/R10-F-2+P4: a malformed request line + trickle -- the send_error face rides the SAME bounded primitive and its answer arrives FRAMED (baseline: silent accumulation AND no status line -- the two round-10 lesions meet on one door)",
+              _d22x.startswith(b"HTTP/1.") and b"400" in _d22x and _t22x <= 3.5, "t=%.2fs head=%r" % (_t22x, _d22x[:40]))
+        _d22h, _t22h = _probe22(b"POST /v1/messages HTTP/1.1\r\n" + _H22 +
+                                b"content-type: application/json\r\ncontent-length: 2000000000\r\n\r\nab", halfclose=True) if _up22 else (b"", 99.0)
+        check("S22/R10-F-1 control: the SAME giant CL with an IMMEDIATE half-close releases at EOF -- bounded waiting must not slow the client that closes on its own (the EOF-release law from DV-R10's non-regression list)",
+              b"413" in _d22h and _t22h < 1.5, "t=%.2fs head=%r" % (_t22h, _d22h[:40]))
+        _d22p, _t22p = _probe22(b"POST /v1/chat/completions HTTP/1.1\r\nHost: evil.invalid\r\n" +
+                                b"content-type: application/json\r\ncontent-length: 10\r\n\r\n0123456789") if _up22 else (b"", 99.0)
+        check("S22/F-2 control: the SAME rebinding door with a FULLY delivered body still pays EXACTLY one quiet window (<=1.5 s; escape-3 _close_drain on the count-stop) -- the per-operation rewrite must not slow the fast path it re-armed",
+              b"403" in _d22p and b"rebinding guard" in _d22p and _t22p < 1.5, "t=%.2fs" % _t22p)
+        # ---- R10-P4/P6: five stdlib dispatch doors fired while request_version
+        # was still the class default 'HTTP/0.9' -- the stdlib then suppresses
+        # the status line and every header; only raw HTML arrived (http.client
+        # callers ate a BadStatusLine). Framing is part of a refusal. ----
+        for _nm4, _raw4, _code4 in (
+                ("malformed-line 400", b"@@@ bad request line\r\n", b"400"),
+                ("HTTP/2.0 505", b"GET / HTTP/2.0\r\n\r\n", b"505"),
+                ("one-word 400", b"GARBAGE\r\n", b"400"),
+                ("two-word POST 400", b"POST /v1/chat/completions\r\n", b"400")):
+            _d22f, _t22f = _probe22(_raw4, hold=6.0) if _up22 else (b"", 99.0)
+            check("S22/R10-P4: the %s door arrives FRAMED -- first line starts with HTTP/1. and names the code (baseline: raw HTML with NO status line: five dispatch doors fired while request_version was still the stdlib default 'HTTP/0.9'; the suite's byte markers ate the DOCTYPE's digits -- same blindfold, re-anchored; N-2's untouched twin, one round later)" % _nm4,
+                  _d22f.startswith(b"HTTP/1.") and _code4 in _d22f.split(b"\r\n", 1)[0], "t=%.2fs first=%r" % (_t22f, _d22f.split(b"\r\n", 1)[0][:44]))
+        _d22fc, _ = _probe22(b"FOOBAR /v1/chat/completions HTTP/1.1\r\n" + _H22 + b"\r\n") if _up22 else (b"", 99.0)
+        check("S22/P4 control: FOOBAR 501 was already framed (the version is assigned before the 501 door) -- the compensation must change nothing that already speaks",
+              _d22fc.startswith(b"HTTP/1.") and b"501" in _d22fc.split(b"\r\n", 1)[0], repr(_d22fc[:40]))
+        _d22fv, _ = _probe22(b"GET /foo bar HTTP/1.1\r\n\r\n") if _up22 else (b"", 99.0)
+        check("S22/P4 control (the red team's bivalence): a FOUR-word line carrying a valid version token was already framed (the door reads the version tail) -- compensation is for the DEFAULT only, not for every weird shape",
+              _d22fv.startswith(b"HTTP/1."), repr(_d22fv[:40]))
+        _raw22m = b""
+        if _up22:
+            try:
+                _s22m = socket.create_connection(("127.0.0.1", 9171), timeout=8)
+                _s22m.sendall(b"GET /v1/models\r\n\r\n")
+                _s22m.settimeout(6)
+                try:
+                    while True:
+                        _g22m = _s22m.recv(65536)
+                        if not _g22m:
+                            break
+                        _raw22m += _g22m
+                        if len(_raw22m) > 65536:
+                            break
+                except Exception:
+                    pass
+                _s22m.close()
+            except OSError:
+                pass
+        check("S22/P4 non-regression: the TRUE two-word HTTP/0.9 GET still gets its body VERBATIM -- close-delimited is the documented law for a caller that knows no framing; the compensation excludes exactly this shape (if it 'fixed' this too, the 0.9 caller gets bytes it cannot parse)",
+              (_raw22m.startswith(b"{") and b"\r\n0\r\n\r\n" not in _raw22m) if _up22 else False,
+              repr(_raw22m[:40]))
+        # ---- R10-P5: the wildcard family beyond the exact tuple -- the law is
+        # whatever inet_aton resolves (glibc semantics: "0.0", "00", "0x0" all
+        # parse to INADDR_ANY); values that resolve nowhere die NAMED at bind. ----
+        def _boot22(_nm22b, _cfg22b, _argv22b=()):
+            _p22b = "s22_boot_%s.json" % _nm22b
+            with open(_p22b, "w") as _f22b:
+                json.dump(_cfg22b, _f22b)
+            _r22b = subprocess.run([sys.executable, ROUTER, "--config", _p22b, "--log-level", "WARNING"] + list(_argv22b),
+                                   capture_output=True, text=True, timeout=30)
+            return _r22b.returncode, (_r22b.stderr or "") + (_r22b.stdout or "")
+        _base22b = {"listen": "127.0.0.1", "port": 9173, "backends": [{"id": "s22b", "url": "http://127.0.0.1:9"}]}
+        for _lw22b, _nmb in (("nope.invalid.suptest", "gai"), ("0.", "zero0dot")):
+            _rc22b, _out22b = _boot22(_nmb, dict(_base22b, listen=_lw22b))
+            check("S22/R10-P5: boot with listen=%r dies NAMED with NO traceback -- an unresolvable listen is a boot death, not an unhandled gaierror the operator reads as a crash (baseline: raw gaierror traceback from the bind)" % _lw22b,
+                  _rc22b not in (0, None) and "Traceback" not in _out22b and "refusing boot" in _out22b,
+                  "rc=%s %s" % (_rc22b, _out22b[:110]))
+        _rc22b, _out22b = _boot22("zero0", dict(_base22b, listen="0.0"))
+        check("S22/R10-P5: listen='0.0' -- an inet_aton shorthand of INADDR_ANY -- refuses boot BY NAME (WILDCARD): the exact-tuple door let it past while glibc rules say it binds EVERY interface (the file's own comment; Linux: the F-9a self-lockout outside the refused spellings). The wildcard law is now whatever inet_aton resolves to 0.0.0.0, not three hand-typed strings",
+              _rc22b not in (0, None) and "Traceback" not in _out22b and "WILDCARD" in _out22b,
+              "rc=%s %s" % (_rc22b, _out22b[:110]))
+        def _v22(_ln22v):
+            _c22v = dict(R.DEFAULTS)
+            _c22v["listen"] = _ln22v
+            _c22v["backends"] = [{"id": "s22v", "url": "http://127.0.0.1:9", "priority": 0}]
+            return _c22v, R.validate_cfg(_c22v, R.make_pool(_c22v), strict=False)
+        _w22res = {}
+        for _lw22v in ("0.0", "0.0.0", "00", "0x0"):
+            _c22v, _p22v = _v22(_lw22v)
+            _w22res[_lw22v] = sum(1 for _f22v, _t22v in _p22v if _f22v == "listen" and "WILDCARD" in _t22v)
+        check("S22/R10-P5 (config door, in-process): every inet_aton shorthand of INADDR_ANY ('0.0', '0.0.0', '00', '0x0') is refused with the SAME WILDCARD sermon the exact tuple gets -- one law, one message, normalized string in, inet_aton semantics applied (baseline: ZERO refusals, warning-only, then the raw bind death)",
+              all(v == 1 for v in _w22res.values()), repr(_w22res))
+        _c22v, _p22v = _v22("0.0.0.1")
+        check("S22/P5 control: 0.0.0.1 is NOT a wildcard (inet_aton lands off INADDR_ANY) -- the law resolves, it does not blacklist by shape-prefix; the honest off-loopback sermon still applies",
+              not any("WILDCARD" in _t22v for _f22v, _t22v in _p22v), repr(_p22v)[:120])
+        _mx22 = 0.0
+        _hz22s = 0
+        for _ in range(8):
+            _t022h = time.monotonic()
+            try:
+                _hz22s = get(9171, "/healthz")[0]
+            except Exception:
+                _hz22s = 0
+            _mx22 = max(_mx22, time.monotonic() - _t022h)
+        check("S22/guard: 8 plain /healthz pay NOTHING to the per-operation deadline -- the bounded-read rewrite touches closing paths only (hot-path law re-pinned on the new primitive, S21 lineage)",
+              _hz22s == 200 and _mx22 < 1.0, "max=%.2fs" % _mx22)
+    finally:
+        _run22[0] = False
+        _term(_proc22)
+        try:
+            _lb22.close()
+        except OSError:
+            pass
+    _src22 = open(ROUTER, encoding="utf-8").read()
+    _flat22 = " ".join(_src22.split())
+    check("S22/R10-F-2 doctrine: no blocking accumulation read survives in this file -- 'self.rfile.read(65536)' appears NOWHERE and the bounded primitives read1() per operation (the deadline must be checkable: the 15th same-shape lesion put the law BETWEEN reads the trickle never let return; this time it lives INSIDE the loop, where all six closing sites and the nine _drain_body call sites inherit)",
+          "self.rfile.read(65536)" not in _src22 and _src22.count("read1(") >= 3,
+          "read(65536)=%d read1=%d" % (_src22.count("self.rfile.read(65536)"), _src22.count("read1(")))
+    _db22 = _src22[_src22.find("def _drain_body"):][:3200]
+    check("S22/R10-F-1 law: the honest-CL count loop carries its OWN deadline (a monotonic clock around the read with per-op arm) -- the declared length is a NUMBER TO STOP AT, not a promise the door must honor waiting on (nine call sites inherit this one loop)",
+          "monotonic" in _db22, _db22[:60])
+    _lim22 = _flat22[_flat22.find("if n > limit:"):][:1500]   # the door's comment grew two doctrines; the window must still SEE the flag line (run-1 GREEN miss was this anchor, not the engine)
+    check("S22/R10-F-3 ordering law: the 413 capacity door is flag-FIRST like every sibling -- close_connection BEFORE _drain_body, so the drain knows at its first line this door is closing (it was the family's last flag-LAST door, and the only door whose helper branch read a stale flag)",
+          "self.close_connection = True" in _lim22 and _lim22.find("self.close_connection = True") < _lim22.find("self._drain_body()"),
+          repr(_lim22[:120]))
+    _se22 = _src22[_src22.find("def send_error"):_src22.find("def _json(self")]   # slice to the next method -- "def _json" alone hits _json_or_none at line 196 (green-2/3 miss was this anchor; baseline carries NEITHER token in either slice, so the RED verdict stands either way)
+    check("S22/R10-P4 choke law: the send_error override compensates for the stdlib's ARCHAIC DEFAULT -- while request_version is still 'HTTP/0.9' and the request line is no true two-word GET, the refusal is forced through HTTP/1.1 framing (the chunk gate has owned this default since DV-fix11; its untouched OUT-framing twin, one round later)",
+          "request_version" in _se22 and "HTTP/1.1" in _se22, _se22[:60])
+    check("S22/R10-P3 dead weight: POST_PATHS (zero loads since v4.1) no longer BINDS -- a constant with a lying comment is a future bug's invitation (AST census: Store@128 only); the deletion leaves a tombstone that may name what died",
+          "POST_PATHS =" not in _src22 and '"POST_PATHS"' not in _src22, "")
+    check("S22/doc: the README's matrix sentence tells the truth -- the flag matrix is 128-combination since DV-fix9 (S9 mask range and locks say so); a doc that cites yesterday's count teaches readers to distrust the next one",
+          "64-combination" not in _fl15 and "128-combination" in _fl15, "")
+    check("S22/doc: the wildcard promise in the README is the law the door keeps -- every spelling inet_aton resolves to INADDR_ANY refuses boot BY NAME, not the hand-typed trio's 'any spelling' of itself",
+          "any spelling of" not in _fl15 and "inet_aton" in _fl15, "")
+    check("S22/doc: the framing guarantee is STATED -- every refusal arrives framed (a real status line): what round 10 measured as five doors answering in bare HTML is now a written contract the locks police",
+          "every refusal arrives framed" in _fl15, "")
 
     print("")
     if FAKE_ERRORS:
