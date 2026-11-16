@@ -122,7 +122,7 @@ Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
 |------|-----------|---------|---------|
 | `--config FILE` | — | — | JSON file with any keys below. |
 | `--backend ID=URL[,/prefix]` | `backends` | `[]` | One entry per box, repeat per box. |
-| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards. |
+| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards; a wildcard (`0.0.0.0`/`0`/`*`) refuses boot (the guard would 403 every caller). Surrounding space / case are normalized once, at the door. |
 | `--port N` | `port` | `8088` | The router's own port. |
 | `--path-prefix /P` | `path_prefix` | `""` | Prefix prepended to every backend path (e.g. `/anthropic`). |
 | `--keys-file FILE` | `keys_file` | `""` | Backend-id→key sidecar; defaults to `router.keys.json` next to `--config` (git-ignored). |
@@ -312,8 +312,13 @@ The router injects your backend keys for callers that send none, so it knows
 its callers: it answers only requests whose `Host` is a loopback name (or the
 configured `listen` address) and rejects browser `Origin`/`Referer` from
 elsewhere -- the standard DNS-rebinding move (a web page re-resolving its own
-domain onto `127.0.0.1`) gets 403. Booting with a non-loopback `listen` logs a
-loud warning; if you must do it, firewall the port first.
+domain onto `127.0.0.1`) gets 403. That guard is why `listen` must name the
+ONE exact address your clients use: booting with a non-loopback `listen` logs
+a loud warning, and a wildcard `listen` (`0.0.0.0`, `0`, `*`, any spelling of
+them) refuses boot by name -- it would bind the whole network while the guard
+admits only `Host: 0.0.0.0`, which no caller ever sends: every real client,
+loopback included, would be 403-locked out (and `0`/`*` bind nothing even
+before that). If you must bind off-loopback, firewall the port first.
 
 How a conversation is recognised, per wire API:
 
@@ -800,7 +805,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 461 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 485 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -895,7 +900,15 @@ closing on an unread body RST-flushes them on this platform and the caller
 learns nothing; a probe that reads IMMEDIATELY will systematically miss
 this bug class -- delay the read AND make the body big enough that the send
 is still in flight before trusting the door (a small COMPLETE pending
-answers with a clean FIN); a door that keeps the connection open drains
+answers with a clean FIN); and since DV-fix11 the law holds the fourth axis
+too -- bytes STILL ARRIVING: a peek at the door is a snapshot, blind to what
+a slow sender releases a fraction of a second later (the program's 14th
+same-shape lesion was that peek itself), so a closing door keeps the socket
+open for one quiet window after it fires and discards what lands inside the
+window as well; bytes later than one window are OUTSIDE the guarantee --
+nothing may wait on a socket unbounded (that is a thread-starvation door),
+so the stated bound is deliberate and this sentence is its boundary;
+a door that keeps the connection open drains
 NOTHING -- its pending bytes are a legitimately pipelined request;
 the chunked reader refuses an empty size line, a missing CRLF terminator and
 a 65-line trailer flood -- each by name -- and a chunked `GET`/`HEAD` drains

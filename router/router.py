@@ -2373,9 +2373,14 @@ class Handler(BaseHTTPRequestHandler):
         # _affinity_put (DV-fix5 doctrine). No fourth per-door drain site is
         # allowed anywhere in this file.
         # Flag-first: the door closes regardless (the stdlib says so below).
+        # DV-R9 N-1 (P2, the 14th same-shape lesion): NOT peek-gated anymore.
+        # Bytes the sender releases 0.2-0.5 s after the request were not
+        # "pending" in this door-time snapshot, the peek let the door close
+        # over them, and the Windows RST ate this very refusal (measured 0/10
+        # named arrivals, four shapes). _close_drain holds ONE quiet window
+        # for bytes that are still arriving.
         self.close_connection = True
-        if self._pending_now():
-            self._quiet_finish()
+        self._close_drain()
         BaseHTTPRequestHandler.send_error(self, code, message, explain)
 
     def _json(self, code, obj, extra_headers=()):
@@ -2499,7 +2504,10 @@ class Handler(BaseHTTPRequestHandler):
         socket answers immediately, so honest requests pay nothing. Called ONLY
         where the connection will close anyway -- on a keep-alive door the same
         bytes would be a legitimately pipelined request and eating THAT was the
-        red team's N-5 catch against the naive 'drain everywhere' fix."""
+        red team's N-5 catch against the naive 'drain everywhere' fix.
+        DV-R9 N-1 retired its DOOR-GATING role -- a peek is a door-time
+        snapshot, blind to bytes still arriving. It is now called ONLY by
+        _close_drain, to choose full-deadline draining vs a quiet window."""
         try:
             self.connection.settimeout(0.0)
             try:
@@ -2511,6 +2519,37 @@ class Handler(BaseHTTPRequestHandler):
                     pass
         except Exception:
             return False
+
+    def _close_drain(self, window=0.4, secs=2.0):
+        """The drain law at a closing door, arrival-time-proof (DV-R9 N-1 P2,
+        the 14th same-shape lesion and the FIRST one inside the drain
+        mechanism itself): what the peek found EMPTY at door time, a slow
+        sender filled 0.2-0.5 s later -- the door closed over those bytes and
+        the RST ate the refusal (0/10 named arrivals, four shapes, WinError
+        10053; no surplus -> clean 0.00 s, the controls prove it). So a
+        closing door drains what is HERE now under the full deadline, and if
+        the peek is EMPTY it still waits ONE quiet window before closing;
+        late arrivals inside the window are discarded too. Nothing waits
+        past the window: bytes later than that make any wait on this socket
+        unbounded -- a thread-starvation door -- so the guarantee is BOUNDED,
+        and the README states the boundary. Honest requests pay the window
+        ONLY on closing paths (refusal doors); keep-alive doors never call
+        this, so pipelining stays untouched (N-5) and the hot paths stay at
+        0.00 s (healthz guards ride the suite)."""
+        try:
+            self.connection.settimeout(secs if self._pending_now() else window)
+            deadline = time.monotonic() + secs
+            while time.monotonic() < deadline:
+                try:
+                    if not self.rfile.read(65536):
+                        break
+                except Exception:
+                    break        # quiet-window / deadline expiry, or trouble
+        finally:
+            try:
+                self.connection.settimeout(None)
+            except Exception:
+                pass
 
     def _drain_body(self, limit=1 << 20):
         """Consume (bounded) whatever body a non-proxy route will not use, so
@@ -2527,14 +2566,12 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("content-length") or 0)
         except ValueError:
             self.close_connection = True
-            if self._pending_now():        # escape 1 closed: framing garbage +
-                self._quiet_finish()       # queued bytes -> discard, THEN close
-            return
+            self._close_drain()          # escape 1 closed, arrival-proof (N-1):
+            return                       # framing garbage -> window-discard, THEN close
         if n < 0:
             self.close_connection = True
-            if self._pending_now():        # escape 2 closed: a negative CL was
-                self._quiet_finish()       # never honest framing
-            return
+            self._close_drain()          # escape 2 closed: a negative CL was
+            return                       # never honest framing
         while n > 0:
             chunk = min(n, 65536)
             try:
@@ -2566,9 +2603,10 @@ class Handler(BaseHTTPRequestHandler):
         # was no length at all) while the caller queued MORE than they told
         # us -- a liar's leftovers. Only touch them where this door is closing
         # anyway (flag set before the call); a keep-alive door's pending bytes
-        # are a pipelined request and stay untouched (N-5).
-        if self.close_connection and self._pending_now():
-            self._quiet_finish()
+        # are a pipelined request and stay untouched (N-5). DV-R9 N-1: the
+        # leftovers may still be ARRIVING -- _close_drain keeps the window.
+        if self.close_connection:
+            self._close_drain()
 
     # ---- routes -----------------------------------------------------------
     def do_GET(self):
@@ -2891,8 +2929,8 @@ class Handler(BaseHTTPRequestHandler):
             # measured 0/10 named arrivals pre-fix -- deterministic, unlike the
             # unparseable-502 twin below).
             self.close_connection = True
-            if self._pending_now():
-                self._quiet_finish()
+            self._close_drain()   # DV-R9 N-1: no peek gate -- the 0.2 s late
+                                  # surplus rode the peek's blind spot (0/10)
             self._json(403, {"error": {"message": "strata-router: x-strata-pin refused -- control token required (x-strata-control)"}})
             return
         is_count_tokens = bare.endswith(COUNT_TOKENS_SUFFIX)
@@ -3065,7 +3103,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("content-type",
                              _HDR_VAL_CTL_RE.sub("", resp.getheader("content-type")
                                                  or "application/json"))
-            chunk_out = not head and self.request_version != "HTTP/1.0"
+            # N-2 (DV-R9, P3): HTTP/0.9 is the stdlib's DEFAULT request_version --
+            # a two-word request line ("GET /v1/models") lands here, and the old
+            # `!= "HTTP/1.0"` gate chunk-framed THAT caller: an HTTP/0.9 client
+            # knows no chunked coding, so the framing hex and the "0\r\n\r\n"
+            # terminator print as body to it. Close-delimited is its only honest
+            # framing, and the stdlib already closed the connection on it.
+            chunk_out = not head and self.request_version not in ("HTTP/1.0", "HTTP/0.9")
             if head:
                 # a HEAD response is header-only: no chunk framing, no body,
                 # or the terminator bytes desync the next response on this socket
@@ -3191,8 +3235,8 @@ class Handler(BaseHTTPRequestHandler):
                     # named 502 arrived only 2/10 when a lying CL left bytes in
                     # flight); drain-first makes every arrival deterministic.
                     self.close_connection = True
-                    if self._pending_now():
-                        self._quiet_finish()
+                    self._close_drain()   # DV-R9 N-1: the peek was the window
+                                          # itself -- late surplus escaped it
                     self._json(502, {"error": {
                         "message": "strata-router: backend " + backend.id + " answered with a response the router "
                                    "could not parse (" + type(exc).__name__ + "). Nothing was relayed to the caller, "
@@ -3461,7 +3505,14 @@ def parse_backend_specs(specs, default_prefix):
     out = []
     for spec in specs:
         if spec.lstrip().startswith("{"):
-            out.append(json.loads(spec))
+            try:
+                out.append(json.loads(spec))
+            except ValueError as exc:
+                # DV-R9 B-9a family sweep: this JSON door died as a raw
+                # JSONDecodeError traceback -- every other config death is
+                # named, this one is named too.
+                raise SystemExit("--backend JSON object did not parse (%s): %r"
+                                 % (exc, spec[:60]))
             continue
         bid, sep, rest = spec.partition("=")
         if not sep:
@@ -3813,7 +3864,14 @@ def _backend_ids(cfg):
     typo check. Thirteenth lesson of this program: the law moves INTO the
     shared primitive."""
     ids = []
-    for _i, spec in enumerate(cfg.get("backends") or []):
+    _bi_specs = cfg.get("backends") or []
+    if not isinstance(_bi_specs, list):
+        # DV-R9 B-9a (P3, a DV-fix10 regression): a non-list shape's death belongs
+        # to the NAMED door (make_pool, "backends must be a LIST") -- an id reader
+        # that iterates it first would die as a raw "not iterable" traceback from
+        # main()'s apply_keys, BEFORE that door ever runs. Empty view, not a crash.
+        _bi_specs = []
+    for _i, spec in enumerate(_bi_specs):
         bid = spec.get("id") if isinstance(spec, dict) else None
         ids.append(str(bid) if bid else "box" + str(_i + 1))
     return ids
@@ -3890,6 +3948,12 @@ def apply_keys(cfg, config_path, creating=False):
     sources = {}
     _ids2k = _backend_ids(cfg)
     _bs2k = cfg.get("backends") or []
+    # DV-R9 B-9a: a non-list top-level backends must die at the NAMED door
+    # (make_pool), not here -- enumerate(int) raises, enumerate(dict) iterates
+    # keys and the string-spec promotion writes them (dictionary-changed-size).
+    # Skip the whole per-backend key pass; the door below owns shape death.
+    if not isinstance(_bs2k, list):
+        _bs2k = []
     for _ik, spec in enumerate(_bs2k):
         if isinstance(spec, str):
             # F-2 second limb (DV-R8 GREEN-run catch -- engine-wrong this time,
@@ -4338,18 +4402,46 @@ def validate_cfg(cfg, pool, strict=True):
     _ln = _ln_raw if isinstance(_ln_raw, str) else None
     if _ln is None:
         problems.append(("listen", "must be a JSON string, got %s -- it cannot name a bind "
-                                   "target; write \"127.0.0.1\", or \"0.0.0.0\" deliberately"
+                                   "target; write \"127.0.0.1\", or the ONE exact address "
+                                   "your clients use (the rebinding guard admits only that "
+                                   "Host; a wildcard bind is refused below)"
                                    % (type(_ln_raw).__name__,)))
     else:
+        _ln_norm = _ln.strip().lower()
+        if _ln_norm != _ln:
+            # DV-R9 N-4/N-5 (P3s): ONE normalized string for ALL three read-sites
+            # (this validator, the bind, the rebinding guard). " 127.0.0.1 " used to
+            # pass the validator, pass the stripping guard, and die at the raw bind
+            # with a gaierror traceback; "Localhost" earned a WARNING whose BOTH
+            # sentences were false (the guard admits it). Writing back makes the cfg
+            # carry the truth every reader shares -- same doctrine as DV-fix10's
+            # _backend_ids: one truth, one read-point.
+            cfg["listen"] = _ln = _ln_norm
         if ":" in _ln:
             problems.append(("listen", "must be an IPv4 address or hostname (this stdlib server is AF_INET "
                                        "only, IPv6 cannot bind); use 127.0.0.1"))
-        if not _ln.strip():
+        if _ln in ("0.0.0.0", "0", "*"):
+            # F-9a/N-3 (DV-R9, the wildcard family): binding EVERY interface while
+            # the rebinding guard admits only Host == the listen STRING locks out
+            # every real client -- nobody sends Host: 0.0.0.0, loopback included --
+            # so the router would serve the whole network and answer everyone a 403.
+            # "0" and "*" were worse: they bind NOTHING (raw gaierror traceback at
+            # the bind, against the boot doctrine) while the WARNING taught callers
+            # to send Host: 0. A wildcard listen is not a shape this router serves;
+            # the old error texts that RECOMMENDED "0.0.0.0" were prescriptions for
+            # self-lockout and are gone.
+            problems.append(("listen", "%r is a WILDCARD: the rebinding guard admits only "
+                                       "Host: %s, so every real caller (loopback included) "
+                                       "would be 403-locked out while the port serves the "
+                                       "whole network -- name the ONE address your clients "
+                                       "use (e.g. the tailnet address)" % (_ln_raw, _ln)))
+        if not _ln:
             problems.append(("listen", "must not be empty: an empty listen binds EVERY interface "
                                        "(0.0.0.0) while the rebinding guard still trusts Host: "
                                        "localhost, which any remote caller can send -- that leaves "
                                        "an unauthenticated key-injecting port on the network; "
-                                       "write \"0.0.0.0\" deliberately to serve all interfaces"))
+                                       "write the exact address your clients will use (a wildcard "
+                                       "bind is refused -- the guard would 403 every real caller)"))
     sp = cfg.get("status_paths")
     if sp is not None and (not isinstance(sp, (list, tuple)) or not sp
                            or not all(isinstance(x, str) and x.startswith("/") for x in sp)):
@@ -4358,7 +4450,10 @@ def validate_cfg(cfg, pool, strict=True):
     # pre-1.2.18 M/TP-P2: the old `or "127.0.0.1"` made an empty listen look loopback and
     # muted this warning on the one value that binds everything -- empty warns too.
     # A non-string listen is refused above; it never gets a warning naming a phantom Host.
-    if _ln is not None and _ln.strip() not in ("127.0.0.1", "localhost", "::1"):
+    # DV-R9 N-5: `_ln` is the NORMALIZED string written back above -- this loopback test
+    # now agrees with the guard's (also-normalized) view, so "Localhost" earns no false
+    # "admits ONLY Host: Localhost / IS NOT loopback" sentence.
+    if _ln is not None and _ln not in ("127.0.0.1", "localhost", "::1"):
         LOG.warning(
             "listen=%s is NOT loopback: this router has no auth of its own and injects "
             "backend keys for callers that send none. Firewall this port to known peers now. "

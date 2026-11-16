@@ -5300,10 +5300,9 @@ def main():
 
     _src20 = open(ROUTER, encoding="utf-8").read()
     _flat20 = " ".join(_src20.split())
-    check("S20/choke: the whole stdlib refusal family learns the law in ONE place -- send_error is overridden, flag-first, and its drain runs ONLY when bytes are pending (no fourth per-door law is allowed after 13 same-shape lesions)",
+    check("S20/choke: the whole stdlib refusal family learns the law in ONE place -- send_error is overridden, flag-first, and drains through the shared primitive (S21 moved the law one level DOWN when the per-door peek became the lesion; still no fourth per-door drain site anywhere)",
           "def send_error" in _src20
-          and "_pending_now" in _src20[_src20.index("def send_error"):_src20.index("def send_error") + 1600]
-          and "_quiet_finish" in _src20[_src20.index("def send_error"):_src20.index("def send_error") + 1600])
+          and "_close_drain" in _src20[_src20.index("def send_error"):_src20.index("def send_error") + 1900])
     check("S20/F-3: the DEAD rewrite-400 door is deleted, not patched -- its named refusal text is gone from the source (the body edit now either rewrites or forwards verbatim; a dead door is a liability magnet)",
           "model rewrite failed" not in _src20)
     check("S20/F-8: the unreachable post-chunk 413 branch is gone too (pre-deduction makes body <= limit by construction; DV-fix9 deleted a dead probe rc, this round deletes its siblings -- dead code is where the next blind face burns its round)",
@@ -5368,6 +5367,313 @@ def main():
     check("S20/doc: the README drain law is now ENUMERATION-PROOF -- every door that closes learns it, INCLUDING the stdlib send_error path, and the keep-alive carve-out still stands (a paragraph you can enumerate past is a paragraph that will be enumerated past)",
           "including the stdlib send_error path" in _fl15 and "GET/HEAD chunked close" in _fl15
           and "legitimately pipelined request" in _fl15)
+
+    print("")
+    print("S21) DV-R9: the drain law at ARRIVAL TIME -- one quiet window (14th same-shape lesion, the first INSIDE the mechanism), the wildcard-listen family named, listen normalized at ONE source, HTTP/0.9 framing, shape deaths at the NAMED doors")
+    # Round-9 harvest (L1a2 fidelity + L1b behavioral + L2 red team; the council
+    # reproduced EVERY row at 401ea0a): the peek-gated drain was a door-time
+    # SNAPSHOT -- bytes released 0.2-0.5 s after the request were not "pending",
+    # the door closed over them, and the Windows close-with-unread-data RST ate
+    # the refusal just written (0/10 named arrivals, four shapes --
+    # ws-v1219-DV-R9-council-r9c2_variants-401ea0a.log). DV-fix11 moved the law
+    # one level DEEPER: _close_drain at all six closing sites (peek TRUE: the
+    # full 2.0 s deadline, as today; peek EMPTY: ONE 0.4 s quiet window -- late
+    # arrivals inside the window are discarded too; bytes later than the window
+    # are the documented bound, waiting past it would be a thread-starvation
+    # door). Also this section: wildcard listens (0.0.0.0/0/*) refuse boot BY
+    # NAME (F-9a/N-3 -- self-lockout + a gaierror death, and two error texts
+    # used to PRESCRIBE it), listen strip+lower written back ONCE for
+    # validator+bind+guard (N-4/N-5), HTTP/0.9 gets close-delimited framing
+    # (N-2), and non-list backends die at make_pool's NAMED door instead of
+    # apply_keys' promotion loop (B-9a -- a DV-fix10 regression, the program's
+    # second fix-introduced lesion).
+    _H21 = b"Host: 127.0.0.1:9167\r\n"
+    _SURP21 = b"GET /late HTTP/1.1\r\n" + _H21 + b"\r\n"
+    _l21 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _l21.bind(("127.0.0.1", 9168))          # plain socket, no reuse, single listener
+    _l21.listen(8)
+    _run21 = [True]
+    def _box21():
+        while _run21[0]:
+            try:
+                _c21b, _ = _l21.accept()
+            except OSError:
+                return
+            try:
+                _c21b.settimeout(5)
+                _hd21b = b""
+                while b"\r\n\r\n" not in _hd21b:
+                    _g21b = _c21b.recv(4096)
+                    if not _g21b:
+                        break
+                    _hd21b += _g21b
+                if not _hd21b:
+                    continue
+                _ln21b = _hd21b.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+                _pth21b = _ln21b.split(" ")[1] if len(_ln21b.split(" ")) > 2 else "/"
+                _cl21b = 0
+                _low21b = _hd21b.lower()
+                _i21b = _low21b.find(b"content-length:")
+                if _i21b >= 0:
+                    _cl21b = int(_low21b[_i21b + 15:].split(b"\r\n", 1)[0].strip() or 0)
+                _have21b = len(_hd21b.split(b"\r\n\r\n", 1)[1])
+                while _have21b < _cl21b:
+                    _g21b = _c21b.recv(65536)
+                    if not _g21b:
+                        break
+                    _have21b += len(_g21b)
+                if "up12" in _pth21b:
+                    _c21b.sendall(b"XYZ 200 this is not HTTP\r\n\r\n")     # unparseable on purpose
+                elif _ln21b.startswith("GET"):
+                    _j21b = json.dumps({"activity": {"in_flight": 0}, "state": "ready"}).encode()
+                    _c21b.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: %d\r\n\r\n" % len(_j21b) + _j21b)
+                else:
+                    _j21b = json.dumps({"id": "s21", "content": [{"type": "text", "text": "ok"}],
+                                        "usage": {"input_tokens": 10, "output_tokens": 5}}).encode()
+                    _c21b.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: %d\r\n\r\n" % len(_j21b) + _j21b)
+            except Exception:
+                pass
+            finally:
+                try:
+                    _c21b.close()
+                except OSError:
+                    pass
+    threading.Thread(target=_box21, daemon=True).start()
+    with open("s21_late.json", "w") as _ff21:
+        # control_token MUST be set (lesson #6): an open control surface answers
+        # _control_ok() True and the pin door -- the row under test -- never fires.
+        json.dump({"listen": "127.0.0.1", "port": 9167, "status_interval": 0.5,
+                   "control_token": "s21-fake-control-token",
+                   "backends": [{"id": "s21a", "url": "http://127.0.0.1:9168"}]}, _ff21)
+    _proc21 = subprocess.Popen([sys.executable, ROUTER, "--config", "s21_late.json", "--log-level", "WARNING"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def _late21(head, body=b"", late=None, read=8.0, reader=0.0):
+        """Send head+body; `late` = bytes released 0.3 s AFTER the request --
+        the STILL-ARRIVING axis a peek at door time cannot see. `reader` = the
+        client starts reading only this many seconds after the LAST byte it
+        sends: on the baseline the refusal sits in the buffer, then the late
+        surplus draws a RST that DISCARDS it (r9c2 V3: the deterministic loss);
+        after the fix nothing is discarded, so reader timing stops mattering.
+        (got, secs)."""
+        try:
+            _s21 = socket.create_connection(("127.0.0.1", 9167), timeout=5)
+        except OSError:
+            return b"", 99.0
+        _t021 = time.monotonic()
+        _d21 = b""
+        try:
+            _s21.sendall(head + body)
+            if late is not None:
+                time.sleep(0.3)
+                try:
+                    _s21.sendall(late)
+                except OSError:
+                    pass      # peer closed before the bytes landed -- THAT is the lesion
+            if reader:
+                time.sleep(reader)
+            _s21.settimeout(read)
+            while len(_d21) < 8192:
+                try:
+                    _g21 = _s21.recv(65536)
+                except (socket.timeout, OSError):
+                    break
+                if not _g21:
+                    break
+                _d21 += _g21
+        finally:
+            _s21.close()
+        return _d21, time.monotonic() - _t021
+    def _arr21(head, body, late, markers, n=10, reader=0.0):
+        _okc21, _dts21 = 0, []
+        for _ in range(n):
+            _d21, _t21b = _late21(head, body, late, reader=reader)
+            if all(m in _d21 for m in markers):
+                _okc21 += 1
+            _dts21.append(round(_t21b, 2))
+        return _okc21, _dts21
+    def _hz21(port):
+        try:
+            return get(port, "/healthz")[0] == 200
+        except Exception:
+            return False
+    _PINB21 = b'{"m":"x","n":1}'          # the CL is len(), NEVER hand-typed: the first draft
+                                          # declared 13 for this 15-byte body and every "honest"
+                                          # row silently became a lying-CL shape -- the rig burned
+                                          # ITSELF (lesson #6 turned on my own harness, logged)
+    _PIN21 = (b"POST /v1/chat/completions HTTP/1.1\r\n" + _H21 +
+              b"x-strata-pin: s21a\r\ncontent-type: application/json\r\ncontent-length: %d\r\n\r\n" % len(_PINB21))
+    _PINLIE21 = (b"POST /v1/chat/completions HTTP/1.1\r\n" + _H21 +
+                 b"x-strata-pin: s21a\r\ncontent-type: application/json\r\ncontent-length: 10\r\n\r\n")
+    _FOO21 = b"FOOBAR /v1/chat/completions HTTP/1.1\r\n" + _H21 + b"\r\n"
+    _BAD21 = b"GARBAGE\r\n"
+    _UNP21 = (b"POST /up12 HTTP/1.1\r\n" + _H21 +
+              b"content-type: application/json\r\ncontent-length: %d\r\n\r\n" % len(_PINB21))
+    try:
+        _up21 = wait_for(lambda: _hz21(9167), 25)
+        _d21, _t21 = _late21(_PIN21, _PINB21) if _up21 else (b"", 99.0)
+        check("S21/N-1 control: pin-403 with NOTHING arriving late answers named and inside budget -- an honest closing door pays ONE 0.4 s quiet window (by design: error paths only; the hot paths never call _close_drain)",
+              b"403" in _d21 and b"pin refused" in _d21 and _t21 < 1.5, "t=%.2fs head=%r" % (_t21, _d21[:40]))
+        _ok21, _dts21 = _arr21(_PIN21, _PINB21, _SURP21, [b"403", b"pin refused"], reader=0.7) if _up21 else (0, [])
+        check("S21/L2 N-1: pin-403 meets a surplus released 0.3 s LATE and the refusal STILL arrives 10/10 -- pre-fix the peek said 'nothing pending' at door time, the door closed over the arriving bytes, the RST ate the refusal (0/10 four shapes: the 14th same-shape lesion and the FIRST one inside the drain mechanism itself)",
+              _ok21 == 10, "delivered=%d/10 dts=%s" % (_ok21, _dts21[:3]))
+        _ok21, _dts21 = _arr21(_PINLIE21, b"0123456789", b"LYING-CL-REST-OF-BODY", [b"403", b"pin refused"]) if _up21 else (0, [])
+        check("S21/N-1 (V2 shape): the under-declared CL whose REMAINDER arrives late -- _drain_body's count-stop escape window-discards it too (r9c2: this shape 0/10 WinError 10053 pre-fix)",
+              _ok21 == 10, "delivered=%d/10 dts=%s" % (_ok21, _dts21[:3]))
+        _ok21, _dts21 = _arr21(_FOO21, b"", _SURP21, [b"501", b"Unsupported"]) if _up21 else (0, [])
+        check("S21/N-1 (send_error family): FOOBAR 501 with a late surplus -- the stdlib dispatch face rides the SAME shared primitive (DV-fix10 taught the family the drain law AT send_error; DV-fix11 moved the law one level down into _close_drain, so no door -- stdlib or own -- can keep a stale mechanism)",
+              _ok21 == 10, "delivered=%d/10 dts=%s" % (_ok21, _dts21[:3]))
+        _ok21, _dts21 = _arr21(_BAD21, b"", _SURP21, [b"400"]) if _up21 else (0, [])
+        check("S21/N-1 (malformed-line 400): a bad request line + late surplus -- the malformed-line door (DV-fix10's 13th catch) is arrival-proof now",
+              _ok21 == 10, "delivered=%d/10 dts=%s" % (_ok21, _dts21[:3]))
+        _ok21, _dts21 = _arr21(_UNP21, _PINB21, _SURP21, [b"502", b"could not parse"], reader=0.7) if _up21 else (0, [])
+        check("S21/N-1 (unp-502 twin): unparseable-box 502 with a late surplus -- the DV-R8 race door is deterministic now (the red team measured it as 2/10 A RACE at fix9; late surplus makes a peek-gate lose every time)",
+              _ok21 == 10, "delivered=%d/10 dts=%s" % (_ok21, _dts21[:3]))
+        _mx21 = 0.0
+        _hz21s = 0
+        for _ in range(8):
+            _t021h = time.monotonic()
+            try:
+                _hz21s = get(9167, "/healthz")[0]
+            except Exception:
+                _hz21s = 0
+            _mx21 = max(_mx21, time.monotonic() - _t021h)
+        check("S21/N-1 guard: 8 plain /healthz pay NOTHING to the window -- keep-alive paths never call _close_drain (the quiet window lives ONLY on closing doors; the hot-path law re-pinned on the new primitive)",
+              _hz21s == 200 and _mx21 < 1.0, "max=%.2fs" % _mx21)
+        _raw21m = b""
+        if _up21:
+            try:
+                _s21m = socket.create_connection(("127.0.0.1", 9167), timeout=8)
+                _s21m.sendall(b"GET /v1/models\r\n" + _H21 + b"\r\n")
+                try:
+                    while True:
+                        _g21m = _s21m.recv(65536)
+                        if not _g21m:
+                            break
+                        _raw21m += _g21m
+                except OSError:
+                    pass
+                _s21m.close()
+            except OSError:
+                pass
+        check("S21/L2 N-2: a two-word HTTP/0.9 request line gets its body VERBATIM -- the stdlib's DEFAULT request_version got chunk framing printed AS content (hex sizes + the 0-CRLF-CRLF trailer); close-delimited is the only framing a 0.9 caller knows",
+              _raw21m.startswith(b"{") and b"\r\n0\r\n\r\n" not in _raw21m and b"transfer-encoding" not in _raw21m.lower(),
+              repr(_raw21m[:60]))
+        if _up21:
+            _c21m = http.client.HTTPConnection("127.0.0.1", 9167, timeout=8)
+            _c21m.request("GET", "/v1/models", headers={"host": "127.0.0.1:9167"})
+            _r21m = _c21m.getresponse()
+            _r21m.read()
+            _te21m = (_r21m.getheader("transfer-encoding") or "").lower()
+            _c21m.close()
+        else:
+            _te21m = ""
+        check("S21/N-2 control: the SAME path under HTTP/1.1 keeps chunked framing (the gate closes around the archaic twins only -- the modern relay is untouched)",
+              "chunked" in _te21m, repr(_te21m))
+        # ---- boot family: every death NAMED, no raw tracebacks (all die BEFORE any bind) ----
+        def _boot21(_nm21, _cfg21, _argv21=()):
+            _p21 = "s21_boot_%s.json" % _nm21
+            with open(_p21, "w") as _f21:
+                json.dump(_cfg21, _f21)
+            _r21 = subprocess.run([sys.executable, ROUTER, "--config", _p21, "--log-level", "WARNING"] + list(_argv21),
+                                  capture_output=True, text=True, timeout=30)
+            return _r21.returncode, (_r21.stderr or "") + (_r21.stdout or "")
+        _base21 = {"listen": "127.0.0.1", "port": 9169, "backends": [{"id": "s21b", "url": "http://127.0.0.1:9"}]}
+        for _lw21, _nm21 in (("0", "w0"), ("*", "wstar")):
+            _rc21, _out21 = _boot21(_nm21, dict(_base21, listen=_lw21))
+            check("S21/L2 N-3: boot with listen=%r dies NAMED (WILDCARD text, NO traceback) -- baseline let it through the validator and died at the bind as a raw gaierror: the wildcard family's second death" % _lw21,
+                  _rc21 not in (0, None) and "Traceback" not in _out21 and "WILDCARD" in _out21,
+                  "rc=%s %s" % (_rc21, _out21[:100]))
+        _b9res21 = {}
+        for _bsh21, _nmb21 in (({"A": "http://x"}, "dict"), ("http://x", "str"), (123, "int"), (True, "bool"), (1.5, "float")):
+            _rc21, _out21 = _boot21("be" + _nmb21, dict(_base21, backends=_bsh21))
+            _b9res21[_nmb21] = (_rc21, "Traceback" in _out21,
+                                ("must be a LIST" in _out21) or ("no backends" in _out21))
+        check("S21/L1b B-9a: EVERY non-list backends shape (dict/str/int/bool/float) dies at make_pool's NAMED door with NO traceback -- apply_keys' promotion loop (DV-fix10's F-2 limb; the program's SECOND fix-introduced lesion) no longer runs ahead of the door (baseline: dict 'dictionary changed size', str 'item assignment', int/bool/float 'not iterable' -- all bare tracebacks)",
+              all(rc != 0 and tb is False and named for rc, tb, named in _b9res21.values()), repr(_b9res21))
+        _rc21, _out21 = _boot21("argvj", _base21, _argv21=("--backend", "{oops"))
+        check("S21/B-9a family sweep: --backend with broken JSON dies NAMED ('did not parse') -- baseline raised a bare JSONDecodeError (the L2 sweep's 6th shape)",
+              _rc21 not in (0, None) and "Traceback" not in _out21 and "did not parse" in _out21,
+              "rc=%s %s" % (_rc21, _out21[:100]))
+        with open("s21_norm.json", "w") as _f21:
+            json.dump({"listen": " 127.0.0.1 ", "port": 9169, "status_interval": 5,
+                       "backends": ["http://127.0.0.1:9168"]}, _f21)
+        _pn21 = subprocess.Popen([sys.executable, ROUTER, "--config", "s21_norm.json", "--log-level", "WARNING"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S21/N-4 end-to-end: listen ' 127.0.0.1 ' BOOTS and serves on the NORMALIZED string (baseline: raw gaierror traceback at the bind -- one value, three read-sites, three fates; now ONE normalized truth reaches the real bind)",
+                  wait_for(lambda: _hz21(9169), 20), "healthz on 9169")
+        finally:
+            _term(_pn21)
+        with open("s21_sl.json", "w") as _f21:
+            json.dump({"listen": "127.0.0.1", "port": 9170, "status_interval": 5,
+                       "backends": ["http://127.0.0.1:9168"]}, _f21)
+        _ps21 = subprocess.Popen([sys.executable, ROUTER, "--config", "s21_sl.json", "--log-level", "WARNING"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            check("S21/B-9a control: string-list backends STILL boot clean and serve (the shape guard skips NON-lists only -- DV-fix10's promotion law must not regress in the other direction)",
+                  wait_for(lambda: _hz21(9170), 20), "healthz on 9170")
+        finally:
+            _term(_ps21)
+    finally:
+        _run21[0] = False
+        _term(_proc21)
+        try:
+            _l21.close()
+        except OSError:
+            pass
+    _src21 = open(ROUTER, encoding="utf-8").read()
+    _flat21 = " ".join(_src21.split())
+    check("S21/N-1 doctrine: the closing-door drain lives in ONE deeper primitive -- _close_drain (peek TRUE: full deadline; peek EMPTY: one quiet window) -- six closing sites call it, and the peek-as-door-GATE is ILLEGAL text now ('if self._pending_now():' appears nowhere; the mechanism itself was the lesion: the law moves one level DOWN)",
+          "def _close_drain" in _src21 and _flat21.count("self._close_drain()") >= 6
+          and "if self._pending_now():" not in _flat21,
+          "calls=%d" % _flat21.count("self._close_drain()"))
+    check("S21/N-4: listen is normalized ONCE and WRITTEN BACK ('cfg[\"listen\"] = _ln = _ln_norm') -- validator, bind AND guard share one string, the same one-truth doctrine DV-fix10 put on backend ids",
+          'cfg["listen"] = _ln = _ln_norm' in _src21)
+    check("S21/F-9a: the config doors that PRESCRIBED the self-lockout are gone -- no error text may advise 'write \"0.0.0.0\"' again (with the guard, that value 403-locks the whole world, loopback included)",
+          '"0.0.0.0" deliberately' not in _src21 and "serve all interfaces" not in _src21)
+    check("S21/N-2: the chunk gate names BOTH archaic versions -- the stdlib's default request_version is HTTP/0.9, and '!= HTTP/1.0' alone framed a caller that knows no framing at all",
+          '("HTTP/1.0", "HTTP/0.9")' in _src21)
+    import logging as _lg21
+    _recs21 = []
+    class _Cap21(_lg21.Handler):
+        def emit(self, rec):
+            try:
+                _recs21.append(rec.getMessage())
+            except Exception:
+                pass
+    _lp21 = _lg21.getLogger("strata-router")
+    _cap21 = _Cap21()
+    _lp21.addHandler(_cap21)
+    def _v21(_ln21):
+        _c21 = dict(R.DEFAULTS)
+        _c21["listen"] = _ln21
+        _c21["backends"] = [{"id": "s21v", "url": "http://127.0.0.1:9", "priority": 0}]
+        _n021 = len(_recs21)
+        _p21 = R.validate_cfg(_c21, R.make_pool(_c21), strict=False)
+        return _c21, _p21, _recs21[_n021:]
+    try:
+        _w21res = {}
+        for _lwv21 in ("0.0.0.0", "0", "*", " 0.0.0.0 "):
+            _c21, _p21, _ww21 = _v21(_lwv21)
+            _w21res[_lwv21] = sum(1 for _f21, _t21 in _p21 if _f21 == "listen" and "WILDCARD" in _t21)
+        check("S21/F-9a+N-3: the wildcard family -- 0.0.0.0, 0, *, and whitespace spellings (normalized FIRST so they cannot sneak past) -- is REFUSED BY NAME at the config door (nobody sends Host: 0.0.0.0, loopback included: binding everything while the guard admits only that literal is a self-lockout)",
+              all(v == 1 for v in _w21res.values()), repr(_w21res))
+        _c21, _p21, _ww21 = _v21(" 127.0.0.1 ")
+        check("S21/N-4: ' 127.0.0.1 ' comes back NORMALIZED and problem-free (baseline: silent validator + passing stripping guard + gaierror at the raw bind)",
+              _c21["listen"] == "127.0.0.1" and not _p21, "listen=%r n=%d" % (_c21["listen"], len(_p21)))
+        _c21, _p21, _ww21 = _v21("Localhost")
+        _false21 = [m for m in _ww21 if "NOT loopback" in m or "admits ONLY" in m]
+        check("S21/N-5: 'Localhost' earns NO warning and normalizes to 'localhost' -- the loopback test now reads the SAME normalized string the guard does, so a WARNING can never again call loopback off-loopback (baseline fired BOTH sentences false)",
+              _c21["listen"] == "localhost" and not _false21,
+              "listen=%r warns=%r" % (_c21["listen"], [m[:40] for m in _false21]))
+        _c21, _p21, _ww21 = _v21("192.0.2.55")
+        check("S21/N-5 control: an honest off-loopback bind (TEST-NET doc space -- a lab string) still gets its full firewall sermon and is NOT called a wildcard -- normalization must never mute the truth",
+              any("NOT loopback" in m for m in _ww21) and not any("WILDCARD" in _t21 for _f21, _t21 in _p21),
+              repr([m[:40] for m in _ww21][:1]))
+    finally:
+        _lp21.removeHandler(_cap21)
+    check("S21/doc: the README drain law states its BOUND -- STILL-ARRIVING bytes are discarded inside ONE quiet window, nothing waits past it (a guarantee whose boundary is unstated is a guarantee that gets over-promised), and the guard paragraph now says why listen must name ONE exact address",
+          "one quiet window" in _fl15 and "STILL ARRIVING" in _fl15 and "403-locked out" in _fl15)
 
     print("")
     if FAKE_ERRORS:
