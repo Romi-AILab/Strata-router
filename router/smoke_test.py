@@ -1002,18 +1002,26 @@ def main():
                   json.dumps(qm())[:200])
 
             # ---- the closed identity: every request settles in ONE counter ----
+            # DV-R12 F-4: this lock was TERM-BLIND -- it summed 8 of the 12
+            # terminals and pinned the residual at ==1, but that 1 was not a
+            # law, just one request settling in a term the sum did not read.
+            # The canonical 12-terminal identity (v1.2.16, S12) is residual
+            # ZERO; this pool now reads by the same law, so a future leak can
+            # no longer hide in the gap between the sum and the pinned one.
             _r7 = qm()
-            _term_sum = (_r7["sticky_hits"] + _r7["new_placements"] + _r7["migrations"]
-                         + _r7["pinned"] + _r7.get("last_resort", 0) + _r7.get("overflow_placements", 0)
-                         + _r7.get("overflow_rollbacks", 0) + _r7.get("overflow_fizzles", 0))
-            check("placement counters form a CLOSED identity (one terminal per request; only the"
-                  " operator-cancelled overflow is allowed uncounted)",
-                  _r7["requests"] - _term_sum == 1 and _r7.get("pin_misses", 0) == 0,
-                  "requests=%s terminals=%s diff=%s %s" % (_r7["requests"], _term_sum, _r7["requests"] - _term_sum,
-                                                           json.dumps({k: _r7.get(k) for k in
-                                                           ("sticky_hits", "new_placements", "pinned",
-                                                            "overflow_placements", "overflow_rollbacks",
-                                                            "overflow_fizzles")})[:220]))
+            _term_sum = sum(_r7.get(k, 0) for k in ("sticky_hits", "new_placements",
+                                                    "migrations", "pinned", "last_resort",
+                                                    "overflow_placements", "overflow_rollbacks",
+                                                    "overflow_fizzles", "overflow_evictions",
+                                                    "operator_cancelled", "passthrough_gets",
+                                                    "preview_passes"))
+            check("placement counters form a CLOSED identity over ALL 12 terminals (requests == SUM; no terminal optional, no residual pinned)",
+                  _r7["requests"] == _term_sum and _r7.get("pin_misses", 0) == 0,
+                  "requests=%s terminals=%s %s" % (_r7["requests"], _term_sum,
+                  json.dumps({k: _r7.get(k) for k in
+                  ("sticky_hits", "new_placements", "pinned", "preview_passes",
+                   "operator_cancelled", "overflow_placements", "overflow_rollbacks",
+                   "overflow_fizzles")})[:240]))
         finally:
             _term(proc7)
             try:
@@ -4050,14 +4058,16 @@ def main():
         # the pre-smart baseline main@36ef04d speaks 1.2.17.
         _rd = open(os.path.join(os.path.dirname(ROUTER), "README.md"), encoding="utf-8").read()
         _l_place = next(_l for _l in _rd.splitlines() if _l.startswith("| `smart_place`"))
-        _l_parity = _rd[_rd.index("empty or absent means"): _rd.index("empty or absent means") + 300]
+        _l_parity = _rd[_rd.index("empty or absent means"): _rd.index("empty or absent means") + 500]
         check("S12/P2-3: the smart_place row discloses the SUSPECT placement-face exclusion (still in the drain tail, still served when every box is SUSPECT -- but no FIRST visit while a healthy box stands)",
               "SUSPECT" in _l_place, _l_place[:120])
         check("S12/P2-4: the table names lane-state birth truthfully -- the flags that READ lanes (shadow/move/homecoming), never smart_obs",
               "smart_shadow`/`smart_move`/`smart_homecoming" in _l_place and "smart_obs` measures" not in _l_place,
               _l_place[:120])
-        check("S12/P3-4: the flag-off parity claim names the REAL baseline version (v1.2.17 @36ef04d), not a stale label",
-              "v1.2.17" in _l_parity and "v1.2.16" not in _l_parity, _l_parity[:150])
+        check("S12/P3-4: the flag-off claim names the REAL baseline (v1.2.17) and no longer swears wire-parity -- it states the truth DV-R12 F-2 caught it hiding: the DV-fix security laws are law, not ladder features (byte-for-byte is DEAD)",
+              "v1.2.17" in _l_parity and "v1.2.16" not in _l_parity
+              and "NOT byte-for-byte" in _l_parity and "law, not a ladder feature" in _l_parity,
+              _l_parity[:220])
 
         # P3-2: the gate reads at most 32 completed cycles -- release_gate_shadow_cycles=33
         # would stand at a gate that can never open, in silence. The move-alone row
@@ -4517,7 +4527,7 @@ def main():
     check("S15/F-6: the pin down-cooldown caution describes a shape the code allows -- try_place REFUSES a pin inside the cooldown (trial_open or monotonic() < down_until); the trial is consumed by a pin whose box's backoff has EXPIRED, not by one 'in its down-cooldown'",
           "in its down-cooldown may consume" not in _fl15, "")
     check("S15/F-8: the S-1 boot law (smart_place/smart_move refuse boot unless EVERY box declares max_inflight) is disclosed where operators read the ladder's boot laws, not only inside the validator",
-          "max_inflight" in _ld15[:900], "")
+          "max_inflight" in _ld15[:1200], "")
 
     # ---- S16: DV-R4's harvest (fidelity F-1..F-8d + Q1's witness door).
     # Zero-port, in-process -- same law the probe burned 20/20 RED against
@@ -6373,6 +6383,220 @@ def main():
     check("S23/doc: the chunked waiting laws are on the record -- a chunked body at a closing door drains to EOF-or-deadline (the bound IS the deadline), and an at-cap chunk size passes the strict door with its fill waiting on the caller's own read pace (C-2/C-3: measured SILENT 9 s and 2.0-vs-0.4 s in r11a)",
           "chunked carries no number to stop at" in _fl15
           and "its fill waiting on the caller's own read pace" in _fl15, "")
+
+    print("S24) DV-R12: the relay's framing gate reads the STATUS too (18th same-shape lesion, 4th in the framing family -- no-body statuses arrived chunk-framed, and a compliant keep-alive caller parsed the terminator -- or a smuggled 205 body -- as the NEXT status line; and the drop is DECLARED: r14a measured a silent 205 stranding http.client in read-to-EOF), x-strata-* is spoken HERE only (N-R1), --prob is the PARSED probe (F-1), the byte-for-byte era is closed (F-2)")
+    _S24_BOX, _S24_RTR, _S24_BOX2, _S24_RTR2, _S24_PBE = 9188, 9189, 9190, 9191, 9192
+    _MODE24 = {"m": "204"}
+
+    def _box24(sock24, stop24):
+        while not stop24.is_set():
+            try:
+                c24, _ = sock24.accept()
+            except OSError:
+                return
+            def _svc24(c24=c24):
+                try:
+                    c24.settimeout(3)
+                    buf24 = b""
+                    while b"\r\n\r\n" not in buf24:
+                        b24 = c24.recv(4096)
+                        if not b24:
+                            break
+                        buf24 += b24
+                    m24 = _MODE24["m"]
+                    if m24 == "204":
+                        c24.sendall(b"HTTP/1.1 204 No Content\r\nx-box: 1\r\n\r\n")
+                    elif m24 == "304plain":
+                        c24.sendall(b"HTTP/1.1 304 Not Modified\r\nx-box: 1\r\n\r\n")
+                    elif m24 == "304ct":
+                        c24.sendall(b"HTTP/1.1 304 Not Modified\r\ncontent-type: application/json\r\n"
+                                    b"content-length: 5\r\n\r\nHIDDEN")
+                    elif m24 == "205cl0":
+                        c24.sendall(b"HTTP/1.1 205 Reset Content\r\ncontent-length: 0\r\n\r\n")
+                    elif m24 == "205cl6":
+                        c24.sendall(b"HTTP/1.1 205 Reset Content\r\ncontent-length: 6\r\n\r\nSNEAKY")
+                    elif m24 == "forged":
+                        c24.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 9\r\n"
+                                    b"x-strata-backend: EVILBOX\r\nx-strata-affinity: forged\r\n\r\n{\"ok\": 1}")
+                    time.sleep(0.1)
+                    c24.close()
+                except OSError:
+                    try:
+                        c24.close()
+                    except OSError:
+                        pass
+            threading.Thread(target=_svc24, daemon=True).start()
+
+    def _raw24(port24, path24, pipelined24=False):
+        s24 = socket.create_connection(("127.0.0.1", port24), timeout=5)
+        req24 = ("GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" % path24).encode()
+        if pipelined24:
+            req24 += b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        s24.sendall(req24)
+        s24.settimeout(4)
+        dat24 = b""
+        try:
+            while True:
+                b24 = s24.recv(65536)
+                if not b24:
+                    break
+                dat24 += b24
+        except OSError:
+            pass
+        s24.close()
+        return dat24
+
+    def _seq24(port24, path24):
+        # THE compliant method (r12c3's lesson, on the record): drive http.client
+        # through its own state machine -- a raw sendall past it just raises
+        # ResponseNotReady and proves nothing. Full read, THEN the next request.
+        hc24 = http.client.HTTPConnection("127.0.0.1", port24, timeout=2.5)
+        try:
+            hc24.request("GET", path24, headers={"Host": "127.0.0.1"})
+            r124 = hc24.getresponse()
+            b124 = r124.read()
+            hc24.request("GET", "/healthz", headers={"Host": "127.0.0.1"})
+            r224 = hc24.getresponse()
+            r224.read()
+            return r124.status, b124, r224.status
+        except Exception as e24:
+            return None, repr(e24), None
+        finally:
+            hc24.close()
+
+    def _cfg24(name24, port24, box24):
+        with open(name24, "w") as f24:
+            json.dump({"listen": "127.0.0.1", "port": port24, "status_interval": 5,
+                       "backends": [{"id": "s24b", "url": "http://127.0.0.1:%d" % box24}]}, f24)
+
+    def _boot24(name24, port24, box24):
+        _cfg24(name24, port24, box24)
+        pr24 = subprocess.Popen([sys.executable, ROUTER, "--config", name24, "--log-level", "ERROR"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _try24 in range(40):
+            try:
+                if get(port24, "/healthz")[0] == 200:
+                    return pr24
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return pr24
+
+    _fb24 = socket.socket()
+    _fb24.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _fb24.bind(("127.0.0.1", _S24_BOX))
+    _fb24.listen(8)
+    _st24 = threading.Event()
+    threading.Thread(target=_box24, args=(_fb24, _st24), daemon=True).start()
+    _p24 = _boot24("s24_lab.json", _S24_RTR, _S24_BOX)
+    try:
+        _NOSHAPES24 = ("204", "304plain", "304ct", "205cl0", "205cl6")
+        _bad24 = []
+        for _m24 in _NOSHAPES24:
+            _MODE24["m"] = _m24
+            time.sleep(0.25)
+            _d24 = _raw24(_S24_RTR, "/v1/x", pipelined24=True)
+            _h24 = _d24.split(b"\r\n\r\n", 1)[0].lower()
+            _after24 = _d24.split(b"\r\n\r\n", 1)[-1]
+            _n24 = _after24.find(b"HTTP/1.1 200")
+            _between24 = _after24[:_n24] if _n24 >= 0 else _after24[:60]
+            if b"transfer-encoding" in _h24 or _between24 != b"":
+                _bad24.append("%s: te=%s between=%r" % (_m24, b"transfer-encoding" in _h24, _between24[:24]))
+        check("S24/CL-1: a no-body status relays UNFRAMED in all five box shapes -- no transfer-encoding, and ZERO bytes between its header block and the pipelined follow-on's status line (the baseline raw matrix: te=True 5/5, `0\\r\\n\\r\\n` or `6\\r\\nSNEAKY` riding as the next response's head)",
+              not _bad24, "; ".join(_bad24))
+        _MODE24["m"] = "205cl6"
+        time.sleep(0.25)
+        _d24 = _raw24(_S24_RTR, "/v1/x")
+        _h24 = _d24.split(b"\r\n\r\n", 1)[0].lower()
+        check("S24/r14a: the 205 drop is DECLARED -- content-length: 0 on the wire and the box's body gone; a SILENT 205 is not the answer either (it is not on the no-content list: r14a measured http.client blocking in read-to-EOF for 1.5 s on a bare one -- the drop must be announced in the ONE framing every client obeys)",
+              b"content-length: 0" in _h24 and b"SNEAKY" not in _d24,
+              "hdrs=%r sneaky=%s" % (_h24[:160], b"SNEAKY" in _d24))
+        _bad24 = []
+        for _m24 in _NOSHAPES24:
+            _MODE24["m"] = _m24
+            time.sleep(0.25)
+            _st124, _bd24, _st224 = _seq24(_S24_RTR, "/v1/x")
+            if not (_st124 in (204, 304, 205) and _bd24 == b"" and _st224 == 200):
+                _bad24.append("%s: %s/%r/%s" % (_m24, _st124, _bd24 if isinstance(_bd24, bytes) else _bd24[:40], _st224))
+        check("S24/r14a: the compliant sequential client survives all five shapes -- status relayed, read() lands on EMPTY, and the next request on the SAME connection answers 200 (the strict-client r12c method, now driven through http.client's own state machine)",
+              not _bad24, "; ".join(_bad24))
+        _bad24 = []
+        for _m24 in ("204", "304ct"):
+            _MODE24["m"] = _m24
+            time.sleep(0.25)
+            _h24 = _raw24(_S24_RTR, "/v1/x").split(b"\r\n\r\n", 1)[0].lower()
+            for _forbid24 in (b"content-type", b"content-length", b"transfer-encoding"):
+                if _forbid24 in _h24:
+                    _bad24.append("%s carries %s" % (_m24, _forbid24.decode()))
+        check("S24/two-cells law: the empty-line-terminated statuses assert NOTHING -- no CL, no TE, and not even the rebuilt content-type the box lied about (9110 15.4.5; the framing gate's sister cell is taught in the same breath -- the same-day-sister lesson, this time in the relay)",
+              not _bad24, "; ".join(_bad24))
+        _MODE24["m"] = "205cl6"
+        time.sleep(0.25)
+        _bo24 = stats(_S24_RTR)["backends"][0]["stats"].get("bytes_out", 0)
+        for _i24 in range(3):
+            _raw24(_S24_RTR, "/v1/x")
+        _bo24b = stats(_S24_RTR)["backends"][0]["stats"].get("bytes_out", 0)
+        check("S24/F-3-made-law: bytes_out is STRICTLY forwarded -- a lying box's discarded 205 body books ZERO bytes (the discard runs before the count now; the HEAD path stayed honest only because 3.13 length-zeros it, and a law may not depend on the client library)",
+              _bo24b - _bo24 == 0, "delta=%d" % (_bo24b - _bo24))
+        _fb24b = socket.socket()
+        _fb24b.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _fb24b.bind(("127.0.0.1", _S24_BOX2))
+        _fb24b.listen(8)
+        _st24b = threading.Event()
+        _MODE24["m"] = "forged"
+        threading.Thread(target=_box24, args=(_fb24b, _st24b), daemon=True).start()
+        _p24b = _boot24("s24_xstrata.json", _S24_RTR2, _S24_BOX2)
+        try:
+            _low24 = _raw24(_S24_RTR2, "/v1/f").lower()
+            check("S24/N-R1: a box FORGING x-strata-* response headers reaches no caller -- EVILBOX and 'forged' are gone, and the ONE x-strata-backend on the wire is this router's own truth (the request lane always stripped the prefix; the response lane's sister cell was untaught -- the channel the README points operators at stays one-voice)",
+                  b"evilbox" not in _low24 and b"x-strata-affinity" not in _low24
+                  and _low24.count(b"x-strata-backend") == 1 and b"x-strata-backend: s24b" in _low24,
+                  "n_backend=%d evil=%s aff=%s" % (_low24.count(b"x-strata-backend"),
+                                                   b"evilbox" in _low24, b"x-strata-affinity" in _low24))
+        finally:
+            _term(_p24b)
+            _st24b.set()
+            try:
+                _fb24b.close()
+            except OSError:
+                pass
+        _S24_PBX = 9186   # a LIVE house box for the probe row: measured --prob against
+                          # a dead backend runs the full timeout dance (rc=1 at 12.8 s) --
+                          # the row must exercise the probe PATH, not the probe's patience
+        _pbx24 = FakeStrata(_S24_PBX, "s24probebox")
+        _pbx24.start()
+        try:
+            _cfg24("s24_probe.json", _S24_PBE, _S24_PBX)
+            _pp24 = subprocess.Popen([sys.executable, ROUTER, "--config", "s24_probe.json", "--prob"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _gone24 = wait_for(lambda: _pp24.poll() is not None, 12)
+            _served24 = False
+            try:
+                _s24p = socket.create_connection(("127.0.0.1", _S24_PBE), timeout=1.0)
+                _s24p.close()
+                _served24 = True
+            except OSError:
+                pass
+            if _pp24.poll() is None:
+                _term(_pp24)
+            check("S24/F-1: --prob is a PROBE -- argparse's abbreviation parses AND the PARSED value governs: the process ends and the port never serves (baseline: the exact-string argv scan missed the abbreviation and silently booted a serving server while the operator watched for a probe report)",
+                  _gone24 and not _served24, "exited=%s served=%s" % (_gone24, _served24))
+        finally:
+            _pbx24.kill()
+        _rdn24 = " ".join(_rd.split())
+        check("S24/doc: the no-body relay law is on the record -- smuggling refused, the 205 drop DECLARED, and the ladder-off truth stated without the dead byte-for-byte oath (the security laws are law, not ladder features)",
+              "smuggle a body through a no-body status" in _rdn24
+              and "the drop must be declared" in _rdn24
+              and "NOT byte-for-byte" in _rdn24, "")
+        check("S24/doc: x-strata-* is declared ONE-VOICE -- in both directions, every x-strata header a caller reads 'was spoken here'",
+              "a caller reads was spoken here" in _rdn24, "")
+    finally:
+        _term(_p24)
+        _st24.set()
+        try:
+            _fb24.close()
+        except OSError:
+            pass
 
     print("")
     if FAKE_ERRORS:

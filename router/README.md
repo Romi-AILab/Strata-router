@@ -294,6 +294,10 @@ reveal box endpoints and metrics to every local process, so treat
 Per-request response headers say what happened: `x-strata-backend`,
 `x-strata-affinity`, `x-strata-placement` (`sticky` / `placed` / `overflow` /
 `migrated` / `pinned` / `last_resort`). `--no-expose-affinity` hides them.
+`x-strata-*` is this router's own channel in BOTH directions: nothing
+carrying the prefix is ever forwarded upstream, and a lying box's
+`x-strata-*` response headers are stripped at the relay (DV-R12) -- every
+`x-strata-backend`/`-affinity`/`-placement` a caller reads was spoken here.
 With `smart.smart_preview` on, a `/v1/messages/count_tokens` preview still
 answers from a real box and reports one of those same words byte-for-byte --
 but a preview is not a conversation turn: it never writes the lane's home,
@@ -672,8 +676,12 @@ never changed, only grew a term.
 ### The `smart.*` ladder: every knob, one table
 
 The ladder lives under the `smart` object in `router.json` (no CLI flags);
-empty or absent means every rung is off and the router is v1.2.17 behavior
-byte-for-byte. Unknown knobs inside `smart` warn and are ignored -- they are
+empty or absent means every rung is off -- placement decisions are then
+exactly what v1.2.17 made them. The wire itself is NOT byte-for-byte
+v1.2.17 and no longer claims to be: every DV-fix security law (framed
+refusals, bounded drains, relay header hygiene, the close-tail, the no-body
+relay rule) is law, not a ladder feature, and is deliberately not gated
+behind any `smart.*` knob. Unknown knobs inside `smart` warn and are ignored -- they are
 never silently trusted as something else. Every number knob must be finite
 and `> 0` (a throttle cannot be zero-disabled, only made small) -- `k_eps`
 is the one named exception: it is a tolerance, and `0` (exact ties only) is
@@ -807,7 +815,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 538 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 547 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -947,8 +955,18 @@ tries to read is beyond any server's reach -- the OS discards unread data
 on RST -- and nothing in this file promises otherwise;
 `Host: [::1]` parses; an HTTP/1.0 caller gets close-delimited framing (never
 chunk bytes it cannot parse); a LYING box's raw response cannot put
-`access-control-*` on the wire (stripped by name at the relay) while status
-and body relay intact; inline typed junk (`true` as a key or token, a dict
+`access-control-*` on the wire (stripped by name at the relay) nor forge
+the router's own `x-strata-*` observability headers (DV-R12 -- the request
+lane had always stripped the prefix; the response lane's sister cell learned
+it the same round), while status and body relay intact; and no box can
+smuggle a body through a no-body status: the relay's framing gate reads the
+STATUS as well as the method and version -- `204`/`304` end at their header
+block (nothing framed, nothing declared, compliant keep-alive callers parse
+the next response as it arrives) and a lying `205` gets its body dropped
+with the zero declared `content-length: 0` (a 205 is NOT on the
+no-content list, so silence there would strand the reader; the drop must be
+declared) -- the program's 18th same-shape lesion, the 4th in the framing
+family; inline typed junk (`true` as a key or token, a dict
 as a rewrite value) refuses boot like the keys file already did. And the
 distribution edges: `metadata.user_id` as an int still SCOPES (three
 sessions with an identical first turn get three lanes, and 12345 is not

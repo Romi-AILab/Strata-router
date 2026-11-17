@@ -3195,10 +3195,22 @@ class Handler(BaseHTTPRequestHandler):
                 # NUMBER is untouched (stress Q1/Q2A-1).
                 _reason = None
             self.send_response(resp.status, _reason)
+            # the statuses the body/framing decisions below treat as done at
+            # the header block -- single source, law and measurements at the
+            # framing gate (DV-R12)
+            nobody = resp.status in (204, 304)     # terminated by the empty line
+            drop205 = resp.status == 205           # body dropped by policy, declared CL:0
+            drop_body = head or nobody or drop205
             skip = HOP_BY_HOP | {"content-length", "content-type", "date", "server"}
             for k, v in resp.getheaders():
                 kl = k.lower()
-                if kl in skip or kl.startswith("access-control-"):
+                # x-strata-* is OUR channel (DV-R12 N-R1): a lying box must not
+                # forge x-strata-backend/affinity/placement and poison the very
+                # observability headers the README tells operators to watch --
+                # the request lane already strips the prefix (INBOUND_STRIP);
+                # the response lane's sister cell was untaught. The router
+                # appends its OWN x-strata-* headers AFTER this loop.
+                if kl in skip or kl.startswith("access-control-") or kl.startswith("x-strata-"):
                     # access-control-* is stripped by name: the router never
                     # speaks CORS (same-origin by design, OPTIONS answers 405),
                     # and a lying box relaying "access-control-allow-origin:
@@ -3222,20 +3234,54 @@ class Handler(BaseHTTPRequestHandler):
             # here, so before R6-C/P3-1 a lying box's "text/plain; q\x00z=1"
             # slipped the C0 gate intact and a log that truncates at NUL saw
             # a different type than the router did.
-            self.send_header("content-type",
-                             _HDR_VAL_CTL_RE.sub("", resp.getheader("content-type")
-                                                 or "application/json"))
+            if not nobody:
+                # a 204/304 forbids Content-Type outright (9110 15.4.5: a
+                # message terminated by the empty line has no content to
+                # describe) -- the framing gate's sister cell, taught the
+                # same day (DV-R12); 205 keeps its type (its body is only
+                # dropped by policy, so its type stays truthful)
+                self.send_header("content-type",
+                                 _HDR_VAL_CTL_RE.sub("", resp.getheader("content-type")
+                                                     or "application/json"))
             # N-2 (DV-R9, P3): HTTP/0.9 is the stdlib's DEFAULT request_version --
             # a two-word request line ("GET /v1/models") lands here, and the old
             # `!= "HTTP/1.0"` gate chunk-framed THAT caller: an HTTP/0.9 client
             # knows no chunked coding, so the framing hex and the "0\r\n\r\n"
             # terminator print as body to it. Close-delimited is its only honest
             # framing, and the stdlib already closed the connection on it.
-            chunk_out = not head and self.request_version not in ("HTTP/1.0", "HTTP/0.9")
-            if head:
-                # a HEAD response is header-only: no chunk framing, no body,
-                # or the terminator bytes desync the next response on this socket
+            # DV-R12 (round 12's P2 pair -- the program's 18th same-shape
+            # lesion, the framing family's fourth): this gate knew the METHOD
+            # and the VERSION but not the STATUS. A no-content response is
+            # done at its header block, yet the relay chunk-framed it anyway:
+            # `0\r\n\r\n` (204/304/205) or even a smuggled `6\r\nSNEAKY`
+            # (205+CL, N-R12L2-2) rode the wire between responses -- the
+            # baseline raw-wire matrix showed poison bytes in all five shapes
+            # (r12c3 te=True 5/5) and a compliant pipelined client read them
+            # as the next status line (r12c strict 204 desync 3/3; L1b 12/12).
+            # The HEAD doctrine one cell over already knew the law. r14a then
+            # split the rest of the row by MEASUREMENT, not by the status
+            # list: 204/304 are terminated by the empty line (RFC 9112 6.3)
+            # and every client measured length-zeros them -- assert nothing.
+            # A 205 is NOT on that no-content list: a bare 205 starves
+            # http.client of a length signal and it blocked reading to EOF
+            # (r14a: TimeoutError). This router's policy drops the box's 205
+            # body, so it must DECLARE the drop -- `content-length: 0`, the
+            # exact framing HEAD already speaks, legal for a 205 and illegal
+            # for the two above, which is why this is two cells, not one.
+            chunk_out = not drop_body and self.request_version not in ("HTTP/1.0", "HTTP/0.9")
+            if head or drop205:
+                # a bodyless response needs its zero stated or the framing
+                # (or a terminator) desyncs the next response on this socket;
+                # content-length: 0 is legal for HEAD and 205 -- and is the
+                # only honest way to announce a policy-dropped 205 body
                 self.send_header("content-length", "0")
+            elif nobody:
+                # 204/304 are terminated by the header block's empty line
+                # (RFC 9112 6.3) and Content-Length is forbidden there
+                # (9110 15.3.2/15.4.5) -- so this cell asserts NOTHING.
+                # keep-alive stays legal either way; the close branch below
+                # is NOT for this cell.
+                pass
             elif chunk_out:
                 self.send_header("transfer-encoding", "chunked")
             else:
@@ -3271,11 +3317,17 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 if ttfb is None:
                     ttfb = time.monotonic() - started
-                total += len(chunk)
-                if head:
+                if drop_body:
                     continue            # drain the box, never relay a body:
-                                        # a lying box's HEAD body must not
-                                        # reach the caller behind "length: 0"
+                                        # a lying box's HEAD or no-body-status
+                                        # body must not reach the caller --
+                                        # discard BEFORE the count, so booked
+                                        # bytes_out is strictly forwarded
+                                        # bytes (DV-R12: the old order only
+                                        # stayed honest because 3.13 length-
+                                        # zeros HEAD at runtime; a law must
+                                        # not depend on the client library)
+                total += len(chunk)
                 if chunk_out:
                     self.wfile.write(b"%X\r\n" % len(chunk))
                     self.wfile.write(chunk)
@@ -3749,6 +3801,10 @@ def build_cfg(argv):
     apply_keys(cfg, a.config, creating=bool(a.set_key))
     if a.set_key:
         cfg["_set_key"] = a.set_key
+    if a.probe:
+        cfg["_probe"] = True     # DV-R12 F-1: parsed, so --prob/--pro reach the
+                                 # probe path too; main() used to exact-string
+                                 # scan argv and silently booted a server instead
     if a.rewrite_model:
         rules = dict(cfg.get("rewrite_model") or {})
         for item in a.rewrite_model:
@@ -4694,6 +4750,7 @@ def main(argv=None):
     config_path = cfg.pop("_config_path", None)
     keys_path = cfg.pop("_keys_path", None)
     set_target = cfg.pop("_set_key", None)
+    probe_mode = cfg.pop("_probe", False)
     logging.basicConfig(
         level=getattr(logging, str(cfg.get("log_level", "INFO")).upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(message)s",
@@ -4701,7 +4758,7 @@ def main(argv=None):
     )
     if set_target:
         return set_key(cfg, set_target, config_path, keys_path)
-    if "--probe" in argv:
+    if probe_mode:
         return probe(cfg)
 
     pool = make_pool(cfg)
