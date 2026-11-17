@@ -172,6 +172,15 @@ def sha1_16(s):
 # uses it to vet what a box sends back (see the response-copy site).
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
+# The inbound header-line door's reject predicate for the NAME part (DV-R15
+# A2): control/space/DEL/high byte. This is NOT the token law -- that law
+# governs the exit (see above); drawing the door at the token line would
+# refuse shapes the stdlib parses HARMLESSLY (r15sig2: 'x(bad: v' parses as
+# its own header and the chain survives -- the suite-locked Q2/F4 forwarding
+# case; an empty name drops ALONE). The door refuses exactly the measured
+# swallowers -- lines whose parse damage eats every header behind them.
+_HDR_SWALLOW_RE = re.compile(rb"[\x00-\x20\x7f-\xff]")
+
 # C0/DEL controls a lying box can hide inside a header VALUE. They cannot forge
 # a line (bare CR/LF drop the header outright at the relay gate below), but
 # they truncate the value in some downstream stacks -- an operator's log would
@@ -2308,7 +2317,18 @@ def backend_headers(cfg, incoming, backend=None):
     if incoming is not None:
         for k, v in incoming.items():
             lk = k.lower()
-            if lk in STRIP_REQUEST_HEADERS:
+            # DV-R15 A1 (DV-R13 L1a-1/3 + L2 NEW-1 -- the prefix law at the
+            # ONE forward point): the enumerated names below are the router's
+            # AUTHORITY headers; the whole x-strata-* namespace is its CHANNEL.
+            # Before this round the lane stripped only the four names and let
+            # anything else in the namespace through verbatim -- a caller's
+            # x-strata-placement and even a forged x-strata-input-tokens
+            # reached the box, while README's one-voice sentence promised the
+            # prefix. Names the router itself READS upstream (affinity,
+            # control, pin) are read BEFORE this function, so stripping the
+            # prefix here cannot blind a gate -- it only denies the namespace
+            # to callers, which is exactly what the sentence always promised.
+            if lk in STRIP_REQUEST_HEADERS or lk.startswith("x-strata-"):
                 continue
             try:
                 vb = v.encode("latin-1")
@@ -2506,6 +2526,112 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(403, {"error": {"message": "strata-router: cross-origin caller refused (rebinding guard)"}})
                 return True
         return False
+
+    def parse_request(self):
+        """Capture the RAW header block THROUGH the stdlib parse (DV-R15 A2):
+        http.client.parse_headers consumes the block one readline() at a time,
+        so a tee on self.rfile for the duration of the base call sees every
+        line BEFORE the compat32 discard -- and parse_headers never reads past
+        the block's blank line, so the tee touches nothing the body needs.
+        The request line itself is read by handle_one_request BEFORE this
+        window opens, so raw_lines is exactly the header block, blank
+        terminator included (one-terminator strip leaves it b"" and the
+        validator skips it). The malformed-shape
+        door then refuses NAMED -- flag first, bounded drain (the
+        content-length that vanished may still have a declared body queued
+        behind the block), _json's framed face -- because after the stdlib
+        parse the damage is invisible (see _hdr_shape_ok for the whole law)."""
+        raw_lines = []
+        real_rfile = self.rfile
+
+        class _Tee:
+            # readline ONLY captures; EVERYTHING else must pass through to the
+            # real reader. A door INSIDE the stdlib parse (the dispatch 400)
+            # runs send_error in this window, and the overridden send_error
+            # drains via read1()/peek() -- an attribute-less tee made that
+            # read raise AttributeError into the drain loop's except: the
+            # drain silently read ZERO and the deadline close RST-eaten the
+            # 400 again (r15s23: S23/C-1 red 3/3 on the fixed tree -- the
+            # suite's own GREEN run catching its 16th same-shape lesion).
+            def readline(inner_self, *args):
+                ln = real_rfile.readline(*args)
+                raw_lines.append(ln)
+                return ln
+
+            def __getattr__(inner_self, name):
+                return getattr(real_rfile, name)
+
+        self.rfile = _Tee()
+        try:
+            ok = BaseHTTPRequestHandler.parse_request(self)
+        finally:
+            self.rfile = real_rfile
+        # Strip ONE line terminator -- never rstrip(). A line like
+        # 'x-a: v\r\r\n' carries a swallow-class bare CR that rstrip would
+        # erase from the evidence ('x-a: v\r\r\n' -> 'x-a: v' looks clean);
+        # a plain 'Host: h\r\n' must end clean. So: one b"\r\n" or one b"\n".
+        def _one(_ln):
+            if _ln.endswith(b"\r\n"):
+                return _ln[:-2]
+            if _ln.endswith(b"\n"):
+                return _ln[:-1]
+            return _ln
+        self._raw_hdr_lines = [_one(ln) for ln in raw_lines]
+        if not ok:
+            return False          # the stdlib answered its own named door
+        bad = self._hdr_shape_ok()
+        if bad is not None:
+            self.close_connection = True   # flag FIRST (family law)
+            self._quiet_finish()
+            self._json(400, {"error": {"message": "strata-router: malformed header line -- %s; the inbound stdlib parse drops that line and every header behind it (a declared body would vanish), so this request is refused here, named" % bad}})
+            return False
+        return True
+
+    def _hdr_shape_ok(self):
+        """DV-R15 A2 (DV-R13 L1b F-1, L2 three new variants): the malformed
+        inbound header-line family -- a line with no colon, a field name that
+        is not an RFC 7230 token, or a bare CR -- makes the stdlib inbound
+        parser (http.client.parse_headers -> compat32 feedparser) DISCARD the
+        junk line and every header line after it. Council probe r15_foldsig
+        pinned the mechanism precisely: after 'bad name: x' the parsed keys
+        are ['Host'] and Host's value is still clean 'h' -- nothing is folded
+        INTO a value, so no post-parse signature exists and no dict-level
+        check can ever see the family. The damage therefore sits upstream of
+        every gate this file owns (forward-leg name checks at backend_headers,
+        response-leg at the relay -- both read the post-parse dict), and the
+        victim was a request whose declared content-length vanished with it:
+        a body of 95 bytes silently forwarded as ZERO while the caller got a
+        plain 200 from the box. That is the one outcome this file's doctrine
+        refuses: every other malformed inbound shape (request line, bad CL,
+        hostile chunk framing, absolute-form, control-byte path) dies at a
+        named door; a malformed header line answered with data loss.
+
+        The reject set is drawn at the MEASURED swallower line, not at the
+        RFC 7230 token line (r15sig2): 'x(bad: v' parses as its own header
+        and the chain SURVIVES -- the suite's Q2/F4 lock (junk NAMES must be
+        dropped on the egress while the request forwards 200) stands on it.
+        Names that merely are not tokens but keep the chain intact ('x(bad',
+        'bad:name') keep forwarding; the door refuses only the shapes that
+        erase the headers behind them -- obs-fold continuations, colon- and
+        paren-names, tab-in-value, and LF-only terminators keep their 200
+        (controls the suite locks).
+        The caller's own body-loss is not the severity -- nothing here is
+        smuggled and every trust decision still fails closed (a folded-away
+        Host leaves an empty Host -> the named 403 rebinding door; a
+        folded-away pin simply does not pin). It is the SILENCE."""
+        for raw in (getattr(self, "_raw_hdr_lines", None) or ()):
+            if not raw or raw[:1] in (b" ", b"\t"):
+                continue          # blank terminator / obs-fold: both legal
+            name, sep, value = raw.partition(b":")
+            if not sep:
+                return "a header line with no colon (%r)" % raw[:40].decode("latin-1")
+            if not name:
+                return "a header line whose name is empty (%r)" % raw[:40].decode("latin-1")
+            if _HDR_SWALLOW_RE.search(name):
+                return "a header name carrying a space, control or non-ASCII byte (%r)" % raw[:40].decode("latin-1")
+            if b"\r" in value:
+                return "a bare CR inside a header value (%r)" % raw[:40].decode("latin-1")
+        return None
 
     def _quiet_finish(self, secs=2.0):
         """Read what is left of an unwanted body politely, under a short
@@ -2870,9 +2996,9 @@ class Handler(BaseHTTPRequestHandler):
                     # R7a-F1: the last door DV-fix8's sweep missed -- drain
                     # like every sibling, or the named 400 never arrives
                     # (measured 0/10 for a delayed reader with bytes streaming).
+                    self.close_connection = True   # DV-R15 A6: flag FIRST (family law)
                     self._quiet_finish()
                     self._json(400, {"error": {"message": "strata-router: chunked body ended before the final chunk"}})
-                    self.close_connection = True
                     return None
                 line = raw.strip()
                 size = line.split(b";")[0].strip()
@@ -2887,9 +3013,9 @@ class Handler(BaseHTTPRequestHandler):
                     # RST-flushes the sender's queued bytes on Windows and the
                     # named 400 is never seen (the rebinding doors drain first;
                     # this door's twin-law was missing).
+                    self.close_connection = True   # DV-R15 A6: flag FIRST (family law)
                     self._quiet_finish()
                     self._json(400, {"error": {"message": "strata-router: bad chunk framing"}})
-                    self.close_connection = True
                     return None
                 n = int(size, 16)
                 if n == 0:
@@ -2906,15 +3032,15 @@ class Handler(BaseHTTPRequestHandler):
                             # line at 4 KB, so the real bound is ~256 KB of
                             # trailer bytes -- lines are the unit, bytes are
                             # the ceiling (stress Q1/Q2A-6).
+                            self.close_connection = True   # DV-R15 A6: flag FIRST (family law)
                             self._quiet_finish()   # FR-1: reach the sender, don't RST it
                             self._json(400, {"error": {"message": "strata-router: too many trailer headers"}})
-                            self.close_connection = True
                             return None
                     break
                 if used + n > limit:
+                    self.close_connection = True   # DV-R15 A6: flag FIRST (family law)
                     self._quiet_finish()   # FR-1: refuse OVER THE WIRE, not by RST
                     self._json(413, {"error": {"message": "strata-router: body over max_body_mb"}})
-                    self.close_connection = True
                     return None
                 parts.append(self.rfile.read(n))
                 used += n
@@ -2922,9 +3048,9 @@ class Handler(BaseHTTPRequestHandler):
                     # strict CRLF: chunk data not followed by CRLF is framing
                     # the router never agreed to parse; the old blind
                     # readline(2) accepted anything (stress P1/F4)
+                    self.close_connection = True   # DV-R15 A6: flag FIRST (family law)
                     self._quiet_finish()   # FR-1: reach the sender, don't RST it
                     self._json(400, {"error": {"message": "strata-router: chunk data not terminated by CRLF"}})
-                    self.close_connection = True
                     return None
             body = b"".join(parts)
             # F-8 (DV-R8): the post-loop 413 twin of the per-chunk door was
@@ -2937,14 +3063,24 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("content-length") or 0)
         except ValueError:
+            # DV-R15 A6 (DV-R13 L1a-7 + L2 NEW-2): "flag FIRST like every
+            # sibling" below was written when this family still had flag-LAST
+            # doors -- and L2 counted SEVEN of them, these two bad-CL twins
+            # among them. The comment was not wrong about the LAW, only about
+            # the census; now every _quiet_finish door in the file sets the
+            # flag first, so the sentence is finally true of its family.
+            # The wire was always identical (_quiet_finish/_json/_close_drain
+            # never read the flag; L2 proved it two ways) -- a lying comment
+            # is the defect, and it lies by EXCITING the next door to skip
+            # the law. So the fix is the reorder, not the sentence.
+            self.close_connection = True   # flag FIRST like every sibling
             self._quiet_finish()   # FR-1: framing is unparseable -- discard under deadline
             self._json(400, {"error": {"message": "strata-router: bad content-length"}})
-            self.close_connection = True
             return None
         if n < 0:
+            self.close_connection = True   # flag FIRST like every sibling
             self._quiet_finish()   # FR-1: reach the sender, don't RST it
             self._json(400, {"error": {"message": "strata-router: bad content-length"}})
-            self.close_connection = True
             return None
         if n == 0:
             return b""
@@ -3178,7 +3314,15 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_response(200)
                     for _hk, _hv in _ex:
                         self.send_header(_hk, _hv)
-                    self.send_header("x-strata-input-tokens", str(_syn["input_tokens"]))
+                    # DV-R15 A5 (DV-R13 L1a-6 + L2 NEW-3): the synthesized
+                    # count IS a per-request x-strata-* response header --
+                    # README's --no-expose-affinity row makes a GENERAL
+                    # promise about the prefix, so the token rides the SAME
+                    # gate as the trio instead of stepping outside it. The
+                    # S20/F-4 witness (default exposure) keeps locking the
+                    # header's presence: the gate hides, it does not delete.
+                    if self.cfg.get("expose_affinity"):
+                        self.send_header("x-strata-input-tokens", str(_syn["input_tokens"]))
                     self.send_header("content-length", "0")
                     self.end_headers()
                     return None
@@ -3206,10 +3350,14 @@ class Handler(BaseHTTPRequestHandler):
                 kl = k.lower()
                 # x-strata-* is OUR channel (DV-R12 N-R1): a lying box must not
                 # forge x-strata-backend/affinity/placement and poison the very
-                # observability headers the README tells operators to watch --
-                # the request lane already strips the prefix (INBOUND_STRIP);
-                # the response lane's sister cell was untaught. The router
-                # appends its OWN x-strata-* headers AFTER this loop.
+                # observability headers the README tells operators to watch.
+                # DV-R15 A1 (DV-R13 L1a-2): the sister sentence used to justify
+                # this by pointing at an upstream symbol that never existed --
+                # a dead anchor, the same defect class this program books as a
+                # real defect, now suite-forbidden to name in this file again.
+                # The truth, stated and ENFORCED: the REQUEST lane strips the
+                # whole prefix at ONE point (backend_headers, DV-R15 A1). The
+                # router appends its OWN x-strata-* headers AFTER this loop.
                 if kl in skip or kl.startswith("access-control-") or kl.startswith("x-strata-"):
                     # access-control-* is stripped by name: the router never
                     # speaks CORS (same-origin by design, OPTIONS answers 405),
@@ -3743,7 +3891,8 @@ def build_cfg(argv):
                     help="store one backend key at a hidden prompt into the keys file, then exit ('global' = the fallback key)")
     ap.add_argument("--sticky-ttl", type=float)
     ap.add_argument("--connect-timeout", type=float)
-    ap.add_argument("--read-timeout", type=float, help="0 = never time out a queued request")
+    ap.add_argument("--read-timeout", type=float,
+                    help="cap on waiting for response bytes from a box; a non-zero cap ends even a box-side-queued wait with a named 502 backend_timeout (DV-R13 A4: only 0 never ends it)")
     ap.add_argument("--max-connect-failures", type=int)
     ap.add_argument("--down-backoff", type=float)
     ap.add_argument("--status-interval", type=float)

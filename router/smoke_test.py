@@ -6598,6 +6598,417 @@ def main():
         except OSError:
             pass
 
+    print("S25) DV-R13: the x-strata-* prefix law sits at the ONE request-side egress (A1 -- un-enumerated names, incl. a forged x-strata-input-tokens, used to forward verbatim), the malformed header-line SWALLOWERS die NAMED before the stdlib parse can eat the headers behind them (A2; r15_foldsig + r15sig2 drew the line at measured damage: ugly-but-parsed names like 'x(bad:' keep forwarding), the count-preview token rides the expose gate (A5), all SEVEN drain doors flag FIRST (A6), the read-timeout truth in help and README (A4), the Tests line is lexical now (A3), plus the round-14 lab rule: explicit ports, proven free before spawn")
+    _S25_BOX, _S25_RTR = 9121, 9120          # A1 prefix law (live)
+    _S25_FBOX, _S25_FRTR = 9123, 9122        # A2 fold lab: the box must see ZERO
+    _S25_EBOX, _S25_ERTR = 9125, 9124        # A5 expose-OFF lab (count-preview rescue)
+    _SEEN25 = {}
+    _SEEN25_LOCK = threading.Lock()
+
+    def _box25(sock25, tag25, stop25):
+        while not stop25.is_set():
+            try:
+                c25, _ = sock25.accept()
+            except OSError:
+                return
+            def _svc25(c25=c25):
+                try:
+                    c25.settimeout(3)
+                    buf25 = b""
+                    while b"\r\n\r\n" not in buf25:
+                        b25 = c25.recv(4096)
+                        if not b25:
+                            break
+                        buf25 += b25
+                    head25 = buf25.split(b"\r\n\r\n", 1)[0]
+                    lines25 = head25.split(b"\r\n")
+                    words25 = lines25[0].split()
+                    path25 = words25[1].decode("latin-1") if len(words25) > 1 else "?"
+                    # r15flane (rig lesson #6, the ENGINE was right TWICE):
+                    # answer only AFTER the declared body is fully read. The
+                    # router writes headers and body as separate packets; an
+                    # early close leaves arrived-but-unread bytes, and Windows
+                    # answers that close with an RST -- the router then names
+                    # the death honestly (backend_timeout, "no first byte",
+                    # stays healthy). A box that closes early is the box.
+                    cl25 = 0
+                    for h25 in lines25[1:]:
+                        n25, _, v25 = h25.partition(b":")
+                        if n25.strip().lower() == b"content-length":
+                            try:
+                                cl25 = int(v25.strip())
+                            except ValueError:
+                                cl25 = 0
+                    have25 = len(buf25) - len(head25) - 4
+                    while have25 < cl25:
+                        b25 = c25.recv(4096)
+                        if not b25:
+                            break
+                        have25 += len(b25)
+                    if path25 not in ("/v1/status", "/metrics"):
+                        # the router's own poller is not traffic: locks below
+                        # count API requests, and a 5 s poll must not race them
+                        with _SEEN25_LOCK:
+                            _SEEN25.setdefault(tag25, []).append(
+                                (path25, [l.decode("latin-1") for l in lines25[1:]]))
+                    if "count_tokens" in path25:
+                        c25.sendall(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n"
+                                    b"connection: close\r\n\r\n")
+                    else:
+                        c25.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                                    b"content-length: 2\r\nconnection: close\r\n\r\n{}")
+                except OSError:
+                    pass
+                try:
+                    c25.close()
+                except OSError:
+                    pass
+            threading.Thread(target=_svc25, daemon=True).start()
+
+    def _free25(p25):
+        s25 = socket.socket()      # plain, NO reuse: the round-14 lab rule --
+        try:                       # prove the port free BEFORE any spawn
+            s25.bind(("127.0.0.1", p25))
+        finally:
+            s25.close()
+
+    def _listen25(p25):
+        s25 = socket.socket()
+        s25.bind(("127.0.0.1", p25))
+        s25.listen(8)
+        return s25
+
+    def _cfg25(name25, port25, box25, extra25=None):
+        cfg25 = {"listen": "127.0.0.1", "port": port25, "status_interval": 5,
+                 "backends": [{"id": "s25b", "url": "http://127.0.0.1:%d" % box25}]}
+        if extra25:
+            cfg25.update(extra25)
+        with open(name25, "w") as f25:
+            json.dump(cfg25, f25)
+
+    def _boot25(name25, port25, box25, extra25=None):
+        _cfg25(name25, port25, box25, extra25)
+        pr25 = subprocess.Popen([sys.executable, ROUTER, "--config", name25,
+                                 "--log-level", "ERROR"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _try25 in range(40):
+            try:
+                if get(port25, "/healthz")[0] == 200:
+                    return pr25
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return pr25
+
+    def _read25(sock25, timeout25=8):
+        # Response-aware read (r15flane): a keep-alive relayed 200 sends NO
+        # FIN, so a read-to-EOF loop burns the whole timeout for bytes that
+        # arrived instantly. Stop when the message is complete: headers,
+        # then content-length bytes of body. No length to stop at (or EOF
+        # first) keeps the old to-EOF semantics.
+        sock25.settimeout(timeout25)
+        dat25 = b""
+        try:
+            while b"\r\n\r\n" not in dat25:
+                g25 = sock25.recv(65536)
+                if not g25:
+                    return dat25
+                dat25 += g25
+            head25, body25 = dat25.split(b"\r\n\r\n", 1)
+            want25 = None
+            for h25 in head25.split(b"\r\n")[1:]:
+                n25, _, v25 = h25.partition(b":")
+                if n25.strip().lower() == b"content-length":
+                    try:
+                        want25 = int(v25.strip())
+                    except ValueError:
+                        want25 = None
+            if want25 is None:
+                while True:
+                    g25 = sock25.recv(65536)
+                    if not g25:
+                        break
+                    dat25 += g25
+                return dat25
+            while len(body25) < want25:
+                g25 = sock25.recv(65536)
+                if not g25:
+                    break
+                dat25 += g25
+                body25 = dat25.split(b"\r\n\r\n", 1)[1]
+        except OSError:
+            pass
+        return dat25
+
+    def _raw25(extra25, body25=b"x" * 95, junkfirst25=False, delay25=0.3):
+        # Delayed reader per the probe methodology (a refusal must ARRIVE, not
+        # just be written). The swallower line goes mid-block (Host survives,
+        # the headers behind it die) or first (everything behind it dies).
+        s25 = socket.create_connection(("127.0.0.1", _S25_FRTR), timeout=8)
+        try:
+            if junkfirst25:
+                req25 = (b"POST /v1/messages HTTP/1.1\r\n" + extra25 +
+                         (b"Host: 127.0.0.1:%d\r\ncontent-type: application/json\r\n"
+                          b"content-length: %d\r\n\r\n" % (_S25_FRTR, len(body25))) + body25)
+            else:
+                req25 = ((b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n" % _S25_FRTR)
+                         + extra25 +
+                         (b"content-type: application/json\r\ncontent-length: %d\r\n\r\n"
+                          % len(body25)) + body25)
+            s25.sendall(req25)
+            time.sleep(delay25)
+            return _read25(s25)
+        finally:
+            try:
+                s25.close()
+            except OSError:
+                pass
+
+    def _safe_send25(sock25, blob25):
+        try:
+            sock25.sendall(blob25)
+        except OSError:
+            pass
+
+    _occ25 = []
+    for _pp25 in (_S25_RTR, _S25_BOX, _S25_FRTR, _S25_FBOX, _S25_ERTR, _S25_EBOX):
+        try:
+            _free25(_pp25)
+        except OSError:
+            _occ25.append(_pp25)
+    check("S25/lab (round-14 rule): every lab port pinned explicitly and PROVEN FREE before spawn -- the L1b incident (a port-less config reached the 8088 default) dies by atomic bind assertion, never by production contact",
+          not _occ25, "occupied: %r" % (_occ25,))
+    _st25 = threading.Event()
+    _ls25a = _listen25(_S25_BOX)
+    _ls25f = _listen25(_S25_FBOX)
+    _ls25e = _listen25(_S25_EBOX)
+    for _tag25, _ls25 in (("a", _ls25a), ("f", _ls25f), ("e", _ls25e)):
+        threading.Thread(target=_box25, args=(_ls25, _tag25, _st25), daemon=True).start()
+    _p25a = _boot25("s25_prefix.json", _S25_RTR, _S25_BOX)
+    _p25f = _boot25("s25_fold.json", _S25_FRTR, _S25_FBOX)
+    _p25e = _boot25("s25_expose.json", _S25_ERTR, _S25_EBOX, {"expose_affinity": False})
+    try:
+        # ---- A1: the prefix law at the single request-side egress ----------
+        _body25p = json.dumps({"model": "test-model",
+                               "messages": [{"role": "user", "content": "s25prefix"}]}).encode()
+        _sa25 = socket.create_connection(("127.0.0.1", _S25_RTR), timeout=8)
+        _sa25.sendall(((b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                        b"content-type: application/json\r\n"
+                        b"x-strata-input-tokens: 99999\r\n"
+                        b"x-strata-zzz: r15-marker\r\nx-strata-debug: r15-marker2\r\n"
+                        b"content-length: %d\r\n\r\n") % (_S25_RTR, len(_body25p))))
+        _sa25.sendall(_body25p)
+        _da25 = _read25(_sa25)
+        _sa25.close()
+        time.sleep(0.2)
+        with _SEEN25_LOCK:
+            _seen_a25 = list(_SEEN25.get("a", []))
+        _hdrs_a25 = _seen_a25[-1][1] if _seen_a25 else []
+        _xs25 = [h for h in _hdrs_a25 if h.split(":")[0].strip().lower().startswith("x-strata")]
+        _mk25 = [h for h in _hdrs_a25 if "r15-marker" in h]
+        check("S25/A1: an UN-ENUMERATED x-strata-* name reaches no box -- the prefix law at the ONE egress covers the fifth name, a forged x-strata-input-tokens, and every spelling yet unthought (baseline: four enumerated names stripped, everything else forwarded VERBATIM)",
+              not _xs25 and not _mk25, "x-strata at box: %r markers: %r" % (_xs25, _mk25))
+        check("S25/A1 control: the stripped request still forwards -- 200 to the caller, exactly one POST at the box (the prefix law STRIPS, it does not refuse)",
+              _da25.startswith(b"HTTP/1.1 200") and [p for p, _h in _seen_a25] == ["/v1/messages"],
+              "resp=%r paths=%r" % (_da25[:40], [p for p, _h in _seen_a25]))
+
+        # ---- A2: the header-line swallowers die named, BEFORE the box ------
+        _shapes25 = [
+            ("no colon", b"JUNKLINE-R15\r\n", False),
+            ("space in the name", b"bad name: r15\r\n", False),
+            ("tab in the name", b"x\ty: r15\r\n", False),
+            ("non-ASCII name", b"\xffbad: r15\r\n", False),
+            ("empty name", b": r15\r\n", False),
+            ("bare CR inside the value", b"x-junk: r15\rZ\r\n", False),
+            ("bare CR at the line end", b"x-a: r15\r\r\n", False),
+            ("swallower FIRST (everything behind it dies)", b"JUNKFIRST\r\n", True),
+        ]
+        _shape_bad25 = []
+        for _nm25, _ln25, _jf25 in _shapes25:
+            _d25 = _raw25(_ln25, junkfirst25=_jf25)
+            if not (_d25.startswith(b"HTTP/1.1 400") and b"malformed header line" in _d25):
+                _shape_bad25.append("%s: %r" % (_nm25, _d25[:240]))
+        check("S25/A2: all eight MEASURED swallower shapes die at the NAMED framed 400 before the stdlib parse can eat the headers behind them (baseline: a swallowed content-length forwarded the declared body as ZERO behind a 200; junk-first paid the 403 rebinding door instead of a named header death)",
+              not _shape_bad25, "; ".join(_shape_bad25))
+        _s25b = socket.create_connection(("127.0.0.1", _S25_FRTR), timeout=10)
+        threading.Thread(target=_safe_send25,
+                         args=(_s25b, (b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                                       b"bad name: r15\r\ncontent-type: application/json\r\n"
+                                       b"content-length: 1200000\r\n\r\n" % _S25_FRTR)
+                               + b"y" * 1200000), daemon=True).start()
+        time.sleep(0.35)
+        _d25b = _read25(_s25b)
+        _s25b.close()
+        check("S25/A2: a swallowed declared body never rides -- the door DRAINS under its bounded deadline and the named 400 reaches the DELAYED reader over a live socket (1.2 MB still in flight: the probe methodology -- delay AND size)",
+              _d25b.startswith(b"HTTP/1.1 400") and b"malformed header line" in _d25b,
+              repr(_d25b[:240]))
+        with _SEEN25_LOCK:
+            _n_f25 = len(_SEEN25.get("f", []))
+        check("S25/A2: every swallow shape refused BEFORE the box -- the fold lab's box served ZERO requests (the family's damage ends at the parse, not at the lane)",
+              _n_f25 == 0, "box saw %d" % _n_f25)
+        for _cnm25, _cl25 in (("paren-name (the suite's own Q2/F4 forwarding law: non-token but PARSED -- the door must not over-reject)",
+                               b"x(bad: smuggled\r\nx-good-marker: keep\r\n"),
+                              ("colon-in-name ('bad' parses as the name)", b"bad:name: r15\r\n"),
+                              ("obs-fold continuation (r15_foldsig: folds, chain survives)",
+                               b"x-a: r15\r\n folded-continuation\r\n"),
+                              ("tab inside the VALUE", b"x-junk:\tr15\r\n")):
+            _dc25 = _raw25(_cl25)
+            check("S25/A2 control: %s keeps its plain 200 -- the door's reject set is drawn at MEASURED damage, not at the token line" % _cnm25,
+                  _dc25.startswith(b"HTTP/1.1 200"), repr(_dc25[:240]))
+        with _SEEN25_LOCK:
+            _all_f25 = [(p, hs) for p, hs in _SEEN25.get("f", [])]
+        _paren25 = [hs for _p, hs in _all_f25 if any("x-good-marker" in h for h in hs)]
+        check("S25/A2 control: the paren-name request reached the box WITHOUT the junk name and WITH the marker header -- the exit-side token law (v1.2.13) still does this job; the door adds only the swallow refusal",
+              len(_paren25) == 1 and not any("(" in h.split(":")[0]
+                                             for _p, hs in _all_f25 for h in hs),
+              "paren reqs=%d names=%r" % (len(_paren25),
+                                          [h.split(":")[0][:20] for _p, hs in _all_f25 for h in hs][:10]))
+
+        # ---- A5: the count-preview token rides the expose gate -------------
+        _se25 = socket.create_connection(("127.0.0.1", _S25_ERTR), timeout=8)
+        _se25.sendall(b"HEAD /v1/messages/count_tokens HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                      b"content-type: application/json\r\n\r\n" % _S25_ERTR)
+        time.sleep(0.3)
+        _de25 = _read25(_se25)
+        _se25.close()
+        _he25 = _de25.split(b"\r\n\r\n", 1)[0].lower()
+        check("S25/A5: expose_affinity OFF -- the count-preview HEAD rescue answers 200+content-length:0 with NO x-strata-* on the wire (baseline leaked x-strata-input-tokens outside the gate -- README's general prefix promise said otherwise; the gate HIDES, the S20/F-4 witness still locks the header PRESENT by default)",
+              _de25.startswith(b"HTTP/1.1 200") and b"content-length: 0" in _he25
+              and b"x-strata" not in _he25,
+              repr(_he25[:120]))
+        _se25b = socket.create_connection(("127.0.0.1", _S25_ERTR), timeout=8)
+        _be25 = json.dumps({"model": "test-model",
+                            "messages": [{"role": "user", "content": "s25e"}]}).encode()
+        _se25b.sendall(((b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                         b"content-type: application/json\r\n"
+                         b"content-length: %d\r\n\r\n") % (_S25_ERTR, len(_be25))))
+        _se25b.sendall(_be25)
+        _de25b = _read25(_se25b)
+        _se25b.close()
+        time.sleep(0.2)
+        with _SEEN25_LOCK:
+            _seen_e25 = [p for p, _h in _SEEN25.get("e", [])]
+        check("S25/A5 control: the gated router keeps serving -- the follow-on POST forwards (box saw count_tokens + POST) and its response still carries ZERO x-strata-* (gating the rescue emission did not disturb the trio's own gate)",
+              _de25b.startswith(b"HTTP/1.1 200")
+              and _seen_e25 == ["/v1/messages/count_tokens", "/v1/messages"]
+              and b"x-strata" not in _de25b.split(b"\r\n\r\n", 1)[0].lower(),
+              "resp=%r paths=%r" % (_de25b[:40], _seen_e25))
+
+        # ---- A6 / A1 / A4: source and doc anchors --------------------------
+        _src25 = open(ROUTER, encoding="utf-8").read()
+        _order_bad25 = []
+        for _msg25 in ("chunked body ended before the final chunk", "bad chunk framing",
+                       "too many trailer headers", "body over max_body_mb",
+                       "chunk data not terminated by CRLF", "bad content-length"):
+            _p25 = _src25.find(_msg25)
+            while _p25 != -1:
+                _w25 = _src25[max(0, _p25 - 900):_p25]
+                _f25 = _w25.rfind("close_connection = True")
+                # the door's drain may be ANY of the three bounded primitives
+                # (the 413 capacity door drains via _drain_body, not here)
+                _d25x = max(_w25.rfind("_quiet_finish("), _w25.rfind("_drain_body("),
+                            _w25.rfind("_close_drain("))
+                if not (_f25 != -1 and _d25x != -1 and _f25 < _d25x):
+                    _order_bad25.append(_msg25)
+                _p25 = _src25.find(_msg25, _p25 + 1)
+        check("S25/A6: ALL SEVEN drain doors flag FIRST -- source-order anchor at each door's own message (the flag-LAST family was SEVEN, not five; the wire was always identical, but a comment that lies by EXCITING the next door to skip the law IS the defect)",
+              not _order_bad25, "flag-LAST at: %r" % (_order_bad25,))
+        check("S25/A6: the family census is SEVEN and every door carries its marker -- 5x 'DV-R15 A6: flag FIRST (family law)' + 2x the bad-CL siblings' '# flag FIRST like every sibling' (the doctrine comment QUOTES that phrase, so the anchor counts the comment form), whose sentence is now finally TRUE of its family",
+              _src25.count("DV-R15 A6: flag FIRST (family law)") == 5
+              and _src25.count("# flag FIRST like every sibling") == 2,
+              "markers=%d/%d" % (_src25.count("DV-R15 A6: flag FIRST (family law)"),
+                                 _src25.count("# flag FIRST like every sibling")))
+        check("S25/A1: the dead anchor is gone -- INBOUND_STRIP may never reappear in the source, comment or otherwise (a name for a law that was never enforced is worse than no name: it READS like cover)",
+              "INBOUND_STRIP" not in _src25, "the symbol is back")
+        _rt25 = _src25.split('"--read-timeout"', 1)
+        _rtseg25 = _rt25[1][:500] if len(_rt25) > 1 else "<no flag>"
+        check("S25/A4: --read-timeout's own help tells the truth -- cap semantics and the named 502, never the old 'never time out a queued request' (the README table and the help are one voice now)",
+              "backend_timeout" in _rtseg25 and "never time out a queued request" not in _rtseg25,
+              repr(_rtseg25[:120]))
+        _rdn25 = " ".join(_rd.split())
+        check("S25/A4: the README read-timeout sentence states the bound -- 'never cancels a queued request' is gone, the named 502 backend_timeout took its place",
+              "never cancels a queued request" not in _rdn25
+              and "named 502 `backend_timeout`" in _rdn25, "")
+        check("S25/A5: the README --no-expose-affinity row names the count-preview token -- the general promise now ENUMERATES it, because the gate now covers it",
+              "count-preview `-input-tokens`" in _rdn25, "")
+        check("S25/A2: the README states the swallow-door law -- named 400 for lines that eat their successors, and the honest boundary (ugly-but-parsed names keep forwarding)",
+              "swallow it AND every header" in _rdn25 and "the door refuses measured swallowers" in _rdn25, "")
+        check("S25/A7: the HEAD asymmetry is on the record -- readouts answer GET, the HEAD leg has no path filter: the path NAME travels, the numbers never do",
+              "The HEAD leg has no path filter" in _rdn25, "")
+        check("S25/A8: the drain bound cross-references its accepted-path mirror -- a deliberate boundary says which documented decision covers the other side",
+              "DV-R15 A8 cross-ref" in _rdn25, "")
+
+        # ---- A6 wire controls: the reorder is wire-invisible (delays) ------
+        _sw25 = socket.create_connection(("127.0.0.1", _S25_FRTR), timeout=10)
+        _sw25.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                      b"content-length: -7\r\ncontent-type: application/json\r\n\r\n" % _S25_FRTR)
+        threading.Thread(target=_safe_send25, args=(_sw25, b"z" * 120000), daemon=True).start()
+        time.sleep(0.3)
+        _dw25 = _read25(_sw25)
+        _sw25.close()
+        check("S25/A6 wire: the bad-CL door (the family's flag-LAST twins) still lands its named refusal on a DELAYED reader with 120 KB queued -- flag order is wire-invisible, exactly as L2 proved two ways",
+              _dw25.startswith(b"HTTP/1.1 400") and b"bad content-length" in _dw25,
+              repr(_dw25[:240]))
+        _sw25c = socket.create_connection(("127.0.0.1", _S25_FRTR), timeout=10)
+        # the declared chunk must be COMPLETE: EOF inside chunk data fails the
+        # strict-CRLF check (the next probe's door), not this one. EOF where a
+        # CHUNK SIZE belongs is the "before the final chunk" door. (r15flane
+        # read: my first version fed 2 of 5 declared bytes -- two probes, one
+        # door, one lying label.)
+        _sw25c.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                       b"content-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n5\r\nabcde\r\n" % _S25_FRTR)
+        time.sleep(0.3)
+        try:
+            _sw25c.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        _dw25c = _read25(_sw25c)
+        _sw25c.close()
+        check("S25/A6 wire: the chunk-truncated door answers a delayed reader after half-close (flag-FIRST reorder; behavior byte-law unchanged since S19)",
+              _dw25c.startswith(b"HTTP/1.1 400") and b"ended before the final chunk" in _dw25c,
+              repr(_dw25c[:240]))
+        _sw25t = socket.create_connection(("127.0.0.1", _S25_FRTR), timeout=10)
+        _sw25t.sendall((b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                        b"content-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n0\r\n" % _S25_FRTR)
+                       + b"".join(b"x-t%d: v\r\n" % _i25t for _i25t in range(70)) + b"\r\n")
+        time.sleep(0.3)
+        _dw25t = _read25(_sw25t)
+        _sw25t.close()
+        check("S25/A6 wire: the trailer-flood door answers a delayed reader (65-line ceiling, this probe sends 70)",
+              _dw25t.startswith(b"HTTP/1.1 400") and b"too many trailer headers" in _dw25t,
+              repr(_dw25t[:240]))
+        _sw25k = socket.create_connection(("127.0.0.1", _S25_FRTR), timeout=10)
+        _sw25k.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                       b"content-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabcXY" % _S25_FRTR)
+        time.sleep(0.3)
+        try:
+            _sw25k.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        _dw25k = _read25(_sw25k)
+        _sw25k.close()
+        check("S25/A6 wire: the strict-CRLF door answers a delayed reader over in-flight junk (XY where CRLF was owed)",
+              _dw25k.startswith(b"HTTP/1.1 400") and b"not terminated by CRLF" in _dw25k,
+              repr(_dw25k[:240]))
+
+        # ---- A3: the Tests line, lexical (the footer IS the README's number)
+        _ft25 = _rd.split("python smoke_test.py")[-1]
+        _num25 = (_ft25.split("# ", 1)[1].split(" checks", 1)[0].strip()
+                  if "# " in _ft25 else "?")
+        check("S25/A3: the README Tests number IS this run's live count -- the lexical upgrade of S16/F-7 (the old lock only BANNED a stale word; the footer is the README's number, so the number is now COMPARED, itself included)",
+              _num25 == str(len(CHECKS) + len(FAILS) + 1),
+              "README says %r, this run lands at %d" % (_num25, len(CHECKS) + len(FAILS) + 1))
+    finally:
+        _term(_p25a)
+        _term(_p25f)
+        _term(_p25e)
+        _st25.set()
+        for _ls25 in (_ls25a, _ls25f, _ls25e):
+            try:
+                _ls25.close()
+            except OSError:
+                pass
+
     print("")
     if FAKE_ERRORS:
         print("FakeStrata swallowed %d handler tracebacks (last few):" % len(FAKE_ERRORS))

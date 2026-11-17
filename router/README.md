@@ -62,8 +62,11 @@ flags.
 One flag note before you grep this README for them: `--listen` and `--port`
 are `router.py`'s own bind overrides (config keys `listen`/`port`); `--host`
 and `--queue-timeout` appear later only as **Strata box** flags --
-`router.py` has neither (its closest knobs are `--read-timeout`, which never
-cancels a queued request, and `--connect-timeout`).
+`router.py` has neither. Its closest knobs are `--connect-timeout` (the TCP
+handshake) and `--read-timeout` (everything after it): a non-zero read cap
+DOES bound a wait inside the box's own queue -- past the cap the caller gets
+a named 502 `backend_timeout` (DV-R13 A4; the turn may still complete inside
+the box, the router just stops waiting) -- and only `0` never ends the wait.
 
 Run `--probe` before trusting any config -- and after the keys: on keyed
 boxes a keyless probe only proves the box can answer 401. The probe STREAMS,
@@ -137,7 +140,7 @@ Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
 | `--status-interval SEC` | `status_interval` | `1.0` | Queue-depth poll rate per box. |
 | `--max-body-mb N` | `max_body_mb` | `512` | Request body cap. |
 | `--rewrite-model FROM=TO` | `rewrite_model` | `{}` | The only body rewrite allowed; repeatable. |
-| `--no-expose-affinity` | `expose_affinity` (inverted) | `true` | hide the per-request x-strata-* response headers (`x-strata-backend`/`-affinity`/`-placement`); /stats only ever shows aggregates, never lane pins. |
+| `--no-expose-affinity` | `expose_affinity` (inverted) | `true` | hide the per-request x-strata-* response headers (`x-strata-backend`/`-affinity`/`-placement`, and the count-preview `-input-tokens` -- DV-R15 A5 moved that emission inside this same gate, so the prefix promise is now literally true); /stats only ever shows aggregates, never lane pins. |
 | `--log-level LVL` | `log_level` | `INFO` | |
 
 Config-only keys (no flag): `sticky_max` (`20000`, pin-table cap),
@@ -290,6 +293,11 @@ hand it to the box's owner.
 read-only, and the smoke/liveness tooling depends on them -- but they do
 reveal box endpoints and metrics to every local process, so treat
 "who can reach this port" as part of the deployment decision.
+One asymmetry to know (DV-R15 A7): those readouts answer GET. The HEAD leg
+has no path filter -- every HEAD path forwards like any API request -- so a
+`HEAD /healthz` fired at the router is forwarded and answered by whichever
+box the lane borrows, and the path NAME travels with it. The numbers never
+leave the router; only the name does.
 
 Per-request response headers say what happened: `x-strata-backend`,
 `x-strata-affinity`, `x-strata-placement` (`sticky` / `placed` / `overflow` /
@@ -749,7 +757,14 @@ waits for the limiter.
   LYING box can open a browser-readable window through this passthrough;
   OPTIONS answers a named 405 on EVERY path, so CORS preflight dies before
   any body, and since v1.2.13 header names must be RFC 7230 tokens on BOTH
-  legs of the relay -- a junk name never enters the box either). Slow clients
+  legs of the relay -- a junk name never enters the box either. Since
+  DV-fix15 the INBOUND header LINE has its own door too: a malformed line
+  that makes the stdlib inbound parser silently swallow it AND every header
+  behind it (no colon, a name with a space/control byte, a bare CR) dies at
+  a named 400 -- once a swallowed content-length meant a declared body
+  forwarded as zero bytes behind a happy 200. Names merely ugly-but-parsed
+  ('x(bad:') keep forwarding, stripped on the exit as always: the door
+  refuses measured swallowers, not non-token names. Slow clients
   hold handler threads with no cap (stdlib threading server): hostile locals
   can exhaust threads -- and a caller that stalls WITHOUT closing (full TCP
   window, never EOF) additionally pins its relay thread, its home box's
@@ -815,7 +830,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 547 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 574 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -917,7 +932,11 @@ same-shape lesion was that peek itself), so a closing door keeps the socket
 open for one quiet window after it fires and discards what lands inside the
 window as well; bytes later than one window are OUTSIDE the guarantee --
 nothing may wait on a socket unbounded (that is a thread-starvation door),
-so the stated bound is deliberate and this sentence is its boundary;
+so the stated bound is deliberate and this sentence is its boundary --
+DV-R15 A8 cross-ref: the ACCEPTED-path mirror of this trade-off (a
+stalled-but-open caller holding a thread, a box seat and a FIFO slot) is
+its own documented localhost-trust decision in the trust list above, not a
+drain door this bound forgot;
 since DV-fix12 that bound is enforced PER OPERATION -- the loop's deadline
 is checked between bounded `read1` calls, because an accumulating read a
 trickling sender outruns used to pin a refusal door past any deadline (the
