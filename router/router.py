@@ -136,7 +136,12 @@ HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "transfer-encoding", "upgrade",
 }
-# We ask upstream for identity encoding so SSE is never gzip-buffered.
+# We ask upstream for identity encoding so SSE is never gzip-buffered. The
+# asking is real on the wire but not ours: the caller's accept-encoding is
+# stripped here, and http.client's own default puts `identity` back on every
+# box-lane request (round-16 W25 box echo proves the header lands) -- the law
+# holds, kept at our one strip point by the stdlib's house rule, not a
+# header we inject.
 STRIP_REQUEST_HEADERS = HOP_BY_HOP | {
     # x-strata-control (L2-3/M1): the control token gates the ROUTER, never a
     # box -- forwarding it would hand the secret to the borrowed box's owner
@@ -670,8 +675,10 @@ class Pool:
         }
         # smart knobs (ALL default OFF, design S9): resolved once at boot.
         # F-F: DEFAULTS["smart"] is EMPTY on purpose -- every read site
-        # re-defaults inline with `or X` (24 sites, README's Default column
-        # is their ledger), and what keeps those `or`s honest is the
+        # re-defaults inline with `or X` (the site-word carries NO count by
+        # law: the sentence that once carried one was wrong at birth, and
+        # S28/F-F COUNTS coverage by AST instead -- README's Default column
+        # is the human ledger), and what keeps those `or`s honest is the
         # validator's refuse-<=0-by-name law, NOT any merged table. (This
         # comment used to claim a merged-defaults shape that never existed.)
         # A non-dict section is IGNORED here -- validate_cfg names it as a
@@ -2302,12 +2309,71 @@ class _FinalResponse(http.client.HTTPResponse):
     # bounded like every other header read by the socket timeout. S27 locks
     # the absorb, the chain, the 100-Continue passthrough, and the
     # informational-then-EOF named 502.
+    # DV-R18 (round 16, L1b-C1; the program's 20th same-shape lesion, the 6th
+    # in the framing family): this class is also where the length axis of the
+    # gate gets normalized -- DV-R17 did the status axis above, and the same
+    # law was never taught to the body length. A keep-alive final whose body
+    # length cannot be decoded -- `content-length: 0x21`, `-3` (the stdlib's
+    # own words: "ignore nonsensical negative lengths"), or no length at all
+    # with no chunking -- silently becomes read-until-close (round-16 executed
+    # the mechanism on the shipping 3.13.3: both token shapes land on
+    # length=None), and on a lane the box PROMISES to keep alive there is no
+    # close to read until. The relay then waits the whole read_timeout
+    # (default 3600 s) for a FIN the box's own header forbids, and the death
+    # at the cap is UNNAMED because the 200 headers were already sent (r16c2
+    # live: an open stream at every bound, then IncompleteRead with no cause;
+    # one keep-alive liar pins a relay thread + box seat + caller per request
+    # -- the README's own thread-starvation door). RFC 9112 6.3 calls that
+    # framing invalid on a persistent lane, and the refusal already has a
+    # name on the record: an unparseable box answer is a post-buffer refusal
+    # that closes -- so the raise rides begin(), the parse stage, into
+    # the SAME named door the request lane has always fed for this token
+    # family (the named-400 chunk-size law; the response lane now answers
+    # with its mirror: the unparseable-502). Parse-stage is load-bearing: the door
+    # recognizes failures raised before getresponse returns, and begin() is
+    # also the ONE point where the poller and probe lanes inherit the law.
+    # Fail-closed is judged by what was DECLARED, not by socket behavior the
+    # router cannot predict: a box may be trusted close-delimited only when
+    # it says so (HTTP/1.0, or `connection: close`) -- a keep-alive claim
+    # followed by a quiet FIN was a coin-flip under the old clean-200, and
+    # shape-trust starts from the declaration (the 101 doctrine). The
+    # declaration is read from the version + Connection header DIRECTLY:
+    # asking will_close instead was this fix's own first burn -- 3.13.3's
+    # begin() INFERS will_close=True on exactly the unframeable shapes the
+    # door hunts (unit probe 2026-11-19: every refused token answers
+    # will_close=True), so a `not will_close` guard is vacuously false there
+    # and the strand would have shipped GREEN. A VALID length that lies
+    # about ARRIVAL, and an open chunk stream, stay exactly
+    # as measured: the documented bounded wait ending in VISIBLE truncation
+    # at read_timeout -- refusing those would execute SSE (round-16 NEW-2
+    # probed both shapes live and RE-GRADED them out of this family; the
+    # face's header-decidable boundary is where fixability lives).
     def begin(self):
         while True:
             self.headers = None          # re-arm the stdlib's idempotence guard
             http.client.HTTPResponse.begin(self)
             if self.status >= 200:
-                return
+                break
+        # length is None at this point means the box declared no decodable
+        # body framing at all: HEAD/204/304 were already zeroed upstream by
+        # the stdlib (3.13 zeros them -- DV-R12's runtime witness), and a
+        # parseable CL or chunked marker set one. What is left promises a
+        # body on a lane that promises never to close -- unless the close
+        # itself was DECLARED, which is the only framing the 1.0-style
+        # read-until-close lawfully stands on. Judge the declaration from
+        # the version and the Connection header, NEVER from will_close (the
+        # 3.13.3 inference above): a 1.1 final must SAY close; anything
+        # older closes unless it says keep-alive.
+        if self.length is None and not self.chunked:
+            _conn18 = (self.headers.get("connection") or "").lower()
+            if self.version == 11:
+                _decl18 = "close" in _conn18
+            else:
+                _decl18 = ("keep-alive" not in _conn18
+                           and self.headers.get("keep-alive") is None)
+            if not _decl18:
+                raise http.client.HTTPException(
+                    "unparseable box framing: keep-alive final with no decodable body length")
 
 
 def open_connection(be, connect_timeout, read_timeout):
@@ -3395,7 +3461,11 @@ class Handler(BaseHTTPRequestHandler):
             # lane absorbs informationals one point upstream, at
             # open_connection's response_class (DV-R17) -- before that fix a
             # box's 102/103 reached HERE and got framed as the final answer,
-            # with the real one dropped behind it (r15c2).
+            # with the real one dropped behind it (r15c2). And no final with
+            # an undecodable body length reaches it either: the same
+            # response_class refuses those at the parse, into the named door
+            # (DV-R18) -- what stands here always promises a body this relay
+            # can frame to an end.
             nobody = resp.status in (204, 304)     # terminated by the empty line
             drop205 = resp.status == 205           # body dropped by policy, declared CL:0
             drop_body = head or nobody or drop205

@@ -788,7 +788,11 @@ waits for the limiter.
   its short turn relayed with a clean chunk terminator -- completeness
   FORGED, undetectable even as an `IncompleteRead`. (A truly-chunked box
   that dies mid-stream is not laundered: the caller sees the unterminated
-  stream.) The two boxes are trusted
+  stream. Nor is the liar that never closes: an over-declared length or an
+  open chunk stream runs out at the documented read_timeout as VISIBLE
+  truncation, never a forged terminator -- only a close the box actually
+  performs can forge an ending (round-16 NEW-2 probed both shapes live).)
+  The two boxes are trusted
   principals here -- yours and your friend's -- same class as trusting them
   with your prompts.
 * One Python process, two threads per in-flight stream (relay + the 0.5 s
@@ -838,7 +842,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 591 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 605 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -998,7 +1002,13 @@ lane absorbs it whole and relays EXACTLY ONE final response per request, so
 a lying `103`/`102` cannot be served to the caller re-framed as the answer
 with the real one dropped behind it (DV-R17 -- a `102`/`103` used to slip
 past the stdlib, which skips only `100`; the program's 19th same-shape
-lesion, 5th in the framing family); inline typed junk (`true` as a key or token, a dict
+lesion, 5th in the framing family); a keep-alive box final whose body
+length cannot be decoded (`content-length: 0x21`, `-3`, or absent with no
+chunking) is refused by name before the caller is opened -- the gate's
+length axis got the status axis's own normalization (DV-R18:
+read-until-close on a lane the box promised never to close was a
+full-read_timeout UNNAMED strand; the program's 20th same-shape lesion,
+6th in the framing family); inline typed junk (`true` as a key or token, a dict
 as a rewrite value) refuses boot like the keys file already did. And the
 distribution edges: `metadata.user_id` as an int still SCOPES (three
 sessions with an identical first turn get three lanes, and 12345 is not

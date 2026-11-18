@@ -7243,6 +7243,255 @@ def main():
                  "counts every request a box is RESERVED for" in _rd27,
                  "gate was ACTUALLY closed books as placed+borrow" in _rd27))
 
+        # ---- S28: DV-R18 -- the framing gate's LENGTH axis (round 16, L1b-C1;
+        # the 20th same-shape lesion, 6th in the framing family). A keep-alive
+        # box final whose body length cannot be decoded (`0x21`, `-3`, or none
+        # at all with no chunking) is a body the stdlib reads until close and
+        # this relay can never bound: r16c2 measured the caller held an OPEN
+        # stream for the whole read_timeout (default 3600 s) and a compliant
+        # parser saw only IncompleteRead. The refusal is ONE raise at the parse
+        # -- inside _FinalResponse.begin(), where LineTooLong/InvalidURL have
+        # always died -- so it lands on the EXISTING named door (the DV-R8 F-3
+        # unparseable-502) and every box lane inherits. Declared-close framing
+        # (1.0 / Connection: close) stays lawfully close-delimited; a VALID
+        # length that lies about arrival stays the documented bounded wait --
+        # round-16 NEW-2 measured those shapes and RE-GRADED them there:
+        # refusing them would execute SSE.
+        print("S28) DV-R18: a keep-alive box final with no decodable body length dies at the parse into the SAME named door (20th same-shape lesion, 6th in the framing family; DV-R17 normalized the status axis of this gate, this round normalizes the length axis)")
+        _S28_BOX, _S28_RTR = 9195, 9196
+        _free25(_S28_BOX)                   # round-14 lab rule: prove free first
+        _free25(_S28_RTR)
+        _MODE28 = {"m": "final"}
+
+        def _svc28(c28):                    # full keep-alive service: the box
+            try:                            # answers request after request on
+                c28.settimeout(8)           # its lanes -- no lab-side phantom
+                while True:                 # may masquerade as a lesion
+                    buf28 = b""
+                    while b"\r\n\r\n" not in buf28:
+                        g28 = c28.recv(4096)
+                        if not g28:
+                            return
+                        buf28 += g28
+                    head28, _, rest28 = buf28.partition(b"\r\n\r\n")
+                    cl28 = 0
+                    for ln28 in head28.split(b"\r\n")[1:]:
+                        if ln28.lower().startswith(b"content-length:"):
+                            cl28 = int(ln28.split(b":", 1)[1])
+                    have28 = len(rest28)
+                    while have28 < cl28:    # Windows wire law: drain the declared
+                        g28 = c28.recv(65536)   # body BEFORE answering
+                        if not g28:
+                            break
+                        have28 += len(g28)
+                    m28 = _MODE28["m"]
+                    if m28 == "equivfull":
+                        c28.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                                    b"content-length: 0x21\r\n\r\n" + b"x" * 33)
+                        time.sleep(4.0)
+                    elif m28 == "negcl":
+                        c28.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                                    b"content-length: -3\r\n\r\nabc")
+                        time.sleep(4.0)
+                    elif m28 == "noframe":
+                        c28.sendall(b"HTTP/1.1 200 OK\r\nx-note: none\r\n\r\n")
+                        time.sleep(4.0)
+                    elif m28 == "junk205":  # the declared-drop door's own twin:
+                        c28.sendall(b"HTTP/1.1 205 Reset Content\r\n"
+                                    b"content-length: 0x21\r\n\r\n" + b"y" * 8)
+                        time.sleep(4.0)     # a 205 whose junk CL starves even
+                    elif m28 == "closevar":  # the same lie, then FIN: what the
+                        c28.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                                    b"content-length: 0x21\r\n\r\n" + b"x" * 33)
+                        return              # gate judges is what was DECLARED
+                    elif m28 == "dupcl":    # decodable first value -> untouched
+                        c28.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                                    b"content-length: 2\r\ncontent-length: 9\r\n\r\nhe")
+                        time.sleep(4.0)
+                    elif m28 == "lyingcl":  # VALID length that lies about
+                        c28.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                                    b"content-length: 1000\r\n\r\nabc")   # arrival:
+                        time.sleep(4.0)     # documented bounded wait, NOT refused
+                    elif m28 == "deadchunk":
+                        c28.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                                    b"transfer-encoding: chunked\r\n\r\n")
+                        time.sleep(4.0)     # open chunk stream: legal streaming
+                    elif m28 == "h10":      # declared close (1.0 default): the
+                        c28.sendall(b"HTTP/1.0 200 OK\r\ncontent-type: text/plain\r\n\r\nhi")
+                        return              # close-delimited promise, untouched
+                    else:                   # final: the house answer
+                        c28.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                                    b"content-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}")
+                        return
+            except OSError:
+                pass
+            finally:
+                try:
+                    c28.close()
+                except OSError:
+                    pass
+
+        def _box28(sock28):
+            while True:
+                try:
+                    c28, _ = sock28.accept()
+                except OSError:
+                    return
+                threading.Thread(target=_svc28, args=(c28,), daemon=True).start()
+
+        def _probe28(method="POST"):
+            s28 = socket.create_connection(("127.0.0.1", _S28_RTR), timeout=8)
+            s28.sendall(("%s /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                         "content-length: 5\r\n\r\nzzzzz" % method).encode())
+            t028 = time.monotonic()
+            got28 = b""
+            tf28 = None
+            s28.settimeout(3.0)             # past the lab cap 2.0: an early
+            try:                            # completion proves "no more bytes"
+                while True:                 # without measuring patience (TTFB
+                    g28 = s28.recv(65536)   # is the bound, the S27 lesson)
+                    if not g28:
+                        break
+                    if tf28 is None:
+                        tf28 = time.monotonic() - t028
+                    got28 += g28
+            except OSError:
+                pass
+            s28.close()
+            return got28, (tf28 if tf28 is not None else time.monotonic() - t028)
+
+        _ls28 = _listen25(_S28_BOX)
+        threading.Thread(target=_box28, args=(_ls28,), daemon=True).start()
+        _cfg25("smoke-undrainable.json", _S28_RTR, _S28_BOX,
+               {"status_interval": 300, "read_timeout": 2.0})
+        _p28 = subprocess.Popen([sys.executable, ROUTER, "--config", "smoke-undrainable.json",
+                                 "--log-level", "ERROR"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            wait_for(lambda: get(_S28_RTR, "/healthz")[0] == 200, 25)
+            _MODE28["m"] = "equivfull"
+            _d28, _t28 = _probe28()
+            check("S28/equivfull: a keep-alive box final with `content-length: 0x21` -- int() fails and the stdlib SILENTLY switches the body to read-until-close (r16c3 probe: on the shipping 3.13.3 this shape and `-3` both become length=None), so the read1 loop would wait the whole read_timeout for a FIN the box's own keep-alive claim forbids; the caller now gets the NAMED 502 (the F-3 door: could not parse, backend_protocol_error), bounded by ARRIVAL (r16c2 baseline: an OPEN stream, no terminator, an hour of patience, then IncompleteRead with no cause)",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 502")
+                  and b"could not parse" in _d28 and b"backend_protocol_error" in _d28
+                  and _t28 < 2.6,
+                  "first=%r ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], _t28))
+            _MODE28["m"] = "negcl"
+            _d28, _t28 = _probe28()
+            check("S28/negcl: `content-length: -3` -- the stdlib's own comment reads 'ignore nonsensical negative lengths' and drops to read-until-close; this gate names it (the request lane has refused the same token family by name since DV-R15 -- the asymmetry r16c3 measured is now history on both sides)",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 502")
+                  and b"could not parse" in _d28 and _t28 < 2.6,
+                  "first=%r ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], _t28))
+            _MODE28["m"] = "noframe"
+            _d28, _t28 = _probe28()
+            check("S28/noframe: NO content-length, NO transfer-encoding, keep-alive claimed -- RFC 9112 6.3 calls that framing invalid on a persistent lane and the README names the door before the lesion: an unparseable box answer is refused, closing, NAMED (r16c2 baseline: zero body bytes, stream open at every bound measured)",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 502")
+                  and b"could not parse" in _d28 and _t28 < 2.6,
+                  "first=%r ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], _t28))
+            _MODE28["m"] = "junk205"
+            _d28, _t28 = _probe28()
+            check("S28/junk205: the declared-drop door's OWN twin -- a `205` whose junk CL starves even the DECLARED body-drop's drain (DV-R14 declared the drop; nobody framed the case where the drop cannot finish draining); the refusal fires at the parse, before any caller opens",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 502")
+                  and b"could not parse" in _d28 and _t28 < 2.6,
+                  "first=%r ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], _t28))
+            _MODE28["m"] = "closevar"
+            _d28, _t28 = _probe28()
+            check("S28/closevar: the moved boundary, STATED -- the same lie followed by a quiet FIN: the header DECLARED keep-alive, and the router cannot know which box it is about to wait for; close-delimited framing is only lawfully RELIED ON when the box declares it (1.0 or Connection: close -- the next row guards that), so shape-trust starts from what was DECLARED and this shape is refused too (fail-closed by shape, the 101 doctrine). Baseline GREEN-to-RED reversal: this row's old clean 200 was a coin-flip on box behavior the router could not verify",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 502")
+                  and b"could not parse" in _d28 and _t28 < 2.6,
+                  "first=%r ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], _t28))
+            _MODE28["m"] = "dupcl"
+            _d28, _t28 = _probe28()
+            check("S28/dupcl boundary: `content-length: 2` then `9` -- the FIRST value decodes, so the gate does NOT fire and the turn completes with its real terminator (green on BOTH trees; the family boundary the faces measured twice)",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b"\r\nhe\r\n0\r\n\r\n" in _d28,
+                  "first=%r n=%d ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], len(_d28), _t28))
+            _MODE28["m"] = "lyingcl"
+            _d28, _t28 = _probe28()
+            check("S28/lyingcl boundary (round-16 NEW-2's honest residue): a VALID length that lies about arrival (promises 1000, sends 3, keeps the lane alive) is NOT this door's family -- refusing it would execute SSE; it stays the documented bounded wait and the caller keeps a VISIBLE truncation (no terminator; a compliant parser raises). Refusing THIS shape is the fix that would re-grow the disease",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b"3\r\nabc\r\n" in _d28 and b"0\r\n\r\n" not in _d28
+                  and _t28 < 1.5,
+                  "first=%r n=%d ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], len(_d28), _t28))
+            _MODE28["m"] = "deadchunk"
+            _d28, _t28 = _probe28()
+            check("S28/deadchunk boundary (NEW-2 twin): TE:chunked whose final zero-chunk never arrives -- an OPEN chunk stream is legal streaming (SSE lives in exactly this shape); the gate does NOT fire, and the death at the cap is the visible unterminated stream the README already promises ('the caller sees the unterminated stream')",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b"transfer-encoding: chunked" in _d28
+                  and b"0\r\n\r\n" not in _d28 and _t28 < 1.5,
+                  "first=%r n=%d ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], len(_d28), _t28))
+            _MODE28["m"] = "h10"
+            _d28, _t28 = _probe28()
+            check("S28/h10 boundary: an HTTP/1.0 final with no length DECLARES its close (the version says so) -- close-delimited framing is lawfully promised there and the gate leaves it ALONE: the body lands whole and the turn ends at once, no wait-for-FIN stranding (caller-side framing stays the relay's own law -- a 1.1 caller gets its chunk terminator; the RED burn caught this rig asserting the wrong wire side and the row now asserts what the boundary claims: arrival, completion, bound -- green on both trees; the guard that the fix does not eat the documented close-delimited law)",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b"hi" in _d28 and _t28 < 1.5,
+                  "first=%r n=%d ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], len(_d28), _t28))
+            _MODE28["m"] = "noframe"
+            _d28, _t28 = _probe28("HEAD")
+            check("S28/HEAD boundary: a HEAD caller is never stranded -- the stdlib zeros the length for HEAD and the gate's belt-and-braces exclusion keeps the clean CL:0 answer (r16c3 W11: clean at 0.001s on the baseline; it stays exactly that -- the door refuses BOX framing lies, not caller methods that promised no body)",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b"content-length: 0" in _d28 and _t28 < 1.5,
+                  "first=%r ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], _t28))
+            _MODE28["m"] = "final"
+            _d28, _t28 = _probe28()
+            _h28 = get(_S28_RTR, "/healthz")[0]
+            check("S28/lane survives: after every lie and every refusal the box lane and the caller lane are CLEAN -- the next true answer lands whole and healthz answers (the DV-R12/R14 between-responses poison class, guarded per round; a refusal that poisons the lane is a second lesion)",
+                  _d28.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b'{"ok":1}' in _d28 and _h28 == 200,
+                  "first=%r healthz=%d ttfb=%.2fs" % (_d28.split(b"\r\n", 1)[0][:46], _h28, _t28))
+        finally:
+            _term(_p28)
+            try:
+                _ls28.close()
+            except OSError:
+                pass
+        _sites28, _keys28 = 0, set()
+        for _nd28 in ast.walk(ast.parse(_src27)):
+            if (isinstance(_nd28, ast.BoolOp) and isinstance(_nd28.op, ast.Or)
+                    and len(_nd28.values) == 2):
+                _l28 = _nd28.values[0]
+                if (isinstance(_l28, ast.Call) and isinstance(_l28.func, ast.Attribute)
+                        and _l28.func.attr == "get"
+                        and ((isinstance(_l28.func.value, ast.Name)
+                              and _l28.func.value.id == "sm")
+                             or (isinstance(_l28.func.value, ast.Attribute)
+                                 and _l28.func.value.attr == "sm_cfg"))
+                        and len(_l28.args) == 1):
+                    _r28 = _nd28.values[1]
+                    if (isinstance(_r28, ast.Constant)
+                            and isinstance(_r28.value, (int, float))
+                            and not isinstance(_r28.value, bool)):
+                        _k28 = _l28.args[0]
+                        if isinstance(_k28, ast.Constant) and isinstance(_k28.value, str):
+                            _got28 = [_k28.value]
+                        elif isinstance(_k28, ast.IfExp):
+                            _got28 = [_b.value for _b in (_k28.body, _k28.orelse)
+                                      if isinstance(_b, ast.Constant)
+                                      and isinstance(_b.value, str)]
+                        else:
+                            _got28 = []
+                        if _got28:
+                            _sites28 += 1
+                            _keys28.update(_got28)
+        check("S28/F-F: the smart-knob re-default census is a LAW, not a remembered number -- every knob in SMART_NUMS is covered by an inline `or` read site AND the site-word carries no count (the F-F comment's '24 sites' was wrong AT BIRTH -- face counted 25, birth commit 23, three independent AST rules agree the sentence matched nothing; DV-R17's census law generalized: the lock COUNTS coverage, the comment keeps no number to rot)",
+              set(R.SMART_NUMS) <= _keys28
+              and not any(_seg28.rstrip()[-1:].isdigit()
+                          for _seg28 in _src27.split(" sit" + "es")[:-1]),
+              "sites=%d knobs=%d uncovered=%r" % (_sites28, len(R.SMART_NUMS),
+                                                  sorted(set(R.SMART_NUMS) - _keys28)))
+        _uf28 = _src27.count("unparseable box framing")
+        check("S28/choke: the length-axis refusal is ONE raise into the door that already exists -- the parse-stage message anchor appears exactly once (the raise must ride begin(): the named F-3 door only recognizes parse-stage failures, and begin() is also where the poller and probe lanes inherit the law), the gate comment names the axis, and both lanes name the shared door (r16c3 W15/W17a-c: the request lane's named 400s made the old asymmetry measured history)",
+              _uf28 == 1 and "the length axis" in _src27
+              and "the SAME named door" in _src27,
+              "raises=%d axis=%r door=%r" % (_uf28, "the length axis" in _src27,
+                                             "the SAME named door" in _src27))
+        check("S28/doc: the record states both faces of the lie -- the framing law gained its length-axis cell (an undecodable body length on a declared-keep-alive final, refused by name before the caller is opened; declared close untouched) and the trust list says what each liar ACTUALLY gets: the framing liar never reaches a caller, the lawfully-framed liar gets a visible truncation at read_timeout, never a forged terminator (L2 NEW-2's RE-GRADE is the sentence's spine)",
+              "refused by name before the caller is opened" in _rd27
+              and "never a forged terminator" in _rd27,
+              "framing-law=%r trust-list=%r"
+              % ("refused by name before the caller is opened" in _rd27,
+                 "never a forged terminator" in _rd27))
+
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]
         _num25 = (_ft25.split("# ", 1)[1].split(" checks", 1)[0].strip()
