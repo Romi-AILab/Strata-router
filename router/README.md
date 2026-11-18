@@ -637,8 +637,11 @@ turn is a fresh `placed` placement** (`new_placements` ticks), because an
 idle-or-busy-aware tier is what spreads subagents; `overflow_placements`
 counts the narrower case -- a lane already homed somewhere redirected off a
 full home on a later turn (rolled-back attempts tick `overflow_rollbacks`
-instead). `requests` counts every forwarded request,
-including bodyless GETs like a UI's "fetch models" -- read spread from
+instead). `requests` counts every request a box is RESERVED for -- the
+tick lands before any socket opens, so a connect-failure that moved on to
+another box STAYS counted (only an overflow rollback ever un-counts) --
+including bodyless GETs like a UI's "fetch models". Read it as
+spread-of-demand, not a delivery log; read spread from
 `affinity_by_backend`, not from absolute counter sizes. Do not read queue depth
 from `avg_ttfb_s`: Strata queues with keep-alives, so a parked stream's first
 byte lands within ~10 s no matter how deep the queue -- ttfb measures service,
@@ -835,7 +838,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 582 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 591 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -990,14 +993,21 @@ the next response as it arrives) and a lying `205` gets its body dropped
 with the zero declared `content-length: 0` (a 205 is NOT on the
 no-content list, so silence there would strand the reader; the drop must be
 declared) -- the program's 18th same-shape lesion, the 4th in the framing
-family; inline typed junk (`true` as a key or token, a dict
+family. A box's informational `1xx` never even reaches that gate: the box
+lane absorbs it whole and relays EXACTLY ONE final response per request, so
+a lying `103`/`102` cannot be served to the caller re-framed as the answer
+with the real one dropped behind it (DV-R17 -- a `102`/`103` used to slip
+past the stdlib, which skips only `100`; the program's 19th same-shape
+lesion, 5th in the framing family); inline typed junk (`true` as a key or token, a dict
 as a rewrite value) refuses boot like the keys file already did. And the
 distribution edges: `metadata.user_id` as an int still SCOPES (three
 sessions with an identical first turn get three lanes, and 12345 is not
 "12345"); anon lanes hash the FULL body (two malformed bodies past 64 KB
 with an identical prefix part ways); and the `last_resort` counter is honest
-in both directions -- a reservation race at a LIVE box books as
-placed+borrow, while a genuine all-down cooldown forwards (never rejects)
+in both directions -- a reservation race that borrows a LIVE box whose
+`require_idle` gate was ACTUALLY closed books as placed+borrow (a race at a
+live box with an OPEN gate books plain `placed` -- see the borrow law above),
+while a genuine all-down cooldown forwards (never rejects)
 and books the named `last_resort`.
 The round's second wave (v1.2.13) closed what the first wave
 left open, and made the error taxonomy honest about WHO vanished: a reason

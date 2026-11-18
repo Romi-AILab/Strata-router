@@ -22,6 +22,7 @@ The four rules under test:
 """
 from __future__ import annotations
 
+import ast
 import http.client
 import json
 import logging
@@ -4640,7 +4641,7 @@ def main():
     # Text locks (flat form + enumeration-segment anchors -- lesson #6; the
     # F-8a lock here IS that lesson's re-proof: a global-phrase anchor once
     # passed pre-fix against an unrelated refusal paragraph).
-    check("S16/F-6: the counter guide no longer credits new_placements with bodyless GETs (requests counts every forwarded request)",
+    check("S16/F-6: the counter guide no longer credits new_placements with bodyless GETs (S27's census lock keeps the counter sentence honest about WHAT it counts)",
           "`new_placements` count every forwarded request" not in _fl15,
           "stale half still in the counter guide")
     check("S16/F-7: the Tests line is not a stale 210 (the run's footer prints the live count)",
@@ -5700,8 +5701,9 @@ def main():
     # than the socket timeout, so a sender trickling faster than the gap keeps
     # a "bounded" door pinned past every deadline (R10-F-1/F-2: the 15th
     # same-shape lesion and the SECOND one inside the mechanism; the law moves
-    # one level DOWN again -- INTO the read loop, per operation, where the nine
-    # _drain_body call sites and all six closing sites inherit). The 413 door
+    # one level DOWN again -- INTO the read loop, per operation, where every
+    # _drain_body call site and all six closing sites inherit (DV-R17 S27
+    # counts them by AST -- prose carries no number that can rot)). The 413 door
     # was the family's ONLY flag-LAST door (R10-F-3): an under-delivered giant
     # CL pinned it silent for 30s while its own comment promised a bounded
     # named 413. Five stdlib dispatch doors fired while request_version was
@@ -5842,7 +5844,8 @@ def main():
         _up22 = wait_for(_hz22, 25)
         # ---- R10-F-1: the honest-CL count loop is a refusal door's longest
         # step -- declared-but-undelivered bytes pinned the thread and the
-        # named answer was never written (all nine call sites inherit). ----
+        # named answer was never written (every call site inherits; S27 counts
+        # them by AST). ----
         _d22o, _t22o = _probe22(b"OPTIONS /v1/messages HTTP/1.1\r\n" + _H22 +
                                 b"content-length: 1000000\r\n\r\nab") if _up22 else (b"", 99.0)
         check("S22/R10-F-1: OPTIONS with a giant HONEST declared body it never delivers: the named 405 arrives anyway -- the count loop's per-iteration deadline bounds the wait (baseline: the door blocked in rfile.read() forever, 405 never written, one pinned thread per stalled sender)",
@@ -5961,11 +5964,11 @@ def main():
             pass
     _src22 = open(ROUTER, encoding="utf-8").read()
     _flat22 = " ".join(_src22.split())
-    check("S22/R10-F-2 doctrine: no blocking accumulation read survives in this file -- 'self.rfile.read(65536)' appears NOWHERE and the bounded primitives read1() per operation (the deadline must be checkable: the 15th same-shape lesion put the law BETWEEN reads the trickle never let return; this time it lives INSIDE the loop, where all six closing sites and the nine _drain_body call sites inherit)",
+    check("S22/R10-F-2 doctrine: no blocking accumulation read survives in this file -- 'self.rfile.read(65536)' appears NOWHERE and the bounded primitives read1() per operation (the deadline must be checkable: the 15th same-shape lesion put the law BETWEEN reads the trickle never let return; this time it lives INSIDE the loop, where all six closing sites and every _drain_body call site inherit -- S27 counts the call sites by AST)",
           "self.rfile.read(65536)" not in _src22 and _src22.count("read1(") >= 3,
           "read(65536)=%d read1=%d" % (_src22.count("self.rfile.read(65536)"), _src22.count("read1(")))
     _db22 = _src22[_src22.find("def _drain_body"):][:3200]
-    check("S22/R10-F-1 law: the honest-CL count loop carries its OWN deadline (a monotonic clock around the read with per-op arm) -- the declared length is a NUMBER TO STOP AT, not a promise the door must honor waiting on (nine call sites inherit this one loop)",
+    check("S22/R10-F-1 law: the honest-CL count loop carries its OWN deadline (a monotonic clock around the read with per-op arm) -- the declared length is a NUMBER TO STOP AT, not a promise the door must honor waiting on (every call site inherits this one loop)",
           "monotonic" in _db22, _db22[:60])
     _lim22 = _flat22[_flat22.find("if n > limit:"):][:1500]   # the door's comment grew two doctrines; the window must still SEE the flag line (run-1 GREEN miss was this anchor, not the engine)
     check("S22/R10-F-3 ordering law: the 413 capacity door is flag-FIRST like every sibling -- close_connection BEFORE _drain_body, so the drain knows at its first line this door is closing (it was the family's last flag-LAST door, and the only door whose helper branch read a stale flag)",
@@ -7056,6 +7059,189 @@ def main():
         check("S26/shape: the empty-name BEHAVIOR stays fail-closed as DV-R14 decided -- S25/A2's locked refusal row and the named phrase are the lock; DV-R16 fixed the four sentences around it, not the door",
               b'("empty name", b": r15' in open(__file__, "rb").read(),
               "the locked refusal row vanished from the suite")
+
+        # ---- S27: the harvest of DV-R17 (round 15's confirmation round). The
+        # relay's framing gate had no 1xx cell: http.client's begin() skips
+        # ONLY a 100 Continue, so a box's 102/103 arrived AT the gate as the
+        # response -- the caller was served the informational re-framed
+        # (chunked + `0\r\n\r\n` + x-strata headers) and the box's REAL answer
+        # was silently dropped behind it (council r15c2 live: caller served
+        # the 103, the body never arrived -- a whole turn lost). The law sits
+        # ONE point upstream of the gate: the box lane absorbs informationals
+        # whole (_FinalResponse, set at open_connection -- relay, poller and
+        # probe all build their box connections there) and relays EXACTLY ONE
+        # final response per request. The census rows are the same round's
+        # L1a-C3: the old call-site sentence remembered NINE and lagged the tree
+        # by two (DV-R15's entry doors each added one and the suite stayed
+        # GREEN) -- prose carries no number now, and the one sentence that
+        # does is COUNTED against the AST, itself included.
+        print("S27) DV-R17: a box's `1xx` dies at the box lane's ONE point (19th same-shape lesion, 5th in the framing family); the call-site census is COUNTED by AST, not remembered")
+        _S27_BOX, _S27_RTR = 9197, 9198
+        _free25(_S27_BOX)                   # round-14 lab rule: prove free first
+        _free25(_S27_RTR)
+        _MODE27 = {"m": "final"}
+
+        def _svc27(c27):
+            try:
+                c27.settimeout(8)
+                buf27 = b""
+                while b"\r\n\r\n" not in buf27:
+                    g27 = c27.recv(4096)
+                    if not g27:
+                        return
+                    buf27 += g27
+                head27, _, rest27 = buf27.partition(b"\r\n\r\n")
+                cl27 = 0
+                for ln27 in head27.split(b"\r\n")[1:]:
+                    if ln27.lower().startswith(b"content-length:"):
+                        cl27 = int(ln27.split(b":", 1)[1])
+                have27 = len(rest27)
+                while have27 < cl27:        # Windows wire law: drain the declared
+                    g27 = c27.recv(65536)   # body BEFORE answering (close-with-
+                    if not g27:             # unread = RST, and the RST eats the
+                        break               # evidence, not the lesion)
+                    have27 += len(g27)
+                m27 = _MODE27["m"]
+                if m27 == "eh":
+                    c27.sendall(b"HTTP/1.1 103 Early Hints\r\n"
+                                b"link: </s.css>; rel=preload; as=style\r\n\r\n")
+                    time.sleep(0.25)
+                elif m27 == "chain":
+                    c27.sendall(b"HTTP/1.1 102 Processing\r\n\r\n")
+                    time.sleep(0.15)
+                    c27.sendall(b"HTTP/1.1 103 Early Hints\r\n\r\n")
+                    time.sleep(0.15)
+                elif m27 == "cont":
+                    c27.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+                    time.sleep(0.25)
+                elif m27 == "dying":
+                    c27.sendall(b"HTTP/1.1 102 Processing\r\n\r\n")
+                    time.sleep(0.25)
+                    return                  # silent box: an informational, then nothing
+                c27.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                            b"content-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}")
+            except OSError:
+                pass
+            finally:
+                try:
+                    c27.close()
+                except OSError:
+                    pass
+
+        def _box27(sock27):
+            while True:
+                try:
+                    c27, _ = sock27.accept()
+                except OSError:
+                    return
+                threading.Thread(target=_svc27, args=(c27,), daemon=True).start()
+
+        def _probe27():
+            s27 = socket.create_connection(("127.0.0.1", _S27_RTR), timeout=8)
+            s27.sendall(b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                        b"content-length: 5\r\n\r\nzzzzz")
+            s27.settimeout(12)
+            t027 = time.monotonic()
+            got27 = b""
+            tf27 = None
+            try:
+                while True:
+                    g27 = s27.recv(65536)
+                    if not g27:
+                        break
+                    if tf27 is None:
+                        tf27 = time.monotonic() - t027
+                    got27 += g27
+            except OSError:
+                pass
+            s27.close()
+            # TTFB, not EOF, is the bound: a refusal the relay GENERATES arrives
+            # framed and the connection may then lawfully keep-alive -- reading
+            # to EOF would measure the caller's patience, not the door's bound
+            # (the first GREEN run proved it: the 502 was there at 0.3 s, this
+            # rig's read-to-EOF waited 12.27 s for a close that never came).
+            return got27, (tf27 if tf27 is not None else time.monotonic() - t027)
+
+        _ls27 = _listen25(_S27_BOX)
+        threading.Thread(target=_box27, args=(_ls27,), daemon=True).start()
+        _cfg25("smoke-1xx.json", _S27_RTR, _S27_BOX, {"status_interval": 300})
+        _p27 = subprocess.Popen([sys.executable, ROUTER, "--config", "smoke-1xx.json",
+                                 "--log-level", "ERROR"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            wait_for(lambda: get(_S27_RTR, "/healthz")[0] == 200, 25)
+            _MODE27["m"] = "eh"
+            _d27, _t27 = _probe27()
+            check("S27/NEW-1: a box that answers `103 Early Hints` THEN its real 200 -- the caller sees EXACTLY ONE response, the 200 with its true body; the informational died absorbed at the box lane (baseline r15c2 live: the caller was served the 103 re-framed with chunked + a zero-chunk terminator, and the answer never arrived -- one whole turn lost, and for 1xx-skipping parsers the terminator becomes the next status line)",
+                  _d27.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b'{"ok":1}' in _d27
+                  and b" 103 " not in _d27 and b"link:" not in _d27,
+                  "first=%r n=%d ttfb=%.2fs" % (_d27.split(b"\r\n", 1)[0][:46], len(_d27), _t27))
+            _MODE27["m"] = "chain"
+            _d27, _t27 = _probe27()
+            check("S27/NEW-1 chain: `102` then `103` then the 200 -- absorbed REPEATEDLY, a while-loop law not a one-shot special case (the family is 1xx, not 103: L2's sister hunt found the 102 row the L1 claim named for neither)",
+                  _d27.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b'{"ok":1}' in _d27
+                  and b" 102 " not in _d27 and b" 103 " not in _d27,
+                  "first=%r n=%d ttfb=%.2fs" % (_d27.split(b"\r\n", 1)[0][:46], len(_d27), _t27))
+            _MODE27["m"] = "cont"
+            _d27, _t27 = _probe27()
+            check("S27/100 control: `100 Continue` then the 200 still lands -- http.client already skipped it upstream and the absorb left that path ALONE (green on BOTH trees: the witness that the fix's blast radius stopped at the informationals nobody skipped)",
+                  _d27.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b'{"ok":1}' in _d27,
+                  "first=%r n=%d ttfb=%.2fs" % (_d27.split(b"\r\n", 1)[0][:46], len(_d27), _t27))
+            _MODE27["m"] = "dying"
+            _d27, _t27 = _probe27()
+            check("S27/NEW-1 dying: a box that sends `102` and then NOTHING -- the caller gets the named 502, bounded by ARRIVAL (TTFB): absorbing an informational never fabricates a final and never hangs; the connection may then keep-alive lawfully, so the bound is when the answer lands, not when the socket dies (baseline: the caller was served the 102 as if it WERE the answer)",
+                  _d27.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 502") and _t27 < 8.0,
+                  "first=%r ttfb=%.2fs" % (_d27.split(b"\r\n", 1)[0][:46], _t27))
+            _MODE27["m"] = "final"
+            _d27, _t27 = _probe27()
+            check("S27/plain control: a box that sends no informational at all still lands one 200 with its body -- rig sanity and the shared witness on both trees",
+                  _d27.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+                  and b'{"ok":1}' in _d27,
+                  "first=%r n=%d ttfb=%.2fs" % (_d27.split(b"\r\n", 1)[0][:46], len(_d27), _t27))
+        finally:
+            _term(_p27)
+            try:
+                _ls27.close()
+            except OSError:
+                pass
+        _src27 = open(ROUTER, encoding="utf-8").read()
+        _own27 = open(__file__, encoding="utf-8").read()
+        _n27 = sum(1 for _nd27 in ast.walk(ast.parse(_src27))
+                   if isinstance(_nd27, ast.Call) and isinstance(_nd27.func, ast.Attribute)
+                   and _nd27.func.attr == "_drain_body"
+                   and isinstance(_nd27.func.value, ast.Name)
+                   and _nd27.func.value.id == "self")
+        _w27 = _src27.split(" call sites inherit")
+        _word27 = _w27[0].split()[-1] if len(_w27) == 2 else "?"
+        check("S27/census: the inherit sentence's number IS the tree -- AST counts every `self._drain_body` call site and the sentence must agree (DV-R15's entry doors silently moved the census nine to eleven while the suite ran GREEN over both; a number remembered is a number that rots -- DV-R16 NEW-1 was an anchor, this is its numeric twin, so the number is COUNTED, sentence included)",
+              len(_w27) == 2
+              and {"SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10,
+                   "ELEVEN": 11, "TWELVE": 12}.get(_word27.upper()) == _n27,
+              "sentence=%r AST=%d" % (_word27, _n27))
+        _nine27, _nine27b = "ni" + "ne call sites", "ni" + "ne _drain_body"   # built, not literal: the
+        check("S27/census sweep: no prose QUOTES a _drain_body call-site count anywhere -- the stale nine is dead in both files, and the ONE inherit sentence is policed by the row above (the number-free wording is the law; the AST row catches it if the wording grows a number back; the pattern is BUILT here because a literal would live in the very file it sweeps -- the quine lesson the dry run caught before the burn)",   # sweep scans smoke itself
+              _nine27 not in _src27.lower() and _nine27b not in _src27.lower()
+              and _nine27 not in _own27.lower() and _nine27b not in _own27.lower(),
+              "a remembered nine survived the sweep")
+        _ck27 = _src27.count("conn.response_class = _FinalResponse")
+        check("S27/choke: the absorb law lives at ONE point -- open_connection sets the box lane's response class exactly once, the class exists, and the framing gate's comment names the upstream point (the program's choke-point doctrine: a law kept in one place cannot rot in eight others -- DV-R10/R13/R15 precedent)",
+              _ck27 == 1 and "class _FinalResponse" in _src27
+              and "No 1xx ever reaches this gate" in _src27,
+              "assignments=%d class=%r gate-sentence=%r"
+              % (_ck27, "class _FinalResponse" in _src27,
+                 "No 1xx ever reaches this gate" in _src27))
+        _rd27 = " ".join(open(os.path.join(HERE, "README.md"), encoding="utf-8").read().split())
+        check("S27/doc: the three DV-R17 sentences are on the record -- the relay law states the 1xx cell (absorbed whole, ONE final relayed), the requests sentence says RESERVED (spread-of-demand, not a delivery log), and the changelog's +borrow carries its gate-closed condition (L1a-C1/C2: claims the reader could not reconstruct from the code)",
+              "the box lane absorbs it whole and relays EXACTLY ONE final response per request" in _rd27
+              and "counts every request a box is RESERVED for" in _rd27
+              and "gate was ACTUALLY closed books as placed+borrow" in _rd27,
+              "relay-law=%r reserved=%r borrow=%r"
+              % ("the box lane absorbs it whole and relays EXACTLY ONE final response per request" in _rd27,
+                 "counts every request a box is RESERVED for" in _rd27,
+                 "gate was ACTUALLY closed books as placed+borrow" in _rd27))
 
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]

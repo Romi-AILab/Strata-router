@@ -2279,6 +2279,37 @@ class StatusPoller(threading.Thread):
             return -1, str(exc)
 
 
+class _FinalResponse(http.client.HTTPResponse):
+    # DV-R17 (round 15, L2 NEW-1 + council r15c2): the stdlib's begin() loop
+    # skips ONLY 100 Continue -- a box's 102/103 (or any other 1xx) therefore
+    # arrived at the relay as "the" response: the caller was served the
+    # informational re-framed with chunked + `0\r\n\r\n` + x-strata headers
+    # while the box's REAL answer, still queued behind it, was silently
+    # dropped (r15c2 live: `103 Early Hints` then `200 hi` -- the caller saw
+    # the 103, "hi" never arrived; http.client callers lost a completed turn,
+    # and a 1xx-skipping caller takes the `0\r\n\r\n` for the next status
+    # line -- the DV-R12/R14 between-responses poison class, the program's
+    # 19th same-shape lesion and 5th in the framing family). A 1xx is no-body
+    # by the same RFC 9112 6.3 law the framing gate already obeys for
+    # 204/304 -- but here the whole informational is ABSORBED, because this
+    # lane's contract is EXACTLY ONE final response per request; hints
+    # (103's `link:`) are a box-to-box affair the router does not forward --
+    # forwarding would RECREATE the lesion for every http.client-family
+    # caller, which is half of what r15c2 measured. 101 is absorbed too:
+    # "upgrade" is HOP_BY_HOP so a compliant box never sees one requested;
+    # a lying box that switches protocol anyway has its bytes die as an
+    # unparseable final (named 502) -- fail-closed by shape. Absorption is
+    # bounded like every other header read by the socket timeout. S27 locks
+    # the absorb, the chain, the 100-Continue passthrough, and the
+    # informational-then-EOF named 502.
+    def begin(self):
+        while True:
+            self.headers = None          # re-arm the stdlib's idempotence guard
+            http.client.HTTPResponse.begin(self)
+            if self.status >= 200:
+                return
+
+
 def open_connection(be, connect_timeout, read_timeout):
     conn = None
     try:
@@ -2287,6 +2318,9 @@ def open_connection(be, connect_timeout, read_timeout):
             conn = http.client.HTTPSConnection(be.host, be.port, timeout=connect_timeout, context=ctx)
         else:
             conn = http.client.HTTPConnection(be.host, be.port, timeout=connect_timeout)
+        conn.response_class = _FinalResponse   # DV-R17: ONE point -- every
+        # box-lane connection (relay, poller, probe) absorbs informationals;
+        # nothing under this function ever sees a 1xx again.
         conn.connect()
         try:
             conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -2825,7 +2859,7 @@ class Handler(BaseHTTPRequestHandler):
             try:                          # written). A declared length is a
                 self.connection.settimeout(_left)   # NUMBER TO STOP AT, not a
                 got = self.rfile.read1(chunk)       # promise the door must honor
-            except Exception:             # waiting on. Nine call sites inherit
+            except Exception:             # waiting on. ELEVEN call sites inherit
                 self.close_connection = True
                 return
             finally:
@@ -3357,7 +3391,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(resp.status, _reason)
             # the statuses the body/framing decisions below treat as done at
             # the header block -- single source, law and measurements at the
-            # framing gate (DV-R12)
+            # framing gate (DV-R12). No 1xx ever reaches this gate: the box
+            # lane absorbs informationals one point upstream, at
+            # open_connection's response_class (DV-R17) -- before that fix a
+            # box's 102/103 reached HERE and got framed as the final answer,
+            # with the real one dropped behind it (r15c2).
             nobody = resp.status in (204, 304)     # terminated by the empty line
             drop205 = resp.status == 205           # body dropped by policy, declared CL:0
             drop_body = head or nobody or drop205
