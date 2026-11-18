@@ -79,8 +79,9 @@ it once warm. The two questions `--probe` actually answers: does the
 Anthropic API live on `/v1/messages` or `/anthropic/v1/messages` (if the
 latter, add `--path-prefix /anthropic`), and which status field exposes load.
 The aggregate exit code is scriptable: `--probe` exits nonzero if any box
-answered on no Messages path -- a later healthy box never erases an earlier
-dead one.
+failed to answer HEALTHILY (2xx/3xx) on any Messages path -- a box that
+rejects the request (401) has answered, but not healthily; a later healthy
+box never erases an earlier dead one.
 
 Point the boxes at each other over the tailnet: Strata binds ONE address
 (`--host`), and each side's own router reaches its local box on `127.0.0.1`,
@@ -762,9 +763,13 @@ waits for the limiter.
   that makes the stdlib inbound parser silently swallow it AND every header
   behind it (no colon, a name with a space/control byte, a bare CR) dies at
   a named 400 -- once a swallowed content-length meant a declared body
-  forwarded as zero bytes behind a happy 200. Names merely ugly-but-parsed
-  ('x(bad:') keep forwarding, stripped on the exit as always: the door
-  refuses measured swallowers, not non-token names. Slow clients
+  forwarded as zero bytes behind a happy 200. Since DV-fix16 the family also
+  states its one fail-closed exception: the EMPTY-name line (`: v`) drops
+  ALONE -- the stdlib parse keeps the headers and the content-length behind
+  it -- yet is refused anyway as a zero-validity name. Names merely
+  ugly-but-parsed ('x(bad:') keep forwarding, stripped on the exit as
+  always: the door refuses the measured swallowers plus that one named
+  exception, not non-token names. Slow clients
   hold handler threads with no cap (stdlib threading server): hostile locals
   can exhaust threads -- and a caller that stalls WITHOUT closing (full TCP
   window, never EOF) additionally pins its relay thread, its home box's
@@ -830,7 +835,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 574 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 582 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the

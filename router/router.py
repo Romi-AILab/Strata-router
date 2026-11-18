@@ -177,8 +177,10 @@ _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 # governs the exit (see above); drawing the door at the token line would
 # refuse shapes the stdlib parses HARMLESSLY (r15sig2: 'x(bad: v' parses as
 # its own header and the chain survives -- the suite-locked Q2/F4 forwarding
-# case; an empty name drops ALONE). The door refuses exactly the measured
-# swallowers -- lines whose parse damage eats every header behind them.
+# case). The door refuses the MEASURED swallowers -- lines whose parse damage
+# eats every header behind them -- PLUS the empty name, which drops ALONE
+# (round-14 triple re-measure) yet is refused fail-closed as a zero-validity
+# name; _hdr_shape_ok states the whole law and S25/A2 locks both halves.
 _HDR_SWALLOW_RE = re.compile(rb"[\x00-\x20\x7f-\xff]")
 
 # C0/DEL controls a lying box can hide inside a header VALUE. They cannot forge
@@ -814,8 +816,9 @@ class Pool:
         tail -- begin() is legal on them, dropping them would lose a real
         trial-forward candidate. Ties -- exact at the default k_eps=0, or
         inside the relative band k_eps x min(J1,J2) -- fall to load_score,
-        whose own jitter (:440, untouched) is the final tie-break: this is
-        the fan-out floor (S3/V3-02), not a coin flip."""
+        whose own jitter (its closing return adds random.random(), untouched)
+        is the final tie-break: this is the fan-out floor (S3/V3-02), not a
+        coin flip."""
         if not cands:
             return None
         if all(b.state == SUSPECT for b in cands):
@@ -992,7 +995,7 @@ class Pool:
             b = self._shadow_bucket
             # R4-Q1 (open question from the R4 behavioral face, confirmed):
             # _move_candidate filtered None-windows at decision, but a
-            # poller boundary tick (:563 branch) may flip THIS target's
+            # poller boundary tick (the tick_n % window_n branch) may flip THIS target's
             # window to None before booking -- None+number in settle is the
             # TypeError that kills cycle resolution and silently re-locks
             # the gate: the decision-ledger-loses-nothing family. Read the
@@ -2583,14 +2586,14 @@ class Handler(BaseHTTPRequestHandler):
         if bad is not None:
             self.close_connection = True   # flag FIRST (family law)
             self._quiet_finish()
-            self._json(400, {"error": {"message": "strata-router: malformed header line -- %s; the inbound stdlib parse drops that line and every header behind it (a declared body would vanish), so this request is refused here, named" % bad}})
+            self._json(400, {"error": {"message": "strata-router: malformed header line -- %s; such a line either makes the inbound stdlib parse drop every header behind it (a declared body would vanish) or carries a zero-validity name -- either way this request is refused here, named" % bad}})
             return False
         return True
 
     def _hdr_shape_ok(self):
         """DV-R15 A2 (DV-R13 L1b F-1, L2 three new variants): the malformed
-        inbound header-line family -- a line with no colon, a field name that
-        is not an RFC 7230 token, or a bare CR -- makes the stdlib inbound
+        inbound header-line family -- a line with no colon, a name carrying a
+        space/control/DEL/high byte, or a bare CR -- makes the stdlib inbound
         parser (http.client.parse_headers -> compat32 feedparser) DISCARD the
         junk line and every header line after it. Council probe r15_foldsig
         pinned the mechanism precisely: after 'bad name: x' the parsed keys
@@ -2611,9 +2614,14 @@ class Handler(BaseHTTPRequestHandler):
         and the chain SURVIVES -- the suite's Q2/F4 lock (junk NAMES must be
         dropped on the egress while the request forwards 200) stands on it.
         Names that merely are not tokens but keep the chain intact ('x(bad',
-        'bad:name') keep forwarding; the door refuses only the shapes that
-        erase the headers behind them -- obs-fold continuations, colon- and
-        paren-names, tab-in-value, and LF-only terminators keep their 200
+        'bad:name') keep forwarding. The boundary is the MEASURED SWALLOWERS
+        PLUS ONE fail-closed exception: the EMPTY-NAME line (': v'). Round-14
+        triple re-measure (two L1 faces + L2 + council r14c1): it drops ALONE
+        -- the chain and the content-length survive -- so by the damage line
+        alone it would forward; the door refuses it anyway as a zero-validity
+        RFC-illegal name (field-name is 1*tchar), fail-closed at the parse
+        door, and S25/A2 locks that refusal. obs-fold continuations, colon-
+        and paren-names, tab-in-value, and LF-only terminators keep their 200
         (controls the suite locks).
         The caller's own body-loss is not the severity -- nothing here is
         smuggled and every trust decision still fails closed (a folded-away
@@ -2828,8 +2836,8 @@ class Handler(BaseHTTPRequestHandler):
             n -= len(got)
             limit -= len(got)
             if limit <= 0:
+                self.close_connection = True   # flag FIRST (family law, DV-R16)
                 self._quiet_finish()
-                self.close_connection = True
                 return
         if "chunked" in (self.headers.get("transfer-encoding") or "").lower():
             # A request refused at the door may carry its body chunked (TE
@@ -2838,9 +2846,9 @@ class Handler(BaseHTTPRequestHandler):
             # is still arriving: a keep-alive leftover parses as the next
             # request line, and a close RST-flushes the refusal away. Eat it
             # under the quiet deadline, then close regardless (stress
-            # Q1/Q2A-5).
-            self._quiet_finish()
+            # Q1/Q2A-5). DV-R16: the flag goes FIRST like every sibling.
             self.close_connection = True
+            self._quiet_finish()
             return
         # escape 3 closed: the count stopped at the DECLARED length (or there
         # was no length at all) while the caller queued MORE than they told
@@ -2862,9 +2870,11 @@ class Handler(BaseHTTPRequestHandler):
             # was measured eating the SUCCESSFUL 200 (0/10 named arrivals for a
             # 1.2 MB chunked GET at 0.3 s delay; even an immediate reader only
             # got 2/10). _quiet_finish needs no length -- this helper's own
-            # chunked branch proves it. Drain, THEN close.
-            self._quiet_finish()
+            # chunked branch proves it. DV-R16: the flag goes FIRST like every
+            # sibling -- the flag only DECLARES the door is closing; the drain
+            # still precedes the real close at the request's end.
             self.close_connection = True
+            self._quiet_finish()
         else:
             self._drain_body()  # GET with a body must not poison the connection
         path = self._route_path()
@@ -2895,8 +2905,10 @@ class Handler(BaseHTTPRequestHandler):
         if self._entry_denied():
             return
         if "chunked" in (self.headers.get("transfer-encoding") or "").lower():
-            self._quiet_finish()           # N-1 (red team): drain BEFORE closing
-            self.close_connection = True   # or the RST eats the answer itself
+            self.close_connection = True   # flag FIRST (family law, DV-R16)
+            self._quiet_finish()           # N-1 (red team): drain BEFORE the
+                                           # real close, or the RST eats the
+                                           # answer itself
         else:
             self._drain_body()  # a HEAD with a body must not poison the connection
         return self._proxy(b"", head=True)
@@ -3067,8 +3079,12 @@ class Handler(BaseHTTPRequestHandler):
             # sibling" below was written when this family still had flag-LAST
             # doors -- and L2 counted SEVEN of them, these two bad-CL twins
             # among them. The comment was not wrong about the LAW, only about
-            # the census; now every _quiet_finish door in the file sets the
-            # flag first, so the sentence is finally true of its family.
+            # census; DV-R16 closed the family's TAIL -- the four drain
+            # escapes (_drain_body's two exits, do_GET, do_HEAD) were the last
+            # flag-LAST sites, taught by a "Drain, THEN close." sentence that
+            # conflated the flag with the close -- so now every _quiet_finish
+            # site in the file sets the flag first and the sentence is finally
+            # true literally (S26 locks the shape).
             # The wire was always identical (_quiet_finish/_json/_close_drain
             # never read the flag; L2 proved it two ways) -- a lying comment
             # is the defect, and it lies by EXCITING the next door to skip
@@ -3737,7 +3753,7 @@ def probe(cfg):
                 break
         else:
             rc = 1
-            print("  !! no Anthropic Messages path answered; check the box is up and the key is set")
+            print("  !! no Anthropic Messages path answered HEALTHILY (a box that rejects -- 401 -- has answered, but not healthily); check the box is up and the key is set")
     print("")
     print("If /v1/messages 404s but /anthropic/v1/messages works, run the router with")
     print("--path-prefix /anthropic (or per box: --backend a=http://host:8080,/anthropic).")
@@ -4508,8 +4524,8 @@ def validate_cfg(cfg, pool, strict=True):
     # paragraph promises), sticky_ttl/read_timeout silently landed on
     # DOCUMENTED MODES that are not the documented defaults, expose_affinity
     # inverted its default. The listen gate had already refused its own null
-    # (:4027's comment); the law now covers its siblings. To take a default,
-    # REMOVE the key.
+    # (the listen type door in validate); the law now covers its siblings. To
+    # take a default, REMOVE the key.
     for _k17, _v17 in cfg.items():
         if _v17 is None and _k17 in DEFAULTS and not _k17.startswith("_"):
             problems.append((_k17, "explicit null overrides the merged default -- the read sites disagree on what null means; remove the key to take the default"))

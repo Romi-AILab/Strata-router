@@ -3597,7 +3597,7 @@ def main():
         _hp._affinity_put("hk", "GB", "sticky")
         _hp._exiled["hk"] = "GA"
         _ho.sm["empty_streak"] = 2
-        _ho.sm["feed_blind"] = False           # a never-polled box is born blind (router :268) -- and a blind feed is exactly what D4' refuses
+        _ho.sm["feed_blind"] = False           # a never-polled box is born blind (the sm dict opens with feed_blind True) -- and a blind feed is exactly what D4' refuses
         _hp._homecoming("hk", _hw, {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
         check("S8: exiled lane comes home on the two-poll verifiably-empty proof -- origin=smart, homecomings booked",
               _hp.affinity.get("hk")[0] == "GA" and _hp.affinity.get("hk")[2] == "smart"
@@ -4622,7 +4622,7 @@ def main():
 
     # Q1 (the behavioral face's open question, confirmed and adopted):
     # _move_candidate filtered None windows at DECISION, but a poller
-    # boundary tick (:563) may flip THIS target's window to None before
+    # boundary tick (the tick_n % window_n branch) may flip THIS target's window to None before
     # booking -- None+number in settle is the TypeError that kills cycle
     # resolution and silently re-locks the gate. The booking region reads
     # the clock once under the shadow lock and drops a dead window by
@@ -5094,8 +5094,8 @@ def main():
 
     check("S19/doc: the README tells the drain law is TOTAL -- every closing door, every helper escape, the GET/HEAD chunked close named, and the keep-alive carve-out stated",
           "GET/HEAD chunked close" in _fl15 and "legitimately pipelined request" in _fl15)
-    check("S19/doc: the probe paragraph publishes the exit-code contract (a dead box is never erased by a later healthy one)",
-          "exits nonzero if any box answered on no Messages path" in _fl15)
+    check("S19/doc: the probe paragraph publishes the exit-code contract (a dead box is never erased by a later healthy one; DV-R16: the sentence now says the truth -- unhealthy answers count as failures)",
+          "failed to answer HEALTHILY" in _fl15 and "has answered, but not healthily" in _fl15)
 
     print("")
     print("S20) DV-R8: the stdlib dispatch face via ONE send_error choke point (13th same-shape family), the last two live post-buffer doors, the dead doors deleted, the id law unified")
@@ -5971,7 +5971,7 @@ def main():
     check("S22/R10-F-3 ordering law: the 413 capacity door is flag-FIRST like every sibling -- close_connection BEFORE _drain_body, so the drain knows at its first line this door is closing (it was the family's last flag-LAST door, and the only door whose helper branch read a stale flag)",
           "self.close_connection = True" in _lim22 and _lim22.find("self.close_connection = True") < _lim22.find("self._drain_body()"),
           repr(_lim22[:120]))
-    _se22 = _src22[_src22.find("def send_error"):_src22.find("def _json(self")]   # slice to the next method -- "def _json" alone hits _json_or_none at line 196 (green-2/3 miss was this anchor; baseline carries NEITHER token in either slice, so the RED verdict stands either way)
+    _se22 = _src22[_src22.find("def send_error"):_src22.find("def _json(self")]   # slice to the next method -- "def _json" alone hits _json_or_none (a longer name than the needle; green-2/3 miss was this anchor; baseline carries NEITHER token in either slice, so the RED verdict stands either way)
     check("S22/R10-P4 choke law: the send_error override compensates for the stdlib's ARCHAIC DEFAULT -- while request_version is still 'HTTP/0.9' and the request line is no true two-word GET, the refusal is forced through HTTP/1.1 framing (the chunk gate has owned this default since DV-fix11; its untouched OUT-framing twin, one round later)",
           "request_version" in _se22 and "HTTP/1.1" in _se22, _se22[:60])
     check("S22/R10-P3 dead weight: POST_PATHS (zero loads since v4.1) no longer BINDS -- a constant with a lying comment is a future bug's invitation (AST census: Store@128 only); the deletion leaves a tombstone that may name what died",
@@ -6828,7 +6828,7 @@ def main():
             _d25 = _raw25(_ln25, junkfirst25=_jf25)
             if not (_d25.startswith(b"HTTP/1.1 400") and b"malformed header line" in _d25):
                 _shape_bad25.append("%s: %r" % (_nm25, _d25[:240]))
-        check("S25/A2: all eight MEASURED swallower shapes die at the NAMED framed 400 before the stdlib parse can eat the headers behind them (baseline: a swallowed content-length forwarded the declared body as ZERO behind a 200; junk-first paid the 403 rebinding door instead of a named header death)",
+        check("S25/A2: the eight refused shapes -- seven measured swallowers plus the fail-closed empty-name row -- die at the NAMED framed 400 before the stdlib parse can eat the headers behind them (baseline: a swallowed content-length forwarded the declared body as ZERO behind a 200; junk-first paid the 403 rebinding door instead of a named header death)",
               not _shape_bad25, "; ".join(_shape_bad25))
         _s25b = socket.create_connection(("127.0.0.1", _S25_FRTR), timeout=10)
         threading.Thread(target=_safe_send25,
@@ -6931,8 +6931,10 @@ def main():
               and "named 502 `backend_timeout`" in _rdn25, "")
         check("S25/A5: the README --no-expose-affinity row names the count-preview token -- the general promise now ENUMERATES it, because the gate now covers it",
               "count-preview `-input-tokens`" in _rdn25, "")
-        check("S25/A2: the README states the swallow-door law -- named 400 for lines that eat their successors, and the honest boundary (ugly-but-parsed names keep forwarding)",
-              "swallow it AND every header" in _rdn25 and "the door refuses measured swallowers" in _rdn25, "")
+        check("S25/A2: the README states the swallow-door law -- named 400 for lines that eat their successors, the honest boundary (ugly-but-parsed names keep forwarding), and since DV-R16 the one fail-closed exception (the empty name drops ALONE yet dies named)",
+              "swallow it AND every header" in _rdn25
+              and "the door refuses the measured swallowers plus that one named exception" in _rdn25
+              and "the EMPTY-name line" in _rdn25, "")
         check("S25/A7: the HEAD asymmetry is on the record -- readouts answer GET, the HEAD leg has no path filter: the path NAME travels, the numbers never do",
               "The HEAD leg has no path filter" in _rdn25, "")
         check("S25/A8: the drain bound cross-references its accepted-path mirror -- a deliberate boundary says which documented decision covers the other side",
@@ -6990,6 +6992,70 @@ def main():
         check("S25/A6 wire: the strict-CRLF door answers a delayed reader over in-flight junk (XY where CRLF was owed)",
               _dw25k.startswith(b"HTTP/1.1 400") and b"not terminated by CRLF" in _dw25k,
               repr(_dw25k[:240]))
+
+        # ---- S26: the DV-R16 harvest (convergence round 14): the flag-first
+        # tail closed, the reject-set law told whole, dead anchors buried --
+        # and the anchor SHAPE banned in both files, not three remembered
+        # strings (the suite carrying the same lesion one file over: NEW-1).
+        _src26 = open(ROUTER, encoding="utf-8").read()
+        _f26 = " ".join(_src26.split())
+        _self26 = open(__file__, encoding="utf-8").read()
+        _f26r = " ".join(_rd.split())
+
+        def _paren_anchor_hits(_t):
+            _hits, _i = [], _t.find("(:")
+            while _i != -1:
+                _j = _i + 2
+                while _j < len(_t) and _t[_j].isdigit():
+                    _j += 1
+                if _j > _i + 2:
+                    _hits.append(_t[_i:_j])
+                _i = _t.find("(:", _i + 2)
+            return _hits
+
+        def _router_colon_hits(_t):
+            _hits, _i = [], _t.find("router :")
+            while _i != -1:
+                _j = _i + 8
+                while _j < len(_t) and _t[_j].isdigit():
+                    _j += 1
+                if _j > _i + 8:
+                    _hits.append(_t[_i:_j])
+                _i = _t.find("router :", _i + 8)
+            return _hits
+
+        check("S26/F-a1: the flag-first family is TWELVE for twelve -- no _quiet_finish site in router.py sets the flag after the drain (the four drain escapes joined the family; DV-R15 A6's 'fix is the reorder' doctrine, applied to its own tail)",
+              "self._quiet_finish()\n                self.close_connection = True" not in _src26
+              and "self._quiet_finish()\n            self.close_connection = True" not in _src26
+              and "self._quiet_finish()           # N-1 (red team): drain BEFORE closing" not in _src26,
+              "a flag-LAST _quiet_finish site survives")
+        check("S26/F-a1 census: the census comment tells the repaired truth (twelve sites, the tail closed) -- a comment that lies by EXCITING the next door to skip the law is the defect this file itself books (flat-source anchors must not straddle a comment wrap: the dry run caught this predicate's own first version on the # token)",
+              "DV-R16 closed the family's TAIL" in _f26 and "sets the flag first and the sentence is finally" in _f26
+              and "true literally (S26 locks the shape)" in _f26,
+              "the census sentence still claims what the file did not keep")
+        check("S26/F-a2 law: the reject-set sentences tell the WHOLE law -- the measured-swallowers boundary PLUS the named fail-closed exception; 'refuses exactly the measured swallowers' and the empty-name-as-harmless-example framing are both dead",
+              "refuses exactly the measured swallowers" not in _f26
+              and "PLUS the empty name, which drops ALONE" in _f26
+              and "MEASURED SWALLOWERS PLUS ONE fail-closed exception" in _f26
+              and "; an empty name drops ALONE)." not in _f26,
+              "the door's law text still under-describes its own reject set")
+        check("S26/F-a2 message: the caller-facing 400 no longer promises 'every header behind it' for a shape measured to drop ALONE -- the message names both damages honestly (swallow OR zero-validity name)",
+              "the inbound stdlib parse drops that line and every header behind it" not in _f26
+              and "or carries a zero-validity name" in _f26,
+              "the 400 text still overclaims the swallow for the empty-name row")
+        check("S26/F-a3+a4: no numeric (:NNN anchor survives in router.py -- symbols are the anchor, line numbers rot (the file's own doctrine, now SUITE-ENFORCED as the shape, not as three remembered strings)",
+              not _paren_anchor_hits(_src26),
+              "dead-shape anchors found: %r" % (_paren_anchor_hits(_src26),))
+        check("S26/NEW-1: the suite buries its own dead anchors and bans the shape in ITSELF -- (:NNN and router-colon-NNN may not name a site in smoke_test.py either (L2 found the lesion one file over: two pointers, each off by about ten lines)",
+              not _paren_anchor_hits(_self26) and not _router_colon_hits(_self26),
+              "(: hits %r; router: hits %r" % (_paren_anchor_hits(_self26), _router_colon_hits(_self26)))
+        check("S26/F-a5: the --probe truth is stated everywhere it is used -- README and the run agree that an unhealthy answer (401: path exists, request refused) counts as NOT answered healthily (rc=1 stays, only the sentence lied)",
+              "failed to answer HEALTHILY" in _f26r and "answered on no Messages path" not in _f26r
+              and "no Anthropic Messages path answered HEALTHILY" in _f26,
+              "probe wording still splits the verdict and the exit code into two stories")
+        check("S26/shape: the empty-name BEHAVIOR stays fail-closed as DV-R14 decided -- S25/A2's locked refusal row and the named phrase are the lock; DV-R16 fixed the four sentences around it, not the door",
+              b'("empty name", b": r15' in open(__file__, "rb").read(),
+              "the locked refusal row vanished from the suite")
 
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]
