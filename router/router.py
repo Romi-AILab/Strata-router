@@ -2631,7 +2631,13 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True   # flag first (R7b-F1, see origin-form door)
             self._drain_body()
             if host:
-                self._json(403, {"error": {"message": "strata-router: foreign Host %r refused (rebinding guard)" % host}})
+                # DV-R20 (N-2, sharpened by rehearsal): quote the RAW header
+                # value, not the port-split derivative -- "Host: ::1" (a bare
+                # IPv6, illegal unbracketed but sendable) displayed as ':':
+                # the refusal was eating the very digits that made it one.
+                # The split value still picks WHICH refusal (empty split =
+                # the missing-Host shape below); only the quotation changes.
+                self._json(403, {"error": {"message": "strata-router: foreign Host %r refused (rebinding guard)" % raw_host}})
             else:
                 # DV-R19 (B-C2/N-1): an absent or empty Host is not a FOREIGN
                 # one -- the defense is identical (a guard that cannot see a

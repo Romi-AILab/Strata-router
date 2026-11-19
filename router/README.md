@@ -309,10 +309,21 @@ has no path filter -- every HEAD path forwards like any API request -- so a
 `HEAD /healthz` fired at the router is forwarded and answered by whichever
 box the lane borrows, and the path NAME travels with it. The numbers never
 leave the router; only the name does.
+GET itself is admitted BY NAME: `/v1/models`, `/models`, `/health`, and any
+path starting `/v1/` or ending `/models`. A GET to any other path -- a box's
+POST-only path included -- never reaches a box: it dies locally as a named
+`no route for GET <path>` 404 (DV-R20 spells the list because three probe
+rounds burned themselves debugging "lane" answers that never left the
+router).
 
 Per-request response headers say what happened: `x-strata-backend`,
 `x-strata-affinity`, `x-strata-placement` (`sticky` / `placed` / `overflow` /
 `migrated` / `pinned` / `last_resort`). `--no-expose-affinity` hides them.
+But the trio is a trio only when the request is KEYABLE: `x-strata-affinity`
+and `x-strata-placement` ride only answers whose body could yield an affinity
+key -- a keyless call, or a body the placer cannot key at all, gets
+`x-strata-backend` alone (DV-R20; the ledger has carried this carve-out for
+its counters since R6a-F1, and the header sentence had not caught up).
 `x-strata-*` is this router's own channel in BOTH directions: nothing
 carrying the prefix is ever forwarded upstream, and a lying box's
 `x-strata-*` response headers are stripped at the relay (DV-R12) -- every
@@ -332,8 +343,16 @@ stays homeless by contract, the dropped steer is logged by name, and only
 a real turn can re-seat it.
 
 The router injects your backend keys for callers that send none, so it knows
-its callers: it answers only requests whose `Host` is a loopback name (or the
-configured `listen` address) and rejects browser `Origin`/`Referer` from
+its callers: it answers only requests whose `Host` is one of
+exactly three literal names -- `127.0.0.1`, `localhost`, `::1` (a port suffix is dropped
+before the comparison; IPv6 may arrive bracketed, `[::1]` counts) -- or the
+configured `listen` address; bound to any other address, that one address
+becomes the ONLY admissible Host. The 127/8 FAMILY is not admitted as such:
+`Host: 127.0.0.2` at a loopback-bound router is a named 403 quoting the
+header's raw value -- the direction is over-refusal, never under, but a
+per-service operator who took "loopback" as the family used to eat a wall of
+refusals labeled foreign (DV-R20). The guard also rejects browser
+`Origin`/`Referer` from
 elsewhere -- the standard DNS-rebinding move (a web page re-resolving its own
 domain onto `127.0.0.1`) gets 403. A missing or empty `Host` is refused on
 EVERY version, HTTP/1.0 included: 1.0 may lawfully omit Host, but a rebinding
@@ -806,6 +825,12 @@ waits for the limiter.
   open chunk stream runs out at the documented read_timeout as VISIBLE
   truncation, never a forged terminator -- only a close the box actually
   performs can forge an ending (round-16 NEW-2 probed both shapes live).)
+  A duplicate `content-length` on a response is the same laundering in
+  quieter clothes: BOTH declared lengths die at the relay's strip -- the
+  router judges by bytes and the close, never by the declaration -- so a box
+  lying about its response length leaves the caller no trace to debug,
+  unlike the request, where two conflicting `content-length` lines die NAMED
+  at the door (DV-R20 names the asymmetry the S29 locks proved).
   The two boxes are trusted
   principals here -- yours and your friend's -- same class as trusting them
   with your prompts.
@@ -856,7 +881,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 621 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 629 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -936,8 +961,8 @@ survives a timed graceful drain instead of being eaten by a Windows RST) --
 and since R6b-FR-1 that drain law is UNIFORM -- and since DV-fix9 it is
 TOTAL, and since DV-fix10 it is ENUMERATION-PROOF: EVERY door that closes
 learns it -- every capacity/protocol refusal at the body reader (the 413s,
-the bad-framing 400s), every entry door that closes on a lying caller (the
-rebinding 403s included), every escape of the drain helper (bad, negative
+the bad-framing 400s), every entry door that closes on a lying caller
+(the rebinding 403s and the duplicate-content-length 400 included), every escape of the drain helper (bad, negative
 or under-declared Content-Length alike), the empty chunk-size refusal, the
 GET/HEAD chunked close (what that branch was RST-eating was a SUCCESSFUL
 200), the post-buffer refusals that close (a pinned request without the
@@ -1051,7 +1076,12 @@ never as a baseless ghost-debt; `OPTIONS` answers a named 405 on EVERY path
 (the README always said so -- it now does, body eaten first); the rebinding
 guard understands IPv6 literals in `Origin:` (admits `[::1]`, still 403s
 `[::2]`); a door-refusal against a chunked body still reaches its sender;
-header NAMES are token-checked in both directions of the relay; a
+header NAMES are policed in both directions of the relay,
+but the enforcement is asymmetric: request-side, a malformed header line dies NAMED at the entry
+parse; response-side there is no per-header filter to reach -- an unparseable
+name kills the box's whole answer at the stdlib parse and the caller gets the
+named 502 with NOTHING relayed (the send-loop backstop never runs on that
+shape); a bad name rides through on neither leg (DV-R20); a
 control_token carrying control bytes refuses boot and an embedded boot that
 skipped `apply_keys` honors its inline token instead of silently opening the
 gate; `operator_cancelled` makes the identity's last term countable; and the

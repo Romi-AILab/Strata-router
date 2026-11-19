@@ -7722,6 +7722,65 @@ def main():
                  "closed the connection before any final answer" in _rd27,
                  "may still be running it" in _rd27))
 
+        # ---- S30 (DV-R20): the harvest of convergence round 3 (round 18) --
+        # the whole harvest is WORDS and ONE line of DISPLAY, zero wiring.
+        # A-C1 (re-graded P4): the guard admits THREE literal names, not the
+        # 127/8 family -- an operator who read "a loopback name" as the family
+        # and sends Host: 127.0.0.2 to a loopback-bound router eats a wall of
+        # 403s labeled foreign (fail-closed: over-refusal, never under).
+        # B-C1: the observability trio has an un-written carve-out -- affinity
+        # and placement ride only bodies that yield an affinity key.
+        # B-C2: "token-checked in both directions" over-promises a symmetric
+        # filter: on the response leg an unparseable name kills the WHOLE
+        # answer named at the parse; the per-header backstop never runs.
+        # B-C3: a duplicate content-length on a RESPONSE is whitewashed at the
+        # strip -- both declared lengths die, zero trace, while the request
+        # door names the same crime. B-C4: the GET whitelist is real law the
+        # README never spelled -- anything unlisted dies locally named.
+        # N-1 (red team's catch of the council's own DV-fix19 debt): the
+        # stress-round paragraph claims EVERY closing door is enumerated while
+        # the duplicate-content-length door scored ZERO grep hits here.
+        # N-2: the 403 displayed its OWN port-split truncation (Host: ::1 was
+        # reported as '::') -- the quote now carries the raw header value.
+        print("S30) DV-R20: nine honesty locks on this harvest -- six README sentences told precisely, one README omission closed by name, one display line quoted from the wire, one zero-wiring self-lock (lanefree: the DV-R19 anchors the harvest must not have touched still stand at exactly their counts)")
+        check("S30/loopback: the loopback law told as what the guard IS (A-C1: 'a loopback name' narrates the 127/8 family; the door is three literal names, and 127.0.0.2 at a loopback listen is a named foreign refusal -- wording that can send an operator the wrong way, the grade the council settled)",
+              "exactly three literal names" in _rd
+              and "The 127/8 FAMILY is not admitted" in _rd,
+              "three=%r fam=%r" % ("exactly three literal names" in _rd,
+                                   "The 127/8 FAMILY is not admitted" in _rd))
+        check("S30/trio: the header trio's keyability carve-out written at last (B-C1: keyless or key-less-yielding bodies get x-strata-backend alone; the ledger has carried this carve-out since R6a-F1 while the header sentence stayed unconditional)",
+              "only when the request is KEYABLE" in _rd,
+              "keyable=%r" % ("only when the request is KEYABLE" in _rd))
+        check("S30/tokencheck: the token-checked sentence told per-leg (B-C2: request-side dies NAMED at the entry parse; response-side there is no per-header filter to reach -- the parse of the box's answer dies first, whole, named, NOTHING relayed; the symmetric wording implied a runner that is a backstop behind a wall)",
+              "the enforcement is asymmetric" in _rd
+              and "token-checked in both directions of the relay; a" not in _rd,
+              "asym=%r old=%r" % ("the enforcement is asymmetric" in _rd,
+                                  "token-checked in both directions of the relay; a" in _rd))
+        check("S30/dupresp: the response-leg duplicate content-length named as whitewash (B-C3 runtime: caller saw clean chunked, NEITHER declared value, the trust-class paragraph documented forged endings but not the declarations that never even make it to a judgment)",
+              "quieter clothes" in _rd,
+              "dupresp=%r" % ("quieter clothes" in _rd))
+        check("S30/getwl: the GET whitelist spelled out (B-C4: admitted by name -- GET_PATHS, the /v1/ prefix, the /models suffix; everything else dies locally as a named no-route-for-GET and the box never sees it; three faces burned on this 404 while probing other lanes)",
+              "admitted BY NAME" in _rd and "no route for GET" in _rd,
+              "wl=%r named=%r" % ("admitted BY NAME" in _rd,
+                                  "no route for GET" in _rd))
+        check("S30/stressround (N-1): the stress-round enumeration names the duplicate-content-length door it always enforced -- named on the wire, locked in S29, absent from the one wall that claims the list is complete (the council's own DV-fix19 debt, booked by the red team)",
+              "the rebinding 403s and the duplicate-content-length 400" in _rd,
+              "enum=%r" % ("the rebinding 403s and the duplicate-content-length 400" in _rd))
+        check("S30/display: the 403 quotes the RAW Host value, not its port-split truncation (N-2, sharpened by the pre-fix rehearsal: 'Host: ::1' displayed as ':' -- two truncations deep from what the wire actually said; the split value still picks WHICH refusal, only the quotation changes)",
+              '"strata-router: foreign Host %r refused (rebinding guard)" % raw_host' in _src27
+              and '"strata-router: foreign Host %r refused (rebinding guard)" % host}' not in _src27,
+              "raw=%r old=%r" % ('"strata-router: foreign Host %r refused (rebinding guard)" % raw_host' in _src27,
+                                 '"strata-router: foreign Host %r refused (rebinding guard)" % host}' in _src27))
+        check("S30/lanefree: DV-fix20 changed NO wiring -- the display line and six README sentences are the whole harvest, so the anchors the harvest must not have touched still stand at their DV-R19 counts (a wording round that moved an engine count lied about being a wording round)",
+              _src27.count("duplicate content-length refused") == 1
+              and _src27.count("missing Host refused") == 1
+              and "_saw_1xx" in _src27
+              and _src27.count("unparseable box framing") == 1,
+              "dup=%d nohost=%d saw1xx=%r frame=%d"
+              % (_src27.count("duplicate content-length refused"),
+                 _src27.count("missing Host refused"), "_saw_1xx" in _src27,
+                 _src27.count("unparseable box framing")))
+
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]
         _num25 = (_ft25.split("# ", 1)[1].split(" checks", 1)[0].strip()
