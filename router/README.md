@@ -126,7 +126,7 @@ Every knob exists as a CLI flag *and* as a `router.json` key (the flag wins;
 |------|-----------|---------|---------|
 | `--config FILE` | — | — | JSON file with any keys below. |
 | `--backend ID=URL[,/prefix]` | `backends` | `[]` | One entry per box, repeat per box. |
-| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards; a wildcard -- anything inet_aton resolves to 0.0.0.0 (`0.0.0.0`/`0`/`00`/`0x0`/`*`) -- refuses boot (the guard would 403 every caller); an unresolvable value dies at the bind BY NAME, never as a traceback. Surrounding space / case are normalized once, at the door. And the boot never waits on a name lookup it does not need: the stdlib's `server_bind` would ask `getfqdn` of the listen address -- a reverse DNS stall of ~5 s on Windows for a bindable address with no name (measured on `127.0.0.2`, and the tailnet bind is exactly that shape) -- so the server name is taken from the one truth already in hand, the listen IP itself; bind to serving is one bind, nothing else. |
+| `--listen ADDR` | `listen` | `127.0.0.1` | Bind address; a non-loopback bind tightens the Host guards; a wildcard -- anything inet_aton resolves to 0.0.0.0 (`0.0.0.0`/`0`/`0.0`/`00`/`0x0`/`*`) -- refuses boot (the guard would 403 every caller); an unresolvable value dies at the bind BY NAME, never as a traceback. Surrounding space / case are normalized once, at the door. And the boot never waits on a name lookup it does not need: the stdlib's `server_bind` would ask `getfqdn` of the listen address -- a reverse DNS stall of ~5 s on Windows for a bindable address with no name (measured on `127.0.0.2`, and the tailnet bind is exactly that shape) -- so the server name is taken from the one truth already in hand, the listen IP itself; bind to serving is one bind, nothing else. |
 | `--port N` | `port` | `8088` | The router's own port. |
 | `--path-prefix /P` | `path_prefix` | `""` | Prefix prepended to every backend path (e.g. `/anthropic`). |
 | `--keys-file FILE` | `keys_file` | `""` | Backend-id→key sidecar; defaults to `router.keys.json` next to `--config` (git-ignored). |
@@ -244,6 +244,16 @@ behavior, DV-R4 B-2). The unblock is box-side law, not router-side will.
   may still complete there -- retrying can duplicate the turn*, and the box
   **stays in the pool** (rule 4: a slow box is not a dead box). Do not "fix"
   those by lowering the timeout; raise it.
+  That same `backend_timeout` type is a machine-readable BUCKET shared by four
+  ways a sent request can die without a final answer, and the human sentence
+  names the way that actually died (DV-R19): a box that closes the lane
+  without answering gets "closed the connection before any final answer"; one
+  that sent a `1xx` and then died gets "answered with an informational status,
+  then closed the connection before the final answer" (or "sent no final
+  response within the read timeout" when silence is what timed out); only the
+  genuine queue stall still reads "did not start answering within the read
+  timeout" -- a sentence must never narrate a timeout that never ran. The
+  retry-duplication tail is shared by all four because it is true of all four.
 * Do **not** enable the admission cap with `--queue-timeout` on Strata unless you
   also turn on client retries for 429. Without the cap Strata just queues, which
   is the behaviour you want to keep.
@@ -325,7 +335,11 @@ The router injects your backend keys for callers that send none, so it knows
 its callers: it answers only requests whose `Host` is a loopback name (or the
 configured `listen` address) and rejects browser `Origin`/`Referer` from
 elsewhere -- the standard DNS-rebinding move (a web page re-resolving its own
-domain onto `127.0.0.1`) gets 403. That guard is why `listen` must name the
+domain onto `127.0.0.1`) gets 403. A missing or empty `Host` is refused on
+EVERY version, HTTP/1.0 included: 1.0 may lawfully omit Host, but a rebinding
+guard that cannot see a Host refuses it, named -- `missing Host refused`,
+never a claim that an empty string is foreign (DV-R19). That guard is why
+`listen` must name the
 ONE exact address your clients use: booting with a non-loopback `listen` logs
 a loud warning, and a wildcard `listen` -- every spelling the resolver
 agrees is INADDR_ANY under inet_aton rules (`0.0.0.0`, `0`, `0.0`, `00`,
@@ -842,7 +856,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 605 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 621 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -1009,8 +1023,14 @@ length axis got the status axis's own normalization (DV-R18:
 read-until-close on a lane the box promised never to close was a
 full-read_timeout UNNAMED strand; the program's 20th same-shape lesion,
 6th in the framing family); inline typed junk (`true` as a key or token, a dict
-as a rewrite value) refuses boot like the keys file already did. And the
-distribution edges: `metadata.user_id` as an int still SCOPES (three
+as a rewrite value) refuses boot like the keys file already did. The DV-R18
+door's own last sentence keeps the family's honest shape (DV-R19): it says
+NOTHING was relayed AND that the box received the request and may still be
+running it -- retrying can duplicate the turn; an unparseable final PROVES
+the box got the request, and a closed lane never stops its turn, so the door
+asserts only what it can see (the old wording claimed the request was "not
+still running on the box" -- the unobservable opposite of its own retry-warning
+doctrine). And the distribution edges: `metadata.user_id` as an int still SCOPES (three
 sessions with an identical first turn get three lanes, and 12345 is not
 "12345"); anon lanes hash the FULL body (two malformed bodies past 64 KB
 with an identical prefix part ways); and the `last_resort` counter is honest

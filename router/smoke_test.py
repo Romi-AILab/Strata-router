@@ -7492,6 +7492,236 @@ def main():
               % ("refused by name before the caller is opened" in _rd27,
                  "never a forged terminator" in _rd27))
 
+        # ---- S29 (DV-R19): the harvest of convergence round 2 (A-C1/N-3/B-C4
+        # truthfulness, B-C3/N-2 naming, B-C1/B-C2/N-1 wording, A-C2 table) --
+        # every sentence a refusal speaks must describe the death that actually
+        # died; the router asserts only what it can see.
+        print("S29) DV-R19: the 502 sentences tell the truth about WHICH death died -- shape-selective text at the ONE stall branch (the absorb loop carries the fact that a 1xx arrived); the DV-R18 door stops asserting the unobservable opposite of its own retry-doctrine; a duplicate inbound content-length dies NAMED (the reject-set family's last first-wins member); a missing Host is named missing, not 'foreign', on EVERY version; the boot line names the box lane it bounds (A-C1 r17c2/r17c3b: the old text narrated a 0.00s 'timeout' that never ran -- while the SAME sentence is TRUE on a real 2.52s stall and must survive for it; N-3: 1xx deaths ate that false text too; B-C4: an ANSWERING box provably received the request -- r17c3's 20s-sleep box and L2's full=True receipts make 'not still running' unprovable; B-C3/N-2 r17c3: 5+7 and 5+zz both passed first-wins silent while zz+5 died only because the FIRST value was the bad one))")
+        _S29_BOX, _S29_RTR = 9195, 9196
+        _free25(_S29_BOX)
+        _free25(_S29_RTR)
+        _MODE29 = {"m": "final"}
+
+        def _svc29(c29):                    # full keep-alive box, mode per
+            try:                            # request (the S28 pattern)
+                c29.settimeout(8)
+                while True:
+                    buf29 = b""
+                    while b"\r\n\r\n" not in buf29:
+                        g29 = c29.recv(4096)
+                        if not g29:
+                            return
+                        buf29 += g29
+                    head29, _, rest29 = buf29.partition(b"\r\n\r\n")
+                    cl29 = 0
+                    for ln29 in head29.split(b"\r\n")[1:]:
+                        if ln29.lower().startswith(b"content-length:"):
+                            cl29 = int(ln29.split(b":", 1)[1])
+                    have29 = len(rest29)
+                    while have29 < cl29:    # drain the declared body FIRST
+                        g29 = c29.recv(65536)
+                        if not g29:
+                            break
+                        have29 += len(g29)
+                    m29 = _MODE29["m"]
+                    if m29 == "keof":
+                        return              # read it, answered nothing, FIN
+                    if m29 == "102eof":
+                        c29.sendall(b"HTTP/1.1 102 Processing\r\nx: y\r\n\r\n")
+                        return              # began, then died
+                    if m29 == "101close":
+                        c29.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                                    b"connection: close\r\n\r\n")
+                        return
+                    if m29 == "102hold":
+                        c29.sendall(b"HTTP/1.1 102 Processing\r\nx: y\r\n\r\n")
+                        time.sleep(6.0)     # informational, then silence
+                        continue
+                    if m29 == "hold":
+                        time.sleep(6.0)     # silence on an open lane: the REAL timeout
+                        continue
+                    if m29 == "noframe":    # the DV-R18 door's own shape
+                        c29.sendall(b"HTTP/1.1 200 OK\r\nx-note: none\r\n\r\n")
+                        time.sleep(4.0)
+                        continue
+                    c29.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                                b"content-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}")
+                    return
+            except OSError:
+                pass
+            finally:
+                try:
+                    c29.close()
+                except OSError:
+                    pass
+
+        def _box29(sock29):
+            while True:
+                try:
+                    c29, _ = sock29.accept()
+                except OSError:
+                    return
+                threading.Thread(target=_svc29, args=(c29,), daemon=True).start()
+
+        def _probe29(data29):
+            s29 = socket.create_connection(("127.0.0.1", _S29_RTR), timeout=8)
+            s29.sendall(data29)
+            t029 = time.monotonic()
+            got29 = b""
+            tf29 = None
+            s29.settimeout(3.0)             # TTFB is the bound (the S27 lesson),
+            try:                            # never waiting for a keep-alive FIN
+                while True:
+                    g29 = s29.recv(65536)
+                    if not g29:
+                        break
+                    if tf29 is None:
+                        tf29 = time.monotonic() - t029
+                    got29 += g29
+            except OSError:
+                pass
+            s29.close()
+            return got29, (tf29 if tf29 is not None else time.monotonic() - t029)
+
+        _TURN29 = (b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                   b"content-length: 5\r\n\r\nzzzzz")
+
+        def _row29(label, law, mode29, want, data29=None, tlo=None, thi=2.6):
+            _MODE29["m"] = mode29
+            _d29, _t29 = _probe29(data29 or _TURN29)
+            _ok29 = want(_d29)
+            if tlo is not None:
+                _ok29 = _ok29 and _t29 > tlo
+            _ok29 = _ok29 and _t29 < thi
+            check(label + ": " + law, _ok29,
+                  "first=%r ttfb=%.2fs body=%r"
+                  % (_d29.split(b"\r\n", 1)[0][:40], _t29, _d29[-260:]))
+
+        _ls29 = _listen25(_S29_BOX)
+        threading.Thread(target=_box29, args=(_ls29,), daemon=True).start()
+        _p29 = _boot25("smoke-honesty.json", _S29_RTR, _S29_BOX,
+                       {"status_interval": 300, "read_timeout": 2.0})
+        try:
+            _row29(
+                "S29/keof",
+                "a box that read the request and closed the lane with ZERO bytes is told as a CLOSED LANE ('then closed the connection before any final answer'), not as a timeout -- r17c2 measured the old text arriving at 0.00s while the router's OWN log said 'no first byte after 0.00s', and README:242 binds the timeout wording to real --read-timeout exceeds with advice ('raise it') that is inert on a closed lane; the honest retry tail stays",
+                "keof",
+                lambda d: d.startswith(b"HTTP/1.1 502")
+                and b"closed the connection before any final answer" in d
+                and b"did not start answering" not in d
+                and b"may still complete there" in d)
+            _row29(
+                "S29/102eof",
+                "an informational 102 that arrived and then died tells the truth: an ANSWER of shape 1xx arrived -- the same 289 bytes as the zero-byte death used to be one sentence for two different deaths (N-3), and 'did not start answering' was contradicted by the 102 on the wire",
+                "102eof",
+                lambda d: d.startswith(b"HTTP/1.1 502")
+                and b"answered with an informational status, then closed the connection before the final answer" in d
+                and b"did not start answering" not in d)
+            _row29(
+                "S29/101close",
+                "the same honest sentence for the 101 death (holding #1's r17 erratum: these deaths land on this face, not the parse face -- the face is honest now too)",
+                "101close",
+                lambda d: d.startswith(b"HTTP/1.1 502")
+                and b"answered with an informational status, then closed the connection before the final answer" in d)
+            _row29(
+                "S29/102hold",
+                "informational, then silence until the clock runs out: the timeout IS real now but 'did not start answering' still contradicts the 102 -- the fourth true shape ('sent no final response within the read timeout'), bounded by ARRIVAL",
+                "102hold",
+                lambda d: d.startswith(b"HTTP/1.1 502")
+                and b"began answering (informational status) but sent no final response within the read timeout" in d
+                and b"did not start answering" not in d,
+                tlo=1.6)
+            _row29(
+                "S29/truetmo boundary (the honest face of the OLD sentence)",
+                "the genuine queue stall -- silence with no 1xx for the whole read_timeout -- KEEPS the exact old wording byte for byte (r17c3b proved it TRUE on this shape at 2.52s; a fix that deleted a true sentence to fix a false one would be the same disease wearing the cure's face)",
+                "hold",
+                lambda d: d.startswith(b"HTTP/1.1 502")
+                and b"accepted the request but did not start answering within the read timeout" in d
+                and b"may still complete there" in d,
+                tlo=1.6)
+            _row29(
+                "S29/door-sentence",
+                "the DV-R18 door (behavior unchanged: named, bounded, before the caller opens) no longer asserts the unobservable: an ANSWERING box provably received the request -- council r17c1's box was ALIVE mid-request 20 s after the lane closed, L2's receipt said full=True bodylen=97 -- and the router's own platform-fact doc admits unwatched boxes run to completion; the text now mirrors the family's honest doctrine (may still be running -- retrying can duplicate the turn)",
+                "noframe",
+                lambda d: d.startswith(b"HTTP/1.1 502")
+                and b"could not parse" in d
+                and b"the box received the request and may still be running it" in d
+                and b"not still running" not in d)
+            _MODE29["m"] = "final"
+            _row29(
+                "S29/dupcl-conflict",
+                "inbound duplicate CONFLICTING content-length ('5' then '7', body 5) -- the last first-wins member of the entry reject-set family (every other framing adversary dies named: hostile chunk sizes, space-in-name, bare CR, negative CL): RFC 7230 3.3.3 says a recipient cannot pick a winner, so neither does this router (r17c3: 200 silent at 0.003s before the door; the box lane was always re-derived, so the gap was naming, never desync)",
+                "final",
+                lambda d: d.startswith(b"HTTP/1.1 400")
+                and b"duplicate content-length refused" in d,
+                data29=b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                       b"content-length: 5\r\ncontent-length: 7\r\n\r\nzzzzz")
+            _row29(
+                "S29/dupcl-garbage",
+                "the SECOND value may be garbage ('5' then 'zz') -- the bad-CL family only audited the first value, so int('zz') on line two was never reached (N-2, r17c3: silent 200); the named door audits EVERY declared length when there is more than one",
+                "final",
+                lambda d: d.startswith(b"HTTP/1.1 400")
+                and b"duplicate content-length refused" in d,
+                data29=b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                       b"content-length: 5\r\ncontent-length: zz\r\n\r\nzzzzz")
+            _row29(
+                "S29/dupcl-identical boundary",
+                "the RFC's own tolerance stays: the same length declared twice ('5' and '5') is not a conflict -- it passes and the turn completes (a door that fires on agreement would refuse well-behaved clients for the RFC's own non-error; green on BOTH trees)",
+                "final",
+                lambda d: d.startswith(b"HTTP/1.1 200") and b'{"ok":1}' in d,
+                data29=b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                       b"content-length: 5\r\ncontent-length: 5\r\n\r\nzzzzz")
+            _row29(
+                "S29/nohost11",
+                "HTTP/1.1 without a Host header is refused as what it is: a MISSING Host (RFC 7230 wants 400 for the missing one, and calling an empty string 'foreign' narrates a peer that never appeared -- the defense itself is sound: framed, bounded, arriving)",
+                "final",
+                lambda d: d.startswith(b"HTTP/1.1 403")
+                and b"missing Host refused" in d
+                and b"foreign Host ''" not in d,
+                data29=b"POST /v1/messages HTTP/1.1\r\ncontent-length: 5\r\n\r\nzzzzz")
+            _row29(
+                "S29/nohost10 (N-1)",
+                "HTTP/1.0 may LAWFULLY omit Host -- the old text called even that legitimate request's empty Host 'foreign'; the defense (a guard that cannot see a Host cannot check rebinding, fail-closed named) is exactly what the honest wording now states",
+                "final",
+                lambda d: d.startswith(b"HTTP/1.1 403") and b"missing Host refused" in d,
+                data29=b"POST /v1/messages HTTP/1.0\r\ncontent-length: 5\r\n\r\nzzzzz")
+            _row29(
+                "S29/foreign boundary",
+                "a TRUE foreign Host keeps the exact old sentence -- the fix renames only the empty case (green on BOTH trees; the wording surgery cuts just the '' shape)",
+                "final",
+                lambda d: d.startswith(b"HTTP/1.1 403")
+                and b"foreign Host 'evil.example' refused" in d,
+                data29=b"POST /v1/messages HTTP/1.1\r\nhost: evil.example\r\n"
+                       b"content-length: 5\r\n\r\nzzzzz")
+            _d29, _t29 = _probe29(_TURN29)
+            _h29 = get(_S29_RTR, "/healthz")[0]
+            check("S29/lane survives: after four honest deaths, one named 400 family and two renamed 403s the next true answer lands whole and healthz answers (a truthfulness fix that poisoned a lane would be the program's oldest lesson in new clothes)",
+                  _d29.startswith(b"HTTP/1.1 200") and b'{"ok":1}' in _d29 and _h29 == 200,
+                  "first=%r healthz=%d" % (_d29.split(b"\r\n", 1)[0][:40], _h29))
+        finally:
+            _term(_p29)
+            try:
+                _ls29.close()
+            except OSError:
+                pass
+        check("S29/bootlabel: the boot line names the lane it bounds -- the old 'client read timeout' printed the BOX-response cap under a caller-side name (B-C1: r17c1/c3b proved the same number IS the box cap, 502@2.515s, while caller stalls run 12+ s uncapped exactly as the README's trust model documents)",
+              "box lane read timeout" in _src27 and "client read timeout" not in _src27,
+              "new=%r old=%r" % ("box lane read timeout" in _src27,
+                                 "client read timeout" in _src27))
+        _dup29 = _src27.count("duplicate content-length refused")
+        check("S29/dupdoor: the duplicate-CL refusal is ONE raise at the ONE parse choke every method already crosses (DV-R17's upstream-point doctrine: the malformed-header-line family proved where the only honest gate for inbound framing lives; a second door elsewhere would re-grow the drift)",
+              _dup29 == 1, "raises=%d" % _dup29)
+        check("S29/doc: the record carries all four sentences, the completed wildcard table and the missing-Host cell -- the footer number above, the README:129 row now listing `0.0` beside its five siblings (A-C2: the table listed five spellings while the prose and the boot battery listed six), and the rebinding paragraph naming the empty-Host case the guard always refused but never spelled out",
+              "`0.0.0.0`/`0`/`0.0`/`00`/`0x0`/`*`" in _rd27
+              and "missing Host refused" in _rd27
+              and "closed the connection before any final answer" in _rd27
+              and "may still be running it" in _rd27,
+              "wildcard=%r nohost=%r closed=%r door=%r"
+              % ("`0.0.0.0`/`0`/`0.0`/`00`/`0x0`/`*`" in _rd27,
+                 "missing Host refused" in _rd27,
+                 "closed the connection before any final answer" in _rd27,
+                 "may still be running it" in _rd27))
+
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]
         _num25 = (_ft25.split("# ", 1)[1].split(" checks", 1)[0].strip()

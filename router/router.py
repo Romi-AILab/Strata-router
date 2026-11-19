@@ -2349,31 +2349,49 @@ class _FinalResponse(http.client.HTTPResponse):
     # probed both shapes live and RE-GRADED them out of this family; the
     # face's header-decidable boundary is where fixability lives).
     def begin(self):
-        while True:
-            self.headers = None          # re-arm the stdlib's idempotence guard
-            http.client.HTTPResponse.begin(self)
-            if self.status >= 200:
-                break
-        # length is None at this point means the box declared no decodable
-        # body framing at all: HEAD/204/304 were already zeroed upstream by
-        # the stdlib (3.13 zeros them -- DV-R12's runtime witness), and a
-        # parseable CL or chunked marker set one. What is left promises a
-        # body on a lane that promises never to close -- unless the close
-        # itself was DECLARED, which is the only framing the 1.0-style
-        # read-until-close lawfully stands on. Judge the declaration from
-        # the version and the Connection header, NEVER from will_close (the
-        # 3.13.3 inference above): a 1.1 final must SAY close; anything
-        # older closes unless it says keep-alive.
-        if self.length is None and not self.chunked:
-            _conn18 = (self.headers.get("connection") or "").lower()
-            if self.version == 11:
-                _decl18 = "close" in _conn18
-            else:
-                _decl18 = ("keep-alive" not in _conn18
-                           and self.headers.get("keep-alive") is None)
-            if not _decl18:
-                raise http.client.HTTPException(
-                    "unparseable box framing: keep-alive final with no decodable body length")
+        try:
+            while True:
+                self.headers = None          # re-arm the stdlib's idempotence guard
+                http.client.HTTPResponse.begin(self)
+                if self.status >= 200:
+                    break
+                # DV-R19 (A-C1/N-3): an absorbed informational status IS an
+                # answer of a kind -- and the fact must survive on the
+                # exception, because a death after a 1xx arrives exactly like
+                # a death before anything (an EOF/timeout exception), and only
+                # this loop can tell them apart for the sentence the caller
+                # is given. Both death roads must carry it: the framing EOF
+                # arrives as an HTTPException, and a stall after the 1xx
+                # arrives on the SECOND begin()'s read as a socket timeout --
+                # TimeoutError, an OSError, not an HTTPException (the 102hold
+                # rehearsal row caught the first version of this annotation
+                # answering the stalled-after-1xx box with the never-answered
+                # sentence -- the exact lie the fix exists to kill).
+                self._saw_1xx = True
+            # length is None at this point means the box declared no decodable
+            # body framing at all: HEAD/204/304 were already zeroed upstream by
+            # the stdlib (3.13 zeros them -- DV-R12's runtime witness), and a
+            # parseable CL or chunked marker set one. What is left promises a
+            # body on a lane that promises never to close -- unless the close
+            # itself was DECLARED, which is the only framing the 1.0-style
+            # read-until-close lawfully stands on. Judge the declaration from
+            # the version and the Connection header, NEVER from will_close (the
+            # 3.13.3 inference above): a 1.1 final must SAY close; anything
+            # older closes unless it says keep-alive.
+            if self.length is None and not self.chunked:
+                _conn18 = (self.headers.get("connection") or "").lower()
+                if self.version == 11:
+                    _decl18 = "close" in _conn18
+                else:
+                    _decl18 = ("keep-alive" not in _conn18
+                               and self.headers.get("keep-alive") is None)
+                if not _decl18:
+                    raise http.client.HTTPException(
+                        "unparseable box framing: keep-alive final with no decodable body length")
+        except (http.client.HTTPException, OSError) as _ex19:
+            if getattr(self, "_saw_1xx", False):
+                _ex19.saw_informational = True
+            raise
 
 
 def open_connection(be, connect_timeout, read_timeout):
@@ -2612,7 +2630,16 @@ class Handler(BaseHTTPRequestHandler):
         if host not in allowed:
             self.close_connection = True   # flag first (R7b-F1, see origin-form door)
             self._drain_body()
-            self._json(403, {"error": {"message": "strata-router: foreign Host %r refused (rebinding guard)" % host}})
+            if host:
+                self._json(403, {"error": {"message": "strata-router: foreign Host %r refused (rebinding guard)" % host}})
+            else:
+                # DV-R19 (B-C2/N-1): an absent or empty Host is not a FOREIGN
+                # one -- the defense is identical (a guard that cannot see a
+                # Host cannot check rebinding: fail-closed, framed, arriving)
+                # but HTTP/1.0 may lawfully omit Host, so the sentence names
+                # what is missing on every version instead of calling an
+                # empty string a foreign peer that never appeared.
+                self._json(403, {"error": {"message": "strata-router: missing Host refused (rebinding guard -- a guard that cannot see a Host cannot check it, on any version)"}})
             return True
         org = self.headers.get("origin") or self.headers.get("referer")
         if org:
@@ -2688,6 +2715,26 @@ class Handler(BaseHTTPRequestHandler):
             self._quiet_finish()
             self._json(400, {"error": {"message": "strata-router: malformed header line -- %s; such a line either makes the inbound stdlib parse drop every header behind it (a declared body would vanish) or carries a zero-validity name -- either way this request is refused here, named" % bad}})
             return False
+        _cls19 = self.headers.get_all("content-length") or []
+        if len(_cls19) > 1:
+            # DV-R19 (B-C3/N-2): the entry reject-set family's last first-wins
+            # member. RFC 7230 3.3.3: a recipient that sees multiple
+            # Content-Length values with any disagreement CANNOT pick a
+            # winner -- and the bad-CL audit only ever read the FIRST value,
+            # so '5' then 'zz' passed silent (N-2, r17c3). ONE raise, at the
+            # ONE parse choke every method already crosses (DV-R17's upstream
+            # doctrine). Identical values are the RFC's own tolerance and
+            # keep passing; a single value stays exactly the old door's
+            # business (negative/invalid -- the S25/A6 wire lock guards it).
+            try:
+                _v19 = [int(_v19x.strip()) for _v19x in _cls19]
+            except ValueError:
+                _v19 = None
+            if _v19 is None or len(set(_v19)) != 1:
+                self.close_connection = True   # flag FIRST (family law)
+                self._quiet_finish()
+                self._json(400, {"error": {"message": "strata-router: duplicate content-length refused -- conflicting declared body lengths leave no winner to pick (RFC 7230 3.3.3)"}})
+                return False
         return True
 
     def _hdr_shape_ok(self):
@@ -3671,10 +3718,18 @@ class Handler(BaseHTTPRequestHandler):
                 elif sent and isinstance(exc, http.client.HTTPException) and not isinstance(exc, http.client.RemoteDisconnected):
                     # The box DID answer -- with framing this router refuses
                     # to parse (LineTooLong, InvalidURL...). Nothing was
-                    # relayed and nothing is still running to duplicate; the
-                    # stall wording below ("may still complete") would be a
-                    # lie here. RemoteDisconnected is a BadStatusLine that
-                    # really NEVER answered, so it keeps the stall branch.
+                    # relayed: that much the router can SEE. DV-R19 (B-C4):
+                    # the old wording went further and asserted the request
+                    # was "not still running on the box" -- but an ANSWERING
+                    # box provably received the request, and a closed lane
+                    # never stops its turn (this file's platform-fact doc
+                    # above admits unwatched boxes run to completion; r17c1's
+                    # box was alive mid-request 20 s after the lane closed,
+                    # L2's receipt was full=True bodylen=97). The retry tail
+                    # below is the family's honest doctrine and belongs here
+                    # too -- the door asserts only what it can see.
+                    # RemoteDisconnected is a BadStatusLine that really NEVER
+                    # answered, so it keeps the stall branch.
                     backend.note_stream_error("unparseable box response: " + type(exc).__name__)
                     # F-3 (DV-R8 P2): this door closes too -- drain BEFORE
                     # writing. The red team caught this window as a race (the
@@ -3685,8 +3740,9 @@ class Handler(BaseHTTPRequestHandler):
                                           # itself -- late surplus escaped it
                     self._json(502, {"error": {
                         "message": "strata-router: backend " + backend.id + " answered with a response the router "
-                                   "could not parse (" + type(exc).__name__ + "). Nothing was relayed to the caller, "
-                                   "and the request is not still running on the box.",
+                                   "could not parse (" + type(exc).__name__ + "). Nothing was relayed to the caller; "
+                                   "the box received the request and may still be running it -- retrying can "
+                                   "duplicate the turn.",
                         "type": "backend_protocol_error",
                     }})
                     LOG.warning("%s %s -> %s UNPARSEABLE box response after %.2fs: %s",
@@ -3696,12 +3752,41 @@ class Handler(BaseHTTPRequestHandler):
                     # (likely parked in its FIFO) and may still finish there.
                     # A slow box is not a dead box (rule 4): record the stall,
                     # do NOT eject, and do not invite a retry that would run
-                    # the same agent turn a second time.
+                    # the same agent turn a second time. DV-R19 (A-C1/N-3):
+                    # the FOUR ways a sent request dies without a final answer
+                    # used to share ONE timeout sentence -- narrating a clock
+                    # that never ran for the lane-closed deaths (r17c2: the
+                    # same 289 bytes at 0.00s, the router's own log convicting
+                    # it; N-3: 1xx deaths wearing "did not start answering"
+                    # while a 102 sat on the wire). The sentence is now chosen
+                    # from what actually died: the exception class says
+                    # clock-vs-close, and the absorb loop's saw_informational
+                    # says whether anything arrived first. The TRUE stall
+                    # keeps the old sentence BYTE FOR BYTE (r17c3b proved it
+                    # true on that shape at 2.52s; a fix that deletes a true
+                    # sentence to repair a false one is the disease wearing
+                    # the cure's face). The type stays backend_timeout: the
+                    # type is a machine bucket, the sentence is prose -- only
+                    # the prose must be true.
+                    _tmo19 = isinstance(exc, (socket.timeout, TimeoutError))
+                    _info19 = bool(getattr(exc, "saw_informational", False))
+                    if _info19 and _tmo19:
+                        _said19 = ("began answering (informational status) but "
+                                   "sent no final response within the read timeout")
+                    elif _info19:
+                        _said19 = ("answered with an informational status, then "
+                                   "closed the connection before the final answer")
+                    elif _tmo19:
+                        _said19 = ("accepted the request but did not start "
+                                   "answering within the read timeout")
+                    else:
+                        _said19 = ("accepted the request, then closed the "
+                                   "connection before any final answer")
                     backend.note_stream_error("no first byte after send: " + type(exc).__name__)
                     backend.note_timeout_release()  # our corpse is not the owner's load (L2-3/M2)
                     self._json(502, {"error": {
-                        "message": "strata-router: backend " + backend.id + " accepted the request but did not start "
-                                   "answering within the read timeout. It stays in rotation. The request was handed "
+                        "message": "strata-router: backend " + backend.id + " " + _said19
+                                   + ". It stays in rotation. The request was handed "
                                    "to that box and may still complete there -- retrying can duplicate the turn.",
                         "type": "backend_timeout",
                     }})
@@ -5077,7 +5162,7 @@ def main(argv=None):
         "listening on http://%s:%s -- affinity+least-queued passthrough, no rate limiting, "
         "queue stays in the backends", cfg["listen"], cfg["port"],
     )
-    LOG.info("client read timeout: %s",
+    LOG.info("box lane read timeout: %s (caller lanes are uncapped by design -- see README)",
              resolve_read_timeout(cfg.get("read_timeout")) or "disabled")
     LOG.info("control surface: %s",
              "GATED -- x-strata-pin and sticky/clear require x-strata-control"
