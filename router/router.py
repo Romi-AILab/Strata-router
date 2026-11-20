@@ -2886,10 +2886,22 @@ class Handler(BaseHTTPRequestHandler):
         late arrivals inside the window are discarded too. Nothing waits
         past the window: bytes later than that make any wait on this socket
         unbounded -- a thread-starvation door -- so the guarantee is BOUNDED,
-        and the README states the boundary. Honest requests pay the window
-        ONLY on closing paths (refusal doors); keep-alive doors never call
-        this, so pipelining stays untouched (N-5) and the hot paths stay at
-        0.00 s (healthz guards ride the suite)."""
+        and the README states the boundary. THE WINDOW'S HONEST SCOPE
+        (DV-R22 F-1; the retired claim said the window was
+        refusal-door-only and that the hot paths never pass here -- the
+        council measured both halves false on the live box lane): EVERY
+        door that closes pays ONE window -- refusals AND any
+        close-declared request whose route passes _drain_body's closing
+        tail: /healthz (0.403 x3), ops readouts, local 404s, relay
+        GET/HEAD, even the local sticky/clear POST. Only keep-alive rides
+        (0.00 s -- pipelining stays untouched, N-5; the suite's healthz
+        guards ride keep-alive) and relay POST (never enters
+        _drain_body) stay fast. A closing CHUNKED shape pays not the
+        window but the FULL 2.0 s deadline: _quiet_finish waits for
+        framing that never arrives, and only the caller's FIN ends it
+        early. Peek-gating the window would trade this bound for the N-1
+        lesion -- late surplus escapes any door-time peek -- so the
+        window stays blind and the bound stays true."""
         try:
             arm = secs if self._pending_now() else window
             deadline = time.monotonic() + secs

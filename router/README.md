@@ -890,7 +890,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 643 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 646 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -1088,16 +1088,19 @@ guard understands IPv6 literals in `Origin:` (admits `[::1]`, still 403s
 header NAMES are policed in both directions of the relay, but
 the enforcement is asymmetric: on the response leg it is POSITIONAL. A bad
 header name BEFORE the box's framing declaration swallows the declaration
-too (the stdlib eats the line and everything behind it), and the named
-502 that reaches the caller is raised by this router's OWN framing gate --
-stdlib never raises on a bad name. With the declaration AHEAD of the junk,
+too (the stdlib eats the line and everything behind it); on a KEEP-ALIVE
+answer the named 502 that reaches the caller is raised by this router's
+OWN framing gate -- stdlib never raises on a bad name -- while a
+close-delivered box answer survives the same junk as read-until-close,
+just as a clean length-less HTTP/1.0 answer does (DV-R22's OBS-1: the
+fate sentence carries its own condition now). With the declaration AHEAD of the junk,
 the answer survives and the junk (and what rode behind it) is silently
 absent. An empty-name line loses only itself. Three shapes, three fates;
 the send-loop backstop never runs on any of them; a bad name rides
 through on neither leg (DV-R20 wrote the leg split; DV-R21 rewrote the
 mechanism -- the killer of the swallowed declaration is our gate, not
 stdlib's); request-side a malformed header line still dies NAMED at the
-entry parse; a bad name rides through on neither leg (DV-R20); a
+entry parse; a
 control_token carrying control bytes refuses boot and an embedded boot that
 skipped `apply_keys` honors its inline token instead of silently opening the
 gate; `operator_cancelled` makes the identity's last term countable; and the

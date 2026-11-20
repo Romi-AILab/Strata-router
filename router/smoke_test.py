@@ -5526,7 +5526,7 @@ def main():
     try:
         _up21 = wait_for(lambda: _hz21(9167), 25)
         _d21, _t21 = _late21(_PIN21, _PINB21) if _up21 else (b"", 99.0)
-        check("S21/N-1 control: pin-403 with NOTHING arriving late answers named and inside budget -- an honest closing door pays ONE 0.4 s quiet window (by design: error paths only; the hot paths never call _close_drain)",
+        check("S21/N-1 control: pin-403 with NOTHING arriving late answers named and inside budget -- an honest closing door pays ONE 0.4 s quiet window (by design, and DV-R22 corrected this label's scope: EVERY closing door pays, close-declared local routes included -- the retired 'error paths only, hot paths never call it' half was F-1's third false claim)",
               b"403" in _d21 and b"pin refused" in _d21 and _t21 < 1.5, "t=%.2fs head=%r" % (_t21, _d21[:40]))
         _ok21, _dts21 = _arr21(_PIN21, _PINB21, _SURP21, [b"403", b"pin refused"], reader=0.7) if _up21 else (0, [])
         check("S21/L2 N-1: pin-403 meets a surplus released 0.3 s LATE and the refusal STILL arrives 10/10 -- pre-fix the peek said 'nothing pending' at door time, the door closed over the arriving bytes, the RST ate the refusal (0/10 four shapes: the 14th same-shape lesion and the FIRST one inside the drain mechanism itself)",
@@ -7743,7 +7743,7 @@ def main():
         # the duplicate-content-length door scored ZERO grep hits here.
         # N-2: the 403 displayed its OWN port-split truncation (Host: ::1 was
         # reported as '::') -- the quote now carries the raw header value.
-        print("S30) DV-R20: eight honesty locks on this harvest -- six README sentences told precisely, one README omission closed by name, one display line quoted from the wire, one zero-wiring self-lock (lanefree: the DV-R19 anchors the harvest must not have touched still stand at exactly their counts)")
+        print("S30) DV-R20: eight honesty locks on this harvest -- five README sentences told precisely, one README omission closed by name, one display line quoted from the wire, one zero-wiring self-lock (lanefree: the DV-R19 anchors the harvest must not have touched still stand at exactly their counts; DV-R22 P4-B: the old decomposition counted the stressround row twice and summed to nine -- a number fixed with a broken decomposition beside it is still a number that lies)")
         check("S30/loopback: the loopback law told as what the guard IS (A-C1: 'a loopback name' narrates the 127/8 family; the door is three literal names, and 127.0.0.2 at a loopback listen is a named foreign refusal -- wording that can send an operator the wrong way, the grade the council settled)",
               "exactly three literal names" in _rd
               and "The 127/8 FAMILY is not admitted" in _rd,
@@ -7979,7 +7979,7 @@ def main():
                 lambda d: d.startswith(b"HTTP/1.1 403") and b"rebinding guard" in d)
             _row31(
                 "S31/lane",
-                "and the lane lives: after two named userinfo deaths and two named guard refusals, the next clean turn answers whole (a door tightening that poisoned its lane would be the program's oldest lesson wearing new clothes)",
+                "and the lane lives: after two named userinfo deaths, one named rebinding refusal and one clean control that answered 200, the next clean turn answers whole (DV-R22 P4-A: the old label claimed two guard refusals where the row sequence holds one -- the 200 control is not a refusal, and a label that pads the count poisons the lane sentence it stands to certify)",
                 b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
                 b"content-length: 5\r\n\r\nzzzzz",
                 lambda d: d.startswith(b"HTTP/1.1 200") and b'{"ok":1}' in d)
@@ -7989,6 +7989,37 @@ def main():
                 _ls31.close()
             except OSError:
                 pass
+
+        # ---- S32: DV-fix22 -- the wording harvest's own locks. Zero wiring
+        # this round, so every row is static: the two README locks read _rd
+        # (RAW -- the wrap trap is doctrine by now, so every phrase here is
+        # single-line-contiguous BY CONSTRUCTION), the docstring lock reads
+        # the engine source. The numbers inside quote the round-20 council
+        # logs (r20f1/r20x1), never memory.
+        print("S32) DV-R22: three honesty rows, zero wiring -- the position paragraph now carries its keep-alive condition and tells its leg-split exactly once, and _close_drain's docstring told its window's true scope (close-declared non-relay requests pay it; a closing chunked shape pays the FULL 2.0 s deadline; only keep-alive rides and relay POST stay fast)")
+        check("S32/fate: the position paragraph carries its own condition (DV-R20 L1a OBS-1, council live: the same junk-before-declaration shape SURVIVES as read-until-close when the box's answer is close-delivered -- 200 with the body, while the keep-alive twin died the named 502; the fate sentence told 'dies' for both and that was the DV-fix21 wording over-claim this row retires)",
+              "survives the same junk as read-until-close" in _rd
+              and "behind it), and the named" not in _rd
+              and "Three shapes, three fates" in _rd,
+              "surv=%r old=%r fates=%r" % ("survives the same junk as read-until-close" in _rd,
+                                           "behind it), and the named" in _rd,
+                                           "Three shapes, three fates" in _rd))
+        # The COUNT is normalized (" ".join(split())) on purpose: the
+        # survivor's own copy wraps "rides\nthrough" across a README line, so
+        # a raw count would grade the wrapped survivor ZERO and the deleted
+        # fragment ONE -- the lock inverts unless read the way the phrase
+        # actually lives (DV-fix21's _rd27 lesson, applied to a COUNT).
+        _nrd32 = " ".join(_rd.split())
+        check("S32/dedup: the position paragraph tells its leg-split EXACTLY ONCE (DV-R20 L1a P4-C: DV-fix21's rewrite left the superseded clause standing two sentences down -- a rewrite that doesn't delete its predecessor re-grows the finding it fixes; count, never remember)",
+              _nrd32.count("rides through on neither leg") == 1
+              and "DV-R20 wrote the leg split" in _rd,
+              "count=%d survivor=%r" % (_nrd32.count("rides through on neither leg"),
+                                        "DV-R20 wrote the leg split" in _rd))
+        check("S32/docscope: _close_drain's window told at its true scope (DV-R20 L1b F-1 + the red team's two fixes, every number council-reproduced live: a close-declared GET/HEAD pays the window on EVERY route reaching _drain_body's closing tail -- local readouts, 404s, relay, even the local sticky/clear POST; a closing CHUNKED shape pays the FULL deadline, not the window; only keep-alive rides and relay POST never enter the drain)",
+              "THE WINDOW'S HONEST SCOPE" in _src27
+              and "ONLY on closing paths (refusal doors)" not in _src27,
+              "scope=%r old=%r" % ("THE WINDOW'S HONEST SCOPE" in _src27,
+                                    "ONLY on closing paths (refusal doors)" in _src27))
 
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]
