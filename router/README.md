@@ -897,7 +897,10 @@ A naming house-rule, so labels and versions don't drift: `DV-RNN` names
 a review ROUND (a finding keeps its round label wherever it is cited),
 `DV-fixNN` names the commit that lands that round's harvest; neither
 name is ever a release version, and the engine's own version is the
-single `VERSION` constant it prints from.
+single `VERSION` constant it prints from. Release tags land only on
+audited releases -- a rehearsal never gets a tag; the public line began
+at v1.0.0 (the earlier tags numbered work no user ever received and were
+removed before it).
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
 capacity decoys -- `concurrency.serving`, `vram` figures -- that the extractor
