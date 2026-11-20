@@ -890,8 +890,14 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 646 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 648 checks (the run's footer prints the live count); needs loopback
 ```
+
+A naming house-rule, so labels and versions don't drift: `DV-RNN` names
+a review ROUND (a finding keeps its round label wherever it is cited),
+`DV-fixNN` names the commit that lands that round's harvest; neither
+name is ever a release version, and the engine's own version is the
+single `VERSION` constant it prints from.
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
 capacity decoys -- `concurrency.serving`, `vram` figures -- that the extractor
@@ -1081,8 +1087,12 @@ above every header-side filter, dies there); a box that answered with
 unparseable framing gets the named `backend_protocol_error` instead of the
 "may still complete" timeout story; a caller that RSTs mid-relay of an
 ALREADY-ANSWERED request books as an abort, never as a backend stall and
-never as a baseless ghost-debt; `OPTIONS` answers a named 405 on EVERY path
-(the README always said so -- it now does, body eaten first); the rebinding
+never as a baseless ghost-debt; `PUT`, `PATCH` and `DELETE` are code aliases of POST
+-- they ride its full door, relay and backend-key injection included
+(a DELETE to a box path really reaches the box); `OPTIONS` answers a
+named 405 on EVERY path (the README always said so -- it now does, body
+eaten first), and a verb with no handler here dies a named 501 at the
+stdlib dispatch; the rebinding
 guard understands IPv6 literals in `Origin:` (admits `[::1]`, still 403s
 `[::2]`); a door-refusal against a chunked body still reaches its sender;
 header NAMES are policed in both directions of the relay, but
@@ -1092,10 +1102,10 @@ too (the stdlib eats the line and everything behind it); on a KEEP-ALIVE
 answer the named 502 that reaches the caller is raised by this router's
 OWN framing gate -- stdlib never raises on a bad name -- while a
 close-delivered box answer survives the same junk as read-until-close,
-just as a clean length-less HTTP/1.0 answer does (DV-R22's OBS-1: the
+just as a clean length-less HTTP/1.0 answer does (DV-R20's OBS-1: the
 fate sentence carries its own condition now). With the declaration AHEAD of the junk,
 the answer survives and the junk (and what rode behind it) is silently
-absent. An empty-name line loses only itself. Three shapes, three fates;
+absent. An empty-name line loses only itself. Four shapes, four fates;
 the send-loop backstop never runs on any of them; a bad name rides
 through on neither leg (DV-R20 wrote the leg split; DV-R21 rewrote the
 mechanism -- the killer of the swallowed declaration is our gate, not

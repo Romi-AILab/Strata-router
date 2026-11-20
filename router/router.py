@@ -79,6 +79,10 @@ Usage
     GET  /healthz
     GET  /__router/stats
     POST /__router/sticky/clear
+
+    PUT, PATCH and DELETE are code aliases of POST -- they ride its
+    full door, relay and backend-key injection included; a verb with
+    no handler here dies a named 501 at the stdlib dispatch.
 """
 from __future__ import annotations
 
@@ -2886,20 +2890,30 @@ class Handler(BaseHTTPRequestHandler):
         late arrivals inside the window are discarded too. Nothing waits
         past the window: bytes later than that make any wait on this socket
         unbounded -- a thread-starvation door -- so the guarantee is BOUNDED,
-        and the README states the boundary. THE WINDOW'S HONEST SCOPE
-        (DV-R22 F-1; the retired claim said the window was
-        refusal-door-only and that the hot paths never pass here -- the
-        council measured both halves false on the live box lane): EVERY
-        door that closes pays ONE window -- refusals AND any
-        close-declared request whose route passes _drain_body's closing
-        tail: /healthz (0.403 x3), ops readouts, local 404s, relay
-        GET/HEAD, even the local sticky/clear POST. Only keep-alive rides
-        (0.00 s -- pipelining stays untouched, N-5; the suite's healthz
-        guards ride keep-alive) and relay POST (never enters
-        _drain_body) stay fast. A closing CHUNKED shape pays not the
-        window but the FULL 2.0 s deadline: _quiet_finish waits for
-        framing that never arrives, and only the caller's FIN ends it
-        early. Peek-gating the window would trade this bound for the N-1
+        and the README states the boundary. THE PRICE OF A CLOSING DOOR
+        (v3; DV-R20 F-1 wrote the window's honest scope, and DV-R21's
+        F-A1/NEW-1 caught THAT sentence over-claiming in its own
+        absolutes -- a blanket window price for closing doors, and a
+        blanket relay-POST exemption from the drain -- both measured
+        false on the live lane). The price is set by the DRAIN
+        PRIMITIVE and the pending state, not by a close/keep-alive
+        axis: what reaches THIS function with nothing pending pays ONE
+        quiet window -- refusals AND every close-declared request at
+        _drain_body's closing tail: /healthz (0.404), ops readouts,
+        local 404s, relay GET/HEAD (0.408), even the local sticky/clear
+        POST. Doors that WAIT FOR BYTES pay the FULL 2.0 s deadline --
+        the unparseable shapes routed through _quiet_finish (no-colon
+        header line, conflicting duplicate content-length, bad
+        content-length: named 400s AT the deadline, 2.012-2.017),
+        chunked framing that never terminates (2.002; TE forces close
+        even under a keep-alive declaration, so that shape does not
+        ride), and the over-capacity 413 whose door sits INSIDE the
+        relay path's _read_body (a giant-declared-CL relay POST pays
+        2.002; a relay POST stays fast only when it SUCCEEDS:
+        0.002-0.016). Plain keep-alive rides (0.002 -- pipelining
+        untouched, N-5), and the caller's FIN ends any wait at once
+        (~0.001, the half-close discriminant across the whole family).
+        Peek-gating the window would trade this bound for the N-1
         lesion -- late surplus escapes any door-time peek -- so the
         window stays blind and the bound stays true."""
         try:
