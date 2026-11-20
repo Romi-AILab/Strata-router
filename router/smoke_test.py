@@ -5677,13 +5677,13 @@ def main():
         check("S21/N-4: ' 127.0.0.1 ' comes back NORMALIZED and problem-free (baseline: silent validator + passing stripping guard + gaierror at the raw bind)",
               _c21["listen"] == "127.0.0.1" and not _p21, "listen=%r n=%d" % (_c21["listen"], len(_p21)))
         _c21, _p21, _ww21 = _v21("Localhost")
-        _false21 = [m for m in _ww21 if "NOT loopback" in m or "admits ONLY" in m]
+        _false21 = [m for m in _ww21 if "Firewall this port" in m or "admits ONLY" in m]
         check("S21/N-5: 'Localhost' earns NO warning and normalizes to 'localhost' -- the loopback test now reads the SAME normalized string the guard does, so a WARNING can never again call loopback off-loopback (baseline fired BOTH sentences false)",
               _c21["listen"] == "localhost" and not _false21,
               "listen=%r warns=%r" % (_c21["listen"], [m[:40] for m in _false21]))
         _c21, _p21, _ww21 = _v21("192.0.2.55")
         check("S21/N-5 control re-anchored (DV-R11 C-4): an honest off-loopback listen is NOT called a wildcard -- AND validate_cfg no longer speaks the firewall sermon at all: it deferred to AFTER the bind (r11a measured it printing 'Firewall this port' for a port that would never exist -- R4-F3's bind-first doctrine covers words). S23 polices WHERE the sermon now fires.",
-              _c21["listen"] == "192.0.2.55" and not any("NOT loopback" in m for m in _ww21)
+              _c21["listen"] == "192.0.2.55" and not any("Firewall this port" in m for m in _ww21)
               and not any("WILDCARD" in _t21 for _f21, _t21 in _p21),
               repr(_p21)[:120])
     finally:
@@ -6298,12 +6298,12 @@ def main():
                 return (0 if _al23 else _pr23.returncode), _fr23.read().decode("utf-8", "replace"), _tm23
         _rc23g, _out23g, _ = _boot23("gai", dict(_boot23_base, listen="nope.s23.invalid"))
         check("S23/C-4: an unresolvable listen dies NAMED and is NOT preached at -- the firewall sermon now speaks only where the port EXISTS (baseline r11a: 'Firewall this port' printed BEFORE the named death, advice for a port that never came up)",
-              _rc23g not in (0, None) and "could not be resolved" in _out23g and "NOT loopback" not in _out23g,
+              _rc23g not in (0, None) and "could not be resolved" in _out23g and "Firewall this port" not in _out23g,
               "rc=%s %s" % (_rc23g, _out23g[:110]))
         _rc23w, _out23w, _tm23w = _boot23("fire", dict(_boot23_base, listen="127.0.0.2"),
-                                          _secs23=8.0, _until23=b"NOT loopback")
+                                          _secs23=8.0, _until23=b"Firewall this port")
         check("S23/C-4 control: an off-loopback listen that BINDS (127.0.0.2 -- bindable, outside the loopback triple) still gets its FULL sermon, now spoken after the bind -- normalization must never mute the truth",
-              _rc23w == 0 and "NOT loopback" in _out23w and "127.0.0.2" in _out23w,
+              _rc23w == 0 and "NOT one of the three names" in _out23w and "Firewall this port" in _out23w and "127.0.0.2" in _out23w,
               "rc=%s t=%s %s" % (_rc23w, _tm23w, _out23w[:110]))
         # DV-R13, found BY THIS SUITE'S GREEN RUN (lesson #6 ran its full course:
         # rig suspected first, then DBG markers + phase timing, then faulthandler
@@ -6346,7 +6346,7 @@ def main():
               _srv23t is not None, "serving_at=%s" % _srv23t)
         _rc23lh, _out23lh, _ = _boot23("lochi", dict(_boot23_base, listen="Localhost", port=9177))
         check("S23/C-4 control: 'Localhost' binds and earns NO sermon -- N-5's normalization truth rode the move intact (the loopback triple reads the ONE normalized source)",
-              _rc23lh == 0 and "NOT loopback" not in _out23lh,
+              _rc23lh == 0 and "Firewall this port" not in _out23lh,
               "rc=%s %s" % (_rc23lh, _out23lh[:110]))
     finally:
         _run23[0] = False
@@ -7219,7 +7219,8 @@ def main():
         check("S27/census: the inherit sentence's number IS the tree -- AST counts every `self._drain_body` call site and the sentence must agree (DV-R15's entry doors silently moved the census nine to eleven while the suite ran GREEN over both; a number remembered is a number that rots -- DV-R16 NEW-1 was an anchor, this is its numeric twin, so the number is COUNTED, sentence included)",
               len(_w27) == 2
               and {"SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10,
-                   "ELEVEN": 11, "TWELVE": 12}.get(_word27.upper()) == _n27,
+                   "ELEVEN": 11, "TWELVE": 12, "THIRTEEN": 13,
+                   "FOURTEEN": 14, "FIFTEEN": 15}.get(_word27.upper()) == _n27,
               "sentence=%r AST=%d" % (_word27, _n27))
         _nine27, _nine27b = "ni" + "ne call sites", "ni" + "ne _drain_body"   # built, not literal: the
         check("S27/census sweep: no prose QUOTES a _drain_body call-site count anywhere -- the stale nine is dead in both files, and the ONE inherit sentence is policed by the row above (the number-free wording is the law; the AST row catches it if the wording grows a number back; the pattern is BUILT here because a literal would live in the very file it sweeps -- the quine lesson the dry run caught before the burn)",   # sweep scans smoke itself
@@ -7742,7 +7743,7 @@ def main():
         # the duplicate-content-length door scored ZERO grep hits here.
         # N-2: the 403 displayed its OWN port-split truncation (Host: ::1 was
         # reported as '::') -- the quote now carries the raw header value.
-        print("S30) DV-R20: nine honesty locks on this harvest -- six README sentences told precisely, one README omission closed by name, one display line quoted from the wire, one zero-wiring self-lock (lanefree: the DV-R19 anchors the harvest must not have touched still stand at exactly their counts)")
+        print("S30) DV-R20: eight honesty locks on this harvest -- six README sentences told precisely, one README omission closed by name, one display line quoted from the wire, one zero-wiring self-lock (lanefree: the DV-R19 anchors the harvest must not have touched still stand at exactly their counts)")
         check("S30/loopback: the loopback law told as what the guard IS (A-C1: 'a loopback name' narrates the 127/8 family; the door is three literal names, and 127.0.0.2 at a loopback listen is a named foreign refusal -- wording that can send an operator the wrong way, the grade the council settled)",
               "exactly three literal names" in _rd
               and "The 127/8 FAMILY is not admitted" in _rd,
@@ -7780,6 +7781,214 @@ def main():
               % (_src27.count("duplicate content-length refused"),
                  _src27.count("missing Host refused"), "_saw_1xx" in _src27,
                  _src27.count("unparseable box framing")))
+
+        # ---- S31 (DV-R21): the harvest of convergence round 4 (round 19) --
+        # again ALL WORDS, plus the doors' first PARSE tightening: a value
+        # that NAMES a foreign host must never be READ into the loopback set.
+        # A-F1 (the program's first WORDING REGRESSION): DV-fix20's own
+        # KEYABLE sentence claimed only the body yields a key -- the header
+        # channel keys all by itself (the live empty-body+header-pin trio
+        # rode the full trio; the feature table below already said so).
+        # A-F2: the GET sentence's two quantifiers -- the ops readouts answer
+        # BEFORE the whitelist runs, and the /v1/ prefix is a road: a GET to
+        # a POST-only path under it really reaches a box. A-F3+B-F1 (one
+        # adopted position law): on the response leg the bad-name fate is
+        # POSITIONAL -- junk before the framing declaration swallows it and
+        # THIS router's framing gate raises the named 502 (stdlib never
+        # raises on a bad name); declaration first survives with the junk
+        # silently absent; an empty-name line loses only itself. B-F2: the
+        # 403 quote is the raw value STRIPPED AND LOWERED (the wire's case
+        # is not preserved; the DV-fix20 commit's "verbatim" is booked as
+        # its own erratum). B-F3: the boot sermon said a 127.0.0.2 bind
+        # "is NOT loopback" -- it IS, by address; it fires because it is
+        # outside the guard's three names. NEW-1: Host: and Origin:
+        # values shaped localhost:9999@evil.example were READ as
+        # "localhost" by the port-split and the authority regex --
+        # userinfo is illegal in a Host authority (RFC 7230 5.4), and a
+        # door that must guess which half is the host now refuses, named,
+        # fail-closed, at the ONE point before either comparison.
+        print("S31) DV-R21: five truth sentences and the two userinfo doors -- the KEYABLE sentence grew its header door, the GET quantifiers told true, the response-leg sentence rewritten as the position law it really is (three shapes, three fates, the killer is our gate), the 403 quote's case-fold told, the boot sermon speaks the guard's view not the family -- plus both doors refusing userinfo NAMED before any comparison, with controls proving the bracketed IPv6 rows, the foreign 403 and the lane ride untouched")
+        _sm31 = open(__file__, encoding="utf-8").read()
+        check("S31/keyable2: the KEYABLE sentence carries BOTH doors (A-F1: DV-fix20's own wording regression -- 'whose body could yield an affinity key' contradicted the commit's own feature table, and the live empty-body+header-pin trio rode affinity+placement all the way; interrogate every key-producing branch before adopting a discriminator, and now a LOCK does)",
+              "KEYABLE has" in _rd and "TWO doors" in _rd
+              and "KEYABLE with an empty body" in _rd,
+              "doors=%r empty=%r" % ("TWO doors" in _rd,
+                                     "KEYABLE with an empty body" in _rd))
+        check("S31/getwl2: the GET whitelist's two quantifiers told true (A-F2: /healthz and /__router/stats answer locally BEFORE the whitelist runs -- they never die as 404; and the /v1/ prefix is a road -- GET /v1/messages really reaches a box, so 'a box's POST-only path included' was false for exactly the API's own path)",
+              "the prefix is a road" in _rd
+              and "BEFORE the whitelist runs" in _rd
+              and "POST-only path included" not in _rd,
+              "road=%r before=%r old=%r" % ("the prefix is a road" in _rd,
+                                            "BEFORE the whitelist runs" in _rd,
+                                            "POST-only path included" in _rd))
+        check("S31/poslaw: the response-leg sentence rewritten as the position law (A-F3+B-F1: the fate depends on WHERE the bad name sits against the framing declaration; stdlib eats the line and its tail but NEVER raises -- the named 502 is this router's OWN framing gate raising on the swallowed-length shape; declaration-ahead survives with the junk silently absent; an empty-name line drops only itself)",
+              "on the response leg it is POSITIONAL" in _rd
+              and "Three shapes, three fates" in _rd
+              and "stdlib never raises on a bad name" in _rd
+              and "kills the box's whole answer at the stdlib parse" not in _rd,
+              "pos=%r fates=%r stdlib=%r old=%r"
+              % ("on the response leg it is POSITIONAL" in _rd,
+                 "Three shapes, three fates" in _rd,
+                 "stdlib never raises on a bad name" in _rd,
+                 "kills the box's whole answer at the stdlib parse" in _rd))
+        check("S31/casefold: the 403 quote told with its normalization (B-F2: 'the raw value' MEANS stripped+lowercased as the guard reads it -- EVIL.Example:9999 is quoted 'evil.example:9999'; the wire's case is not preserved, and 'verbatim' in the DV-fix20 message is the erratum this lock retires)",
+              "stripped and lowercased" in _rd,
+              "fold=%r" % ("stripped and lowercased" in _rd))
+        check("S31/bootwarn: the firewall sermon speaks the GUARD'S VIEW, not the family (B-F3 live: 'is NOT loopback' lied about a 127.0.0.2 bind -- loopback by address, OUTSIDE the three admitted names, and THAT is the only honest reason it fires)",
+              "is NOT one of the three names the rebinding guard admits" in _src27
+              and "is NOT loopback:" not in _src27,
+              "new=%r old=%r"
+              % ("is NOT one of the three names the rebinding guard admits" in _src27,
+                 "is NOT loopback:" in _src27))
+        check("S31/bootwarn-doc: the README's warning sentence tells the same truth (the same family over-claim sat in the prose beside the sermon -- 127.0.0.2 named as loopback-that-fires)",
+              "`127.0.0.2` is loopback by address yet fires it" in _rd,
+              "doc=%r" % ("`127.0.0.2` is loopback by address yet fires it" in _rd))
+        check("S31/uidoor-src: both doors refuse userinfo NAMED, exactly once each, upstream of every comparison (NEW-1: the port-split read 'localhost' out of 'localhost:9999@evil.example' and the Origin authority regex read 'localhost' out of the same shape -- RFC 7230 5.4 carries no userinfo in a Host authority; a door that must guess refuses)",
+              _src27.count("userinfo in Host refused") == 1
+              and _src27.count("userinfo in Origin/Referer refused") == 1,
+              "host=%d origin=%d"
+              % (_src27.count("userinfo in Host refused"),
+                 _src27.count("userinfo in Origin/Referer refused")))
+        _nin31 = ("ni" + "ne honesty locks")
+        _eig31 = ("eigh" + "t honesty locks")
+        check("S31/banner8: S30's banner counts its OWN rows (A-F4: it printed NINE while check() ran eight -- a number remembered is a number that rots, and this time the rot sat in the banner the harvest itself wrote; the words are composed dynamically so this lock cannot become the quine it bans)",
+              _nin31 not in _sm31 and _eig31 in _sm31,
+              "nine=%r eight=%r" % (_nin31 in _sm31, _eig31 in _sm31))
+        _cnt31 = 0
+        _word31 = None
+        for _n31 in ast.walk(ast.parse(_sm31)):
+            if (isinstance(_n31, ast.Call) and isinstance(_n31.func, ast.Name)
+                    and _n31.func.id == "check" and _n31.args
+                    and isinstance(_n31.args[0], ast.Constant)
+                    and isinstance(_n31.args[0].value, str)
+                    and _n31.args[0].value.startswith("S3" + "0/")):
+                _cnt31 += 1
+            if (isinstance(_n31, ast.Call) and isinstance(_n31.func, ast.Name)
+                    and _n31.func.id == "print" and _n31.args
+                    and isinstance(_n31.args[0], ast.Constant)
+                    and isinstance(_n31.args[0].value, str)
+                    and ("honesty" + " locks") in _n31.args[0].value):
+                _word31 = _n31.args[0].value.split(" honesty locks")[0].split()[-1]
+        _W31 = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+        check("S31/bannerself: the banner's number-word IS the AST count of S30's rows -- the census lesson come home (DV-R16 NEW-1 and DV-R17's census were numbers elsewhere lying about themselves; this one is COMPUTED, so a row added without the banner, or a banner without the row, dies as a named mismatch)",
+              _word31 in _W31 and _W31[_word31] == _cnt31,
+              "word=%r count=%d" % (_word31, _cnt31))
+        # -- live: the userinfo doors fire, and NOTHING ELSE moved. The
+        # bracketed IPv6 rows and the foreign 403 are the controls (DV-R16's
+        # Q1/Q2 bracket fix must NOT be collateral); the clean turn after
+        # three refusals is the lane alive.
+        _S31_BOX, _S31_RTR = 9170, 9171
+        _free25(_S31_BOX)
+        _free25(_S31_RTR)
+
+        def _svc31(c31):                    # the honest house box: drains
+            try:                            # the body, answers whole, closes
+                c31.settimeout(8)
+                buf31 = b""
+                while b"\r\n\r\n" not in buf31:
+                    g31 = c31.recv(4096)
+                    if not g31:
+                        return
+                    buf31 += g31
+                head31, _, rest31 = buf31.partition(b"\r\n\r\n")
+                cl31 = 0
+                for ln31 in head31.split(b"\r\n")[1:]:
+                    if ln31.lower().startswith(b"content-length:"):
+                        cl31 = int(ln31.split(b":", 1)[1])
+                have31 = len(rest31)
+                while have31 < cl31:
+                    g31 = c31.recv(65536)
+                    if not g31:
+                        break
+                    have31 += len(g31)
+                c31.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                            b"content-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}")
+            except OSError:
+                pass
+            finally:
+                try:
+                    c31.close()
+                except OSError:
+                    pass
+
+        def _box31(sock31):
+            while True:
+                try:
+                    c31, _ = sock31.accept()
+                except OSError:
+                    return
+                threading.Thread(target=_svc31, args=(c31,), daemon=True).start()
+
+        def _probe31(data31):
+            s31 = socket.create_connection(("127.0.0.1", _S31_RTR), timeout=8)
+            s31.sendall(data31)
+            t031 = time.monotonic()
+            got31 = b""
+            tf31 = None
+            s31.settimeout(3.0)             # TTFB is the bound (the S27 lesson)
+            try:
+                while True:
+                    g31 = s31.recv(65536)
+                    if not g31:
+                        break
+                    if tf31 is None:
+                        tf31 = time.monotonic() - t031
+                    got31 += g31
+            except OSError:
+                pass
+            s31.close()
+            return got31, (tf31 if tf31 is not None else time.monotonic() - t031)
+
+        _ls31 = _listen25(_S31_BOX)
+        threading.Thread(target=_box31, args=(_ls31,), daemon=True).start()
+        _p31 = _boot25("smoke-userinfo.json", _S31_RTR, _S31_BOX,
+                       {"status_interval": 300})
+        try:
+            def _row31(label31, law31, req31, want31, thi=3.0):
+                _d31, _t31 = _probe31(req31)
+                check(label31 + ": " + law31,
+                      want31(_d31) and _t31 < thi,
+                      "first=%r ttfb=%.2fs body=%r"
+                      % (_d31.split(b"\r\n", 1)[0][:40], _t31, _d31[-200:]))
+
+            _row31(
+                "S31/hostui",
+                "Host: localhost:9999@evil.example dies NAMED 400 (NEW-1 live: the port-split read 'localhost' out of that value and the request rode to the box -- a value that NAMES a foreign host must never be READ into the loopback set, and userinfo has no legal place in a Host authority, so the door stops guessing)",
+                b"POST /v1/messages HTTP/1.1\r\nhost: localhost:9999@evil.example\r\n"
+                b"content-length: 5\r\n\r\nzzzzz",
+                lambda d: d.startswith(b"HTTP/1.1 400") and b"userinfo in Host refused" in d)
+            _row31(
+                "S31/originui",
+                "Origin: http://localhost:9999@evil.example dies NAMED 403 (the authority is what the door reads, and an authority wearing userinfo is unreadable by policy -- a browser never sends it per spec, and the missing-Host doctrine speaks for a host the guard cannot see)",
+                b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                b"origin: http://localhost:9999@evil.example\r\n"
+                b"content-length: 5\r\n\r\nzzzzz",
+                lambda d: d.startswith(b"HTTP/1.1 403") and b"userinfo in Origin/Referer refused" in d)
+            _row31(
+                "S31/ctrl-shapes",
+                "the controls ride untouched: Host: [::1] still reaches its box AND Origin: http://[::1]:PORT still passes -- DV-R16's bracketed-IPv6 law is not collateral of a door tightening",
+                b"POST /v1/messages HTTP/1.1\r\nhost: [::1]\r\n"
+                b"origin: http://[::1]:%d\r\ncontent-length: 5\r\n\r\nzzzzz" % _S31_RTR,
+                lambda d: d.startswith(b"HTTP/1.1 200") and b'{"ok":1}' in d)
+            _row31(
+                "S31/ctrl-foreign",
+                "Host: evil.example is still the named rebinding 403 it always was -- the new door did not swallow the old sentence",
+                b"POST /v1/messages HTTP/1.1\r\nhost: evil.example\r\n"
+                b"content-length: 5\r\n\r\nzzzzz",
+                lambda d: d.startswith(b"HTTP/1.1 403") and b"rebinding guard" in d)
+            _row31(
+                "S31/lane",
+                "and the lane lives: after two named userinfo deaths and two named guard refusals, the next clean turn answers whole (a door tightening that poisoned its lane would be the program's oldest lesson wearing new clothes)",
+                b"POST /v1/messages HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+                b"content-length: 5\r\n\r\nzzzzz",
+                lambda d: d.startswith(b"HTTP/1.1 200") and b'{"ok":1}' in d)
+        finally:
+            _term(_p31)
+            try:
+                _ls31.close()
+            except OSError:
+                pass
 
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]

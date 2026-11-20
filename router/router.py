@@ -2610,6 +2610,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": {"message": "strata-router: request path must be ASCII without control characters"}})
             return True
         raw_host = (self.headers.get("host") or "").strip().lower()
+        if "@" in raw_host:
+            # DV-R21 (NEW-1): userinfo is illegal in a Host authority (RFC
+            # 7230 5.4), and BOTH splits below would read "localhost" out of
+            # "localhost:9999@evil.example" -- a value that NAMES a foreign
+            # host, READ into the loopback set. No browser vector exists
+            # (Host is a forbidden header), so this is door hygiene, not an
+            # open door: a guard that must guess which half is the host
+            # refuses, named, upstream of every comparison.
+            self.close_connection = True   # flag first (R7b-F1, see origin-form door)
+            self._drain_body()
+            self._json(400, {"error": {"message": "strata-router: userinfo in Host refused (a Host authority carries no userinfo -- RFC 7230 5.4)"}})
+            return True
         if raw_host.startswith("["):
             # IPv6 literal: [::1] or [::1]:8088. rsplit(":",1) on "[::1]"
             # chopped the address itself, so the ::1 entry was half-dead
@@ -2649,6 +2661,19 @@ class Handler(BaseHTTPRequestHandler):
             return True
         org = self.headers.get("origin") or self.headers.get("referer")
         if org:
+            m31 = re.match(r"https?://([^/]+)", org)
+            if m31 and "@" in m31.group(1):
+                # DV-R21 (NEW-1): the host-extraction regex below stops at
+                # the first colon, so an authority wearing userinfo
+                # ("localhost:9999@evil.example") looked like the host
+                # "localhost". Browsers never send userinfo in Origin or
+                # Referer (spec-stripped); a door that cannot see a clean
+                # host refuses, named -- the missing-Host doctrine speaks
+                # for a host the guard cannot read.
+                self.close_connection = True   # flag first (R7b-F1)
+                self._drain_body()
+                self._json(403, {"error": {"message": "strata-router: userinfo in Origin/Referer refused (rebinding guard -- a guard that cannot see a clean host cannot check it)"}})
+                return True
             m = re.match(r"https?://(\[[^\]]*\]|[^/:]+)", org)
             # the bracket alternative is what makes Origin: http://[::1]:8088
             # parse as the HOST [::1] -- the bare character class stopped at
@@ -2978,7 +3003,7 @@ class Handler(BaseHTTPRequestHandler):
             try:                          # written). A declared length is a
                 self.connection.settimeout(_left)   # NUMBER TO STOP AT, not a
                 got = self.rfile.read1(chunk)       # promise the door must honor
-            except Exception:             # waiting on. ELEVEN call sites inherit
+            except Exception:             # waiting on. THIRTEEN call sites inherit
                 self.close_connection = True
                 return
             finally:
@@ -5158,7 +5183,8 @@ def main(argv=None):
     _ln_firewall = str(cfg["listen"])
     if _ln_firewall not in ("127.0.0.1", "localhost", "::1"):
         LOG.warning(
-            "listen=%s is NOT loopback: this router has no auth of its own and injects "
+            "listen=%s is NOT one of the three names the rebinding guard admits: this router "
+            "has no auth of its own and injects "
             "backend keys for callers that send none. Firewall this port to known peers now. "
             "The rebinding guard admits ONLY Host: %s (loopback names prove nothing off-loopback) "
             "-- and gate the control surface: --set-key control.",

@@ -310,20 +310,25 @@ has no path filter -- every HEAD path forwards like any API request -- so a
 box the lane borrows, and the path NAME travels with it. The numbers never
 leave the router; only the name does.
 GET itself is admitted BY NAME: `/v1/models`, `/models`, `/health`, and any
-path starting `/v1/` or ending `/models`. A GET to any other path -- a box's
-POST-only path included -- never reaches a box: it dies locally as a named
-`no route for GET <path>` 404 (DV-R20 spells the list because three probe
-rounds burned themselves debugging "lane" answers that never left the
-router).
+path starting `/v1/` or ending `/models` -- the prefix is a road, so a GET
+to a POST-only API path under it (`GET /v1/messages`) really does reach a
+box. The ops readouts `/healthz` and `/__router/stats` answer locally
+BEFORE the whitelist runs (200/503 -- never the 404 below). A GET to any
+other path never reaches a box: it dies locally as a named
+`no route for GET <path>` 404 (DV-R20 spelled the list; DV-R21 corrected
+the two quantifiers that first spelling over-claimed).
 
 Per-request response headers say what happened: `x-strata-backend`,
 `x-strata-affinity`, `x-strata-placement` (`sticky` / `placed` / `overflow` /
 `migrated` / `pinned` / `last_resort`). `--no-expose-affinity` hides them.
-But the trio is a trio only when the request is KEYABLE: `x-strata-affinity`
-and `x-strata-placement` ride only answers whose body could yield an affinity
-key -- a keyless call, or a body the placer cannot key at all, gets
-`x-strata-backend` alone (DV-R20; the ledger has carried this carve-out for
-its counters since R6a-F1, and the header sentence had not caught up).
+But the trio is a trio only when the request is KEYABLE, and KEYABLE has
+TWO doors: an inbound `x-strata-affinity` header keys the request all by
+itself -- a header-pinned turn is KEYABLE with an empty body -- or the
+BODY yields an affinity key. A call with neither, or with a body the
+placer cannot key at all, gets `x-strata-backend` alone (DV-R20 wrote the
+body door; DV-R21 adds the header door that this section's own feature
+table two lines below already lists -- a live empty-body+header-pin trio
+caught the sentence contradicting the table).
 `x-strata-*` is this router's own channel in BOTH directions: nothing
 carrying the prefix is ever forwarded upstream, and a lying box's
 `x-strata-*` response headers are stripped at the relay (DV-R12) -- every
@@ -349,9 +354,11 @@ before the comparison; IPv6 may arrive bracketed, `[::1]` counts) -- or the
 configured `listen` address; bound to any other address, that one address
 becomes the ONLY admissible Host. The 127/8 FAMILY is not admitted as such:
 `Host: 127.0.0.2` at a loopback-bound router is a named 403 quoting the
-header's raw value -- the direction is over-refusal, never under, but a
-per-service operator who took "loopback" as the family used to eat a wall of
-refusals labeled foreign (DV-R20). The guard also rejects browser
+header's raw value as the guard itself reads it: stripped and lowercased
+(`EVIL.Example:9999` is quoted `'evil.example:9999'` -- the wire's case is
+normalized, not preserved, DV-R21). The direction is over-refusal, never
+under, but a per-service operator who took "loopback" as the family used
+to eat a wall of refusals labeled foreign (DV-R20). The guard also rejects browser
 `Origin`/`Referer` from
 elsewhere -- the standard DNS-rebinding move (a web page re-resolving its own
 domain onto `127.0.0.1`) gets 403. A missing or empty `Host` is refused on
@@ -359,8 +366,10 @@ EVERY version, HTTP/1.0 included: 1.0 may lawfully omit Host, but a rebinding
 guard that cannot see a Host refuses it, named -- `missing Host refused`,
 never a claim that an empty string is foreign (DV-R19). That guard is why
 `listen` must name the
-ONE exact address your clients use: booting with a non-loopback `listen` logs
-a loud warning, and a wildcard `listen` -- every spelling the resolver
+ONE exact address your clients use: booting with a `listen` outside the
+three admitted names logs a loud warning -- the sermon speaks the guard's
+view, not the address family: `127.0.0.2` is loopback by address yet fires it
+(DV-R21) -- and a wildcard `listen` -- every spelling the resolver
 agrees is INADDR_ANY under inet_aton rules (`0.0.0.0`, `0`, `0.0`, `00`,
 `0x0`, `*`) -- refuses boot by name: the rule IS the resolver's, not three
 hand-typed strings -- it would bind the whole network while the guard
@@ -881,7 +890,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 629 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 643 checks (the run's footer prints the live count); needs loopback
 ```
 
 The fakes speak Strata's real status schema (`activity.in_flight` plus the
@@ -1076,12 +1085,19 @@ never as a baseless ghost-debt; `OPTIONS` answers a named 405 on EVERY path
 (the README always said so -- it now does, body eaten first); the rebinding
 guard understands IPv6 literals in `Origin:` (admits `[::1]`, still 403s
 `[::2]`); a door-refusal against a chunked body still reaches its sender;
-header NAMES are policed in both directions of the relay,
-but the enforcement is asymmetric: request-side, a malformed header line dies NAMED at the entry
-parse; response-side there is no per-header filter to reach -- an unparseable
-name kills the box's whole answer at the stdlib parse and the caller gets the
-named 502 with NOTHING relayed (the send-loop backstop never runs on that
-shape); a bad name rides through on neither leg (DV-R20); a
+header NAMES are policed in both directions of the relay, but
+the enforcement is asymmetric: on the response leg it is POSITIONAL. A bad
+header name BEFORE the box's framing declaration swallows the declaration
+too (the stdlib eats the line and everything behind it), and the named
+502 that reaches the caller is raised by this router's OWN framing gate --
+stdlib never raises on a bad name. With the declaration AHEAD of the junk,
+the answer survives and the junk (and what rode behind it) is silently
+absent. An empty-name line loses only itself. Three shapes, three fates;
+the send-loop backstop never runs on any of them; a bad name rides
+through on neither leg (DV-R20 wrote the leg split; DV-R21 rewrote the
+mechanism -- the killer of the swallowed declaration is our gate, not
+stdlib's); request-side a malformed header line still dies NAMED at the
+entry parse; a bad name rides through on neither leg (DV-R20); a
 control_token carrying control bytes refuses boot and an embedded boot that
 skipped `apply_keys` honors its inline token instead of silently opening the
 gate; `operator_cancelled` makes the identity's last term countable; and the
