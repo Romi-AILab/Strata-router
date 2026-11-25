@@ -1,5 +1,7 @@
 # CI runs exactly the commands this repo already uses to certify itself.
-# Ports: smoke binds fixed 9177-9199, the monitor canaries 9311-9318 -- safe
+# Ports: smoke binds only fixed loopback ports in 9120-9199 (sparse; 9298
+# appears only as an in-process config value, never bound), the monitor
+# canaries bind 9311-9318 plus OS-assigned port-0 ephemerals -- safe
 # on ephemeral GitHub-hosted runners; do NOT point this workflow at a shared
 # or self-hosted runner (port collisions lie in both directions).
 name: tests

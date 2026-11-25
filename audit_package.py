@@ -22,7 +22,9 @@ Checks, all green or non-zero exit:
      commit-a-secret-then-edit-it-out used to audit ALL GREEN with the
      secret still in HEAD (M2-A/P1-2). Non-UTF-8 files are not skipped
      wholesale -- a notepad "save as UTF-16" once blinded the whole file
-     (M2-A/P2-2).
+     (M2-A/P2-2). One closed exemption class exists, by exact set equality
+     and for one pattern only: house ledger citation stems (_LEDGER_STEMS,
+     DV-fix24) -- grow it in lockstep with the citation, never widen it.
   3. IGNORE ASSERT -- machine-local config paths must be git-ignored even
      when they exist on this dev machine.
   4. --selftest -- synthetic canaries prove the patterns still have teeth.
@@ -57,6 +59,7 @@ EXPECTED_TRACKED = {
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",   # Contributor Covenant 2.1, canonical body; only delta = contact line filled with the private-advisory page (same channel as SECURITY.md)
     "DECISIONS.md",         # research verdicts that close a question for good (v1.2.18: hosted web search = no in-router recovery); prose-only, gate-scanned like every tracked file
+    "CHANGELOG.md",         # the public release ledger, opened by release-prep v1.0.0 (DV-R23: the gate met it before its whitelist did -- grown the same round the finding was booked)
     "audit_package.py",
     "run_all_tests.py",
     ".github/pull_request_template.md",
@@ -120,6 +123,27 @@ _HEXLONG = re.compile(r"[0-9a-f]{40,}")
 # Same policy as _B64ISH: if prose trips this, fix the prose, not the pattern.
 _URLTOKEN = re.compile(
     r"(?=[A-Za-z0-9_\-]*[0-9])(?=[A-Za-z0-9_\-]*[A-Z])[A-Za-z0-9_\-]{24,}")
+# One closed exception class, by SET EQUALITY (DV-R23 OBS -> DV-fix24): the
+# house ledger citation stems (strata-review-notes naming ws-vNNNN-DV-... )
+# that smoke-test comments cite as provenance. These are not prose -- they
+# are the review program's audit chain and must stay byte-exact; rewriting a
+# ledger filename to please a scanner would re-grow tomorrow's truthfulness
+# finding (the gate's own harvest history is what we're citing). Precedent
+# for a closed project-shape exemption inside the gate: the FAKE-sentinel
+# lookahead on _APIKEY. The exemption is EXACTLY these strings and applies
+# to THIS pattern only: a stem plus one extra character must still fire --
+# the selftest keeps that tooth. A new DV round citing a new ledger file
+# grows this set in the same round the comment lands (same lockstep as
+# EXPECTED_TRACKED).
+_LEDGER_STEMS = frozenset({
+    "ws-v1219-DV-R3-s15-RED-f437d32",
+    "ws-v1219-DV-R9-RED-texts",
+    "ws-v1219-DV-R8-P21-48b8777",
+    "ws-v1219-DV-R8-L2adjudicate-48b8777",
+    "ws-v1219-DV-R9-council-r9c2_variants-401ea0a",
+    "ws-v1219-DV-R10-council-r10a",
+    "ws-v1219-DV-R11-council-r11a",
+})
 # Tailscale MagicDNS hostnames identify a real machine even with no IP in
 # sight. The shipped example host uses the reserved ".tsnet.invalid" shape
 # instead; a real MagicDNS name must never replace it. (The backslash-
@@ -144,20 +168,20 @@ def _identity_patterns():
         return []
     try:
         return [("machine username (RMON_AUDIT_USER)",
-                 re.compile(raw, re.IGNORECASE))]
+                 re.compile(raw, re.IGNORECASE), frozenset())]
     except re.error:
         return [("machine username (RMON_AUDIT_USER, literal)",
-                 re.compile(re.escape(raw), re.IGNORECASE))]
+                 re.compile(re.escape(raw), re.IGNORECASE), frozenset())]
 
 
 PATTERNS = [
-    ("tailscale/CGNAT address", _TAILSCALE),
-    ("api-key-shaped token", _APIKEY),
-    ("long base64/blob", _B64ISH),
-    ("chopped base64url token", _URLTOKEN),
-    ("long hex token", _HEXLONG),
-    ("tailscale magic-dns name", _TSNET),
-    ("user-home path", _USERSDIR),
+    ("tailscale/CGNAT address", _TAILSCALE, frozenset()),
+    ("api-key-shaped token", _APIKEY, frozenset()),
+    ("long base64/blob", _B64ISH, frozenset()),
+    ("chopped base64url token", _URLTOKEN, _LEDGER_STEMS),
+    ("long hex token", _HEXLONG, frozenset()),
+    ("tailscale magic-dns name", _TSNET, frozenset()),
+    ("user-home path", _USERSDIR, frozenset()),
 ] + _identity_patterns()
 
 FAILS = []
@@ -225,8 +249,19 @@ def scan_content(name, data):
     for vi, text in enumerate(decode_views(data)):
         tag = "utf8" if vi == 0 else "alt%d" % vi
         for i, line in enumerate(text.splitlines(), 1):
-            for label, pat in PATTERNS:
-                if pat.search(line):
+            for label, pat, exempt in PATTERNS:
+                # with an exemption set the line fires only if SOME match is
+                # not exactly whitelisted (finditer: a second, non-stem token
+                # on a stem-bearing line still books -- stricter than a
+                # first-match exemption would be; relative to the pre-fix
+                # code, exactly the seven exact-stem bookings go silent
+                # by design)
+                if exempt:
+                    fired = any(m.group(0) not in exempt
+                                for m in pat.finditer(line))
+                else:
+                    fired = bool(pat.search(line))
+                if fired:
                     hits.append("%s @ %s[%s]:%d" % (label, name, tag, i))
     return hits
 
@@ -260,6 +295,12 @@ def _canaries():
         ("utf16 le + BOM key", ("key=" + key).encode("utf-16")),
         ("utf16 be + BOM key", b"\xfe\xff" + ("key=" + key).encode("utf-16-be")),
         ("utf16 le no-BOM key", ("key=" + key).encode("utf-16-le")),
+        # DV-fix24 teeth: the ledger-stem exemption is EXACT equality only.
+        # A forged near-stem, and a real stem with ONE extra character, are
+        # not citations -- they must still fire. (Built at runtime so this
+        # file's own bytes stay clean, same doctrine as every canary.)
+        ("forged near-stem token", "ws-v1219-DV-R99-RED-" + "deadbe00f"),
+        ("whitelisted stem + 1 char", min(_LEDGER_STEMS) + "x"),
     ]
     must_miss = [
         ("project FAKE sentinel", "sk-" + "FAKE" + "-REPLACE-ME-1234"),
@@ -270,6 +311,14 @@ def _canaries():
         ("version numbers", "v1.2.100 and 1.2.100.1"),
         ("reserved example host", "peer-box" + ".tsnet" + ".invalid:8081"),
         ("zombie keys temp name", "router.keys" + ".json.new.99999"),
+        # DV-fix24: every whitelisted ledger stem, cited in its real shape,
+        # must stay silent -- wiring or pattern edits that make the real
+        # citation shapes fire book a FAIL here. This canary is BUILT FROM
+        # the set, so it cannot see a stem REMOVED from it: removal is
+        # booked by the MAIN gate, which still finds every cited stem
+        # byte-exact in router/smoke_test.py the same round (L2-proven).
+        ("ledger citation, all stems",
+         "strata-review-notes/" + "/".join(sorted(_LEDGER_STEMS)) + ".log"),
     ]
     return must_hit, must_miss
 
@@ -290,6 +339,17 @@ def run_selftest():
             fail("selftest: false positive on %s: %s" % (label, hits))
         else:
             ok("quiet: %s stays clean" % label)
+    # DV-fix24 (L2-B): per-member liveness -- every entry of _LEDGER_STEMS
+    # must still be caught by _URLTOKEN as EXACTLY one match equal to
+    # itself. A member that no longer matches is a dead exemption: keeping
+    # it must then be a deliberate act, never drift. (The joined must_miss
+    # canary above cannot see this -- a dead member stays silent there.)
+    for stem in sorted(_LEDGER_STEMS):
+        if [m.group(0) for m in _URLTOKEN.finditer(stem)] == [stem]:
+            ok("teeth: ledger stem %s is live-exact under _URLTOKEN" % stem)
+        else:
+            fail("selftest: ledger stem %s is a DEAD exemption (the pattern "
+                 "no longer matches it exactly once)" % stem)
     # OSA-P2-1 wiring teeth: the owner-side identity tripwire is env-injected
     # (never baked into this file), so the plumbing gets its own synthetic
     # proof -- with a throwaway value set the pattern must come alive, and
@@ -299,7 +359,7 @@ def run_selftest():
     try:
         os.environ["RMON_AUDIT_USER"] = probe
         pats = _identity_patterns()
-        fired = any(pat.search("text " + probe + " here") for _lab, pat in pats)
+        fired = any(pat.search("text " + probe + " here") for _lab, pat, _ex in pats)
         if len(pats) == 1 and fired and "RMON_AUDIT_USER" in pats[0][0]:
             ok("teeth: RMON_AUDIT_USER injection yields a live pattern")
         else:

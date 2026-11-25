@@ -5,8 +5,10 @@
 Order matters: the gate SELFTEST first (a gate without teeth certifies
 nothing -- M2-A/P1-1), then the packaging red lines (they decide whether
 this repo may be pushed at all), then each package's own suite. Ports:
-smoke_test.py binds fixed 9177-9199; tests_rmon.py stays inside loopback
-canary ports 9311-9318 (self-cleaning, never 9177-9199) and is layout-free
+smoke_test.py binds only fixed loopback ports in 9120-9199 (9298 is an
+in-process config value, never bound); tests_rmon.py stays inside loopback
+canary ports 9311-9318 (plus port-0 ephemerals; self-cleaning, never the
+smoke band) and is layout-free
 -- a plain copy of monitor/ alone must go green
 (M2-B/P2-1 fixed the one test that leaned on the monorepo's ../router).
 
