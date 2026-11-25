@@ -156,6 +156,15 @@ STRIP_REQUEST_HEADERS = HOP_BY_HOP | {
 
 HEALTHY = "healthy"
 SUSPECT = "suspect"   # connect failures seen, still taking traffic
+# A smart clock that has never ticked is NO epoch. last_move and the box
+# throttle start at -inf, never 0.0: time.monotonic() is machine uptime,
+# so "0.0 = never moved" silently means "moved at power-on" on a fresh
+# host -- every lane then spends its first tau (900 s) billing a move it
+# never made and the mover/homecoming answer mv=0 lock=0 (DV-R24: the
+# whole S7/S8/S10/S14/S15 family red on GitHub-hosted runners at boot
+# uptime < tau; green for years on long-uptime dev boxes -- an uptime
+# dependency is still a dependency). now - (-inf) = inf: tau ALWAYS rests.
+_CLOCK_NEVER = float("-inf")
 DOWN = "down"         # skipped unless nothing else exists, then half-open trial
 
 
@@ -755,7 +764,7 @@ class Pool:
     def _lane_touch(self, key):
         st = self._lane.get(key)
         if st is None:
-            st = {"turns": 0, "last_move": 0.0,
+            st = {"turns": 0, "last_move": _CLOCK_NEVER,
                   "R_hat": float(self.sm_cfg.get("r_hat_init") or 4.0)}
             self._lane[key] = st
             while len(self._lane) > 20000:
@@ -770,7 +779,7 @@ class Pool:
                 # swallow and skipped the turn's homecoming+mover -- the
                 # decision layer must never die over the ledger's own
                 # bookkeeping: re-seat fresh, the lane's history restarts.
-                st = {"turns": 0, "last_move": 0.0,
+                st = {"turns": 0, "last_move": _CLOCK_NEVER,
                       "R_hat": float(self.sm_cfg.get("r_hat_init") or 4.0)}
                 self._lane[key] = st
         st["turns"] += 1
@@ -1133,7 +1142,7 @@ class Pool:
         now = time.monotonic()
         if now - st["last_move"] < float(self.sm_cfg.get("tau_pp_homecoming") or 900.0):
             return False
-        if now - self._box_hc.get(old_id, 0.0) < float(self.sm_cfg.get("homecoming_box_s") or 120.0):
+        if now - self._box_hc.get(old_id, _CLOCK_NEVER) < float(self.sm_cfg.get("homecoming_box_s") or 120.0):
             return False
         # F4/F13: D4' item one is re-asked LIVE, next to the streak that only
         # a live poller advances. feed_blind FREEZES at its last value when
@@ -1171,7 +1180,7 @@ class Pool:
                 pass               # F-2: a same-lane move/homecoming stamped
                 # during the decision window -- the lane clock, like the box
                 # throttle, is law inside THIS region, not before it.
-            elif now - self._box_hc.get(old_id, 0.0) < _box_s:
+            elif now - self._box_hc.get(old_id, _CLOCK_NEVER) < _box_s:
                 pass          # another lane took this box's window -- next turn
             else:
                 self._affinity_write_locked(affinity_key, old_id, "smart")
@@ -1452,7 +1461,7 @@ class Pool:
                 _cur = hit[2] if hit is not None and len(hit) > 2 else "sticky"
                 _tau = float(self.sm_cfg.get("tau_pp_transient" if _cur == "transient"
                                              else "tau_pp_move") or 900.0)
-                if _now - _st.get("last_move", 0.0) < _tau:
+                if _now - _st.get("last_move", _CLOCK_NEVER) < _tau:
                     return False
             self._affinity_write_locked(key, backend_id, "smart")
             if _st is not None:

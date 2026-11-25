@@ -45,6 +45,11 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROUTER = os.path.join(HERE, "router.py")
+# The suite reads its own source in several locks. NEVER re-open it by the
+# bare script name after this line: __main__.__file__ stays RELATIVE through Python 3.8 (bpo-20443
+# made it absolute only in 3.9), and the load-time chdir below would strand
+# every bare read (DV-R24's L1 face, the CI 3.8 leg). HERE is fixed above.
+_SELF = os.path.join(HERE, "smoke_test.py")
 sys.path.insert(0, HERE)
 import router as R  # noqa: E402  -- direct import for startup-validation unit checks
 
@@ -1835,13 +1840,14 @@ def main():
         print("")
         print("6) per-backend keys -- each box authenticates with its own key")
         a.require_key, b.require_key = "smoke-ka-9d41", "smoke-kb-9d41"
+        _k3log = open("keyrelay_router.err", "wb")   # DV-R24/L1b: this rig's WARNING line "no first byte after X s (stays healthy, not retried)" is the death witness -- DEVNULL ate it and a post-mortem could only reconstruct the death sentence from a 60-char truncated check detail (the lesson of this file's own flake)
         proc3 = subprocess.Popen(
             [sys.executable, ROUTER,
              "--backend", '{"id":"L","url":"http://127.0.0.1:%d","backend_api_key":"smoke-ka-9d41"}' % A_PORT,
              "--backend", '{"id":"R","url":"http://127.0.0.1:%d","backend_api_key":"smoke-kb-9d41"}' % B_PORT,
              "--listen", "127.0.0.1", "--port", str(ROUTER3_PORT),
              "--status-interval", "0.2", "--log-level", "WARNING"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=_k3log,
         )
         try:
             check("per-key router starts", wait_for(lambda: get(ROUTER3_PORT, "/healthz")[0] == 200, 20))
@@ -1888,14 +1894,30 @@ def main():
             def _keypin(cx, api):
                 # The fake box occasionally accepts then dies pre-first-byte
                 # under these back-to-back pairs (~1% reproduced in a focused
-                # 300-iteration loop); the router's answer to that is PINNED
-                # elsewhere (502, no retry on a POST, box stays healthy). So
-                # the harness may re-ask a box that was never answered --
-                # but ONLY that exact failure; any other 502 still fails.
+                # 300-iteration loop, C9); the router's answer to that is
+                # PINNED elsewhere (502, no retry on a POST, box stays
+                # healthy). So the harness may re-ask a box that was NEVER
+                # answered -- but ONLY that exact failure; any other 502
+                # still fails. DV-R19 split the old ONE timeout sentence into
+                # honest per-death sentences, and this gate must match the
+                # TWO never-answered ones: the slow-clock "accepted the
+                # request but did not start answering" AND the fast
+                # "accepted the request, then closed the connection before
+                # any final answer" -- the death this box actually performs.
+                # Matching only the first orphaned this gate at the split
+                # (DV-R24's L1 face: one fast death = one FAIL, measured
+                # burned=1; widened: one-shot recovers at burned=2, six
+                # straight deaths still book red). A box that got as far as
+                # an INFORMATIONAL status has answered -- the two 1xx
+                # sentences match neither string BY DOCTRINE (an absorbed
+                # 1xx is an answer of a kind; re-asking risks the duplicate
+                # turn the 502 itself warns about), so their exclusion is
+                # law, not a second orphan.
                 for _try in range(6):
                     _st, _h, _bb, _w = call(ROUTER3_PORT, "/v1/messages", conv(cx),
                                             extra={"x-api-key": api, "x-strata-pin": "R"})
-                    if _st != 502 or "accepted the request but" not in _bb:
+                    if _st != 502 or ("accepted the request but" not in _bb
+                                      and "then closed the connection before any final answer" not in _bb):
                         return _st, _bb
                     time.sleep(0.15)
                 return _st, _bb
@@ -1921,6 +1943,7 @@ def main():
                 proc3.wait(timeout=5)
             except Exception:
                 proc3.kill()
+            _k3log.close()
 
         print("")
         print("7) L2-review regressions -- refutation-tested defects must stay dead")
@@ -3478,7 +3501,7 @@ def main():
                 p._shadow_done.append({"cycle": _c, "samples": 11, "resolved": 11, "loss": 0, "unresolved": 0})
             return p
         _mp, _mh, _mt = _mrig()
-        _st = {"turns": 3, "last_move": 0.0, "R_hat": 4.0}
+        _st = {"turns": 3, "last_move": float("-inf"), "R_hat": 4.0}
         _mp._smart_move("mk", _mh, 8000, _st)
         check("S7: predicate fires but the shipping gate is CLOSED -- zero evidence, zero moves, and the lock is COUNTED (S9)",
               _mp.metrics["moves"] == 0 and _mp.metrics["move_gate_locked"] == 1
@@ -3492,10 +3515,38 @@ def main():
         _mp._smart_move("mk", _mh, 8000, _st)
         check("S7: tau_pp_move cooldown (900s) -- a just-moved lane does not ping-pong on the very next turn",
               _mp.metrics["moves"] == 1, "mv=%s" % _mp.metrics["moves"])
+        # DV-R24 (CI era): the mover family went red on GitHub-hosted runners and
+        # green for years on long-uptime dev boxes -- last_move/box-throttle birth
+        # at 0.0 was read as "moved at power-on" because time.monotonic() IS
+        # machine uptime. These two locks ban the SHAPE, not the remembered string
+        # (S26's own doctrine, applied one file over). The same L1 face that read
+        # this diff found the mine one layer deeper: the suite's own self-reads ran
+        # on the bare script name, which Python <=3.8 keeps RELATIVE (bpo-20443
+        # absolutized it only in 3.9) -- past the load-time chdir that is a
+        # FileNotFoundError on the CI 3.8 leg, so every self-read rides _SELF and
+        # the bare shape is banned here too. A 0.0 that is never read still lies.
+        _np24 = R.Pool([_ube("PN")], {})
+        _ns24 = _np24._lane_touch("bootlane")
+        check("S7/CI-1: a lane born this second carries NO clock -- 'never moved' is -inf, never the boot epoch (the fresh-VM CI red: at uptime < tau every newborn lane was silently mid-cooldown, mover mv=0 lock=0, homecoming refused)",
+              _ns24["last_move"] == float("-inf")
+              and time.monotonic() - _ns24["last_move"] > 900.0,
+              "born_last_move=%s" % (_ns24["last_move"],))
+        _src24 = " ".join(open(ROUTER, encoding="utf-8").read().split())
+        _fl24 = " ".join(open(_SELF, encoding="utf-8").read().split())
+        _zi24 = str(0)              # assembled at runtime: this lock's own text must not trip it; the 0-prefix covers the bare 0/0.0/0-int spellings OF THE WHITESPACE-NORMALIZED FAMILY -- a deliberate zero-space rewrite dodges (tripwire for the copy-paste family, not a shape proof)
+        check("S7/CI-2: boot-epoch clocks are banned by SHAPE in BOTH files -- no lane/box clock may be born or default to a bare 0/0.0 (the 0-prefix covers both) where a fresh machine's uptime could bill a move that never happened; and the suite may never re-open itself by the bare script name, only via _SELF -- <=3.8 keeps __file__ relative (bpo-20443 fixed it only in 3.9) and the load-time chdir would strand it (DV-R24; the same-shape lesson as S26's anchor ban, grown by its L1 face)",
+              ('"last_move": ' + _zi24) not in _src24
+              and ('"last_move": ' + _zi24) not in _fl24
+              and ('get("last_move", ' + _zi24) not in _src24
+              and ('get("last_move", ' + _zi24) not in _fl24
+              and ("_box_hc.get(old_id, " + _zi24) not in _src24
+              and ("_box_hc.get(old_id, " + _zi24) not in _fl24
+              and ("open(" + "__file__") not in _fl24,
+              "normalized-source scan, fragments assembled")
         _pp, _ph, _pt = _mrig()
         _pp._affinity_put("mk", "MH", "pin")
         _gate(_pp)
-        _pp._smart_move("mk", _ph, 8000, {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+        _pp._smart_move("mk", _ph, 8000, {"turns": 3, "last_move": float("-inf"), "R_hat": 4.0})
         check("S7: an origin=pin lane is UNTOUCHABLE by smart_move -- the exemption column does real work (V3-07)",
               _pp.metrics["moves"] == 0 and _pp.affinity.get("mk")[2] == "pin", str(_pp.affinity.get("mk")))
         _tp, _th2, _tt2 = _mrig(mv=True, tau_pp_move=0.001, tau_pp_transient=600.0)
@@ -3518,7 +3569,7 @@ def main():
         check("S7: OFF -- overflow commit stays today's sticky re-home, origins and terminals byte-unchanged (§13-8)",
               _oq.affinity.get("tk")[2] == "sticky" and _oq.metrics["overflow_placements"] == 1)
         _fp, _fh, _ft = _mrig(mv=False)
-        _stf = {"turns": 1, "last_move": 0.0, "R_hat": 4.0}
+        _stf = {"turns": 1, "last_move": float("-inf"), "R_hat": 4.0}
         _fp.pick("mk")
         check("S7: move OFF -- a sticky hit changes nothing the mover would touch: no locks, no moves, lane untouched",
               _fp.metrics["moves"] == 0 and _fp.metrics["move_gate_locked"] == 0
@@ -3599,13 +3650,13 @@ def main():
         _hp._exiled["hk"] = "GA"
         _ho.sm["empty_streak"] = 2
         _ho.sm["feed_blind"] = False           # a never-polled box is born blind (the sm dict opens with feed_blind True) -- and a blind feed is exactly what D4' refuses
-        _hp._homecoming("hk", _hw, {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        _hp._homecoming("hk", _hw, {"turns": 2, "last_move": float("-inf"), "R_hat": 4.0})
         check("S8: exiled lane comes home on the two-poll verifiably-empty proof -- origin=smart, homecomings booked",
               _hp.affinity.get("hk")[0] == "GA" and _hp.affinity.get("hk")[2] == "smart"
               and _hp.metrics["homecomings"] == 1, str(_hp.affinity.get("hk")))
         _hp._affinity_put("hk2", "GB", "sticky")
         _hp._exiled["hk2"] = "GA"
-        _hp._homecoming("hk2", _hw, {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        _hp._homecoming("hk2", _hw, {"turns": 2, "last_move": float("-inf"), "R_hat": 4.0})
         check("S8: the per-box 120s throttle holds -- a freed box drains ONE lane, not its queue (§13-5)",
               _hp.metrics["homecomings"] == 1 and _hp.affinity.get("hk2")[0] == "GB")
         _hp2 = R.Pool([_ho2 := _ube("HA"), _ube("HB")], {"smart": {"smart_homecoming": True}})
@@ -3613,7 +3664,7 @@ def main():
         _hp2._exiled["k1"] = "HA"
         _ho2.sm["empty_streak"] = 1
         _ho2.sm["feed_blind"] = False          # unblind so the streak is the ONLY refusing item
-        _hp2._homecoming("k1", _hp2.backends[1], {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        _hp2._homecoming("k1", _hp2.backends[1], {"turns": 2, "last_move": float("-inf"), "R_hat": 4.0})
         check("S8: one empty report is not a proof -- streak<2 keeps the lane put (D4' x2 consecutive)",
               _hp2.metrics["homecomings"] == 0 and _hp2.affinity.get("k1")[0] == "HB")
         _hp3 = R.Pool([_ho3 := _ube("IA"), _ube("IB")], {"smart": {"smart_homecoming": True}})
@@ -3621,7 +3672,7 @@ def main():
         _hp3._exiled["k2"] = "IA"
         _ho3.sm["empty_streak"] = 5
         _ho3.sm["feed_blind"] = False          # box fully proven -- only the transient origin may refuse
-        _hp3._homecoming("k2", _hp3.backends[1], {"turns": 2, "last_move": 0.0, "R_hat": 4.0})
+        _hp3._homecoming("k2", _hp3.backends[1], {"turns": 2, "last_move": float("-inf"), "R_hat": 4.0})
         check("S8: transient homes belong to the MOVER -- homecoming skips them (§5 scope, two mechanisms never stack)",
               _hp3.metrics["homecomings"] == 0 and _hp3.affinity.get("k2")[0] == "IB")
         _hp4 = R.Pool([_ho4 := _ube("JA"), _ube("JB")], {"smart": {"smart_homecoming": True}})
@@ -3792,7 +3843,7 @@ def main():
         # would-move turn: shadow+move co-lit never moved (the shipping shape).
         _fp, _fh, _ft = _mrig(mv=False, smart_shadow=True)
         try:
-            _fp._shadow_note_turn("mk", _fh, 8000, {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+            _fp._shadow_note_turn("mk", _fh, 8000, {"turns": 3, "last_move": float("-inf"), "R_hat": 4.0})
             _f1 = "ok"
         except Exception as _e1:
             _f1 = repr(_e1)
@@ -3850,20 +3901,20 @@ def main():
         _hp5._exiled["kq5"] = "QA"
         _ho5.status_ts = time.monotonic() - 60.0   # ...but the clock says the feed died a minute ago
         check("S10/F4: a frozen feed_blind=False is no evidence forever -- the homecoming door re-asks the LIVE clock (a dead poller cannot send lanes home)",
-              _hp5._homecoming("kq5", _hp5.by_id["QB"], {"turns": 1, "last_move": 0.0, "R_hat": 4.0}) is False)
+              _hp5._homecoming("kq5", _hp5.by_id["QB"], {"turns": 1, "last_move": float("-inf"), "R_hat": 4.0}) is False)
         _hp6 = R.Pool([_ho6 := _ube("RA"), _ube("RB")], {"smart": {"smart_homecoming": True}})
         _ho6.sm["feed_blind"] = False
         _ho6.sm["empty_streak"] = 2
         _ho6.state = R.SUSPECT               # the poller is alive and says: NOT healthy
         _hp6._exiled["kq6"] = "RA"
         check("S10/F13: a SUSPECT home never receives a lane home -- D4' item one is re-verified live, not remembered",
-              _hp6._homecoming("kq6", _hp6.by_id["RB"], {"turns": 1, "last_move": 0.0, "R_hat": 4.0}) is False)
+              _hp6._homecoming("kq6", _hp6.by_id["RB"], {"turns": 1, "last_move": float("-inf"), "R_hat": 4.0}) is False)
         _hp7 = R.Pool([_ho7 := _ube("SA"), _ube("SB")], {"smart": {"smart_homecoming": True}})
         _ho7.sm["feed_blind"] = False        # fixtures unblinded: a polled box with a fresh feed (C8 lesson)
         _ho7.sm["empty_streak"] = 2
         _hp7._exiled["kq7"] = "SA"
         check("S10/F4: the fresh, HEALTHY, verifiably-empty home STILL welcomes the lane -- the new guards prove, they do not veto",
-              _hp7._homecoming("kq7", _hp7.by_id["SB"], {"turns": 1, "last_move": 0.0, "R_hat": 4.0}) is True)
+              _hp7._homecoming("kq7", _hp7.by_id["SB"], {"turns": 1, "last_move": float("-inf"), "R_hat": 4.0}) is True)
 
         # F6 (P2): _lane was capped FIFO, not LRU -- past 20000 lanes the
         # eviction killed the HOTTEST lane's row, voiding its tau cooldown and
@@ -3889,7 +3940,7 @@ def main():
         _t7p = R.Pool([_t7h, _t7t], {"smart": {"smart_move": True, "kappa_hat": 0.01, "w_cour": 1.0}})
         _t7p._affinity_put("mk7", "7H", "sticky")
         _gate(_t7p)                          # the data gate OPEN -- only the tier law may refuse
-        _t7p._smart_move("mk7", _t7h, 8000, {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+        _t7p._smart_move("mk7", _t7h, 8000, {"turns": 3, "last_move": float("-inf"), "R_hat": 4.0})
         check("S10/F7: the mover does not cross tiers -- all four conditions true and the gate open, a tier-1-only target still means stand down (predicate first, so the gate never even hears about it)",
               _t7p.metrics["moves"] == 0 and _t7p.metrics["move_gate_locked"] == 0
               and _t7p._affinity_get("mk7") == "7H",
@@ -3950,7 +4001,7 @@ def main():
             for _k in range(_lo, _hi):
                 try:
                     _sp5._shadow_note_turn("s5k%05d" % _k, _shh, 8000,
-                                           {"turns": 3, "last_move": 0.0, "R_hat": 4.0})
+                                           {"turns": 3, "last_move": float("-inf"), "R_hat": 4.0})
                 except Exception as _e:
                     _errs5.append(repr(_e))
 
@@ -4596,7 +4647,7 @@ def main():
     _p4.sm_cfg["tau_pp_move"] = 100.0
     _row4 = _p4._lane_touch("laneX")
     _ok14 = _p4._affinity_put_smart("laneX", "B1", _row4, 1000.0)
-    _orp4 = {"turns": 1, "last_move": 0.0, "R_hat": 4.0}   # stale object, double-create shape
+    _orp4 = {"turns": 1, "last_move": float("-inf"), "R_hat": 4.0}   # stale object, double-create shape
     _ok24 = _p4._affinity_put_smart("laneX", "B2", _orp4, 1001.0)
     check("S16/F-4: an orphan st cannot bypass the lane tau -- the law reads the TABLE row (a move stamped at 1000 stands), not the object the caller captured before queuing",
           _ok14 and not _ok24 and _p4.affinity["laneX"][0] == "B1",
@@ -7002,7 +7053,7 @@ def main():
         # strings (the suite carrying the same lesion one file over: NEW-1).
         _src26 = open(ROUTER, encoding="utf-8").read()
         _f26 = " ".join(_src26.split())
-        _self26 = open(__file__, encoding="utf-8").read()
+        _self26 = open(_SELF, encoding="utf-8").read()
         _f26r = " ".join(_rd.split())
 
         def _paren_anchor_hits(_t):
@@ -7057,7 +7108,7 @@ def main():
               and "no Anthropic Messages path answered HEALTHILY" in _f26,
               "probe wording still splits the verdict and the exit code into two stories")
         check("S26/shape: the empty-name BEHAVIOR stays fail-closed as DV-R14 decided -- S25/A2's locked refusal row and the named phrase are the lock; DV-R16 fixed the four sentences around it, not the door",
-              b'("empty name", b": r15' in open(__file__, "rb").read(),
+              b'("empty name", b": r15' in open(_SELF, "rb").read(),
               "the locked refusal row vanished from the suite")
 
         # ---- S27: the harvest of DV-R17 (round 15's confirmation round). The
@@ -7208,7 +7259,7 @@ def main():
             except OSError:
                 pass
         _src27 = open(ROUTER, encoding="utf-8").read()
-        _own27 = open(__file__, encoding="utf-8").read()
+        _own27 = open(_SELF, encoding="utf-8").read()
         _n27 = sum(1 for _nd27 in ast.walk(ast.parse(_src27))
                    if isinstance(_nd27, ast.Call) and isinstance(_nd27.func, ast.Attribute)
                    and _nd27.func.attr == "_drain_body"
@@ -7808,7 +7859,7 @@ def main():
         # door that must guess which half is the host now refuses, named,
         # fail-closed, at the ONE point before either comparison.
         print("S31) DV-R21: five truth sentences and the two userinfo doors -- the KEYABLE sentence grew its header door, the GET quantifiers told true, the response-leg sentence rewritten as the position law it really is (four shapes, four fates, the killer is our gate), the 403 quote's case-fold told, the boot sermon speaks the guard's view not the family -- plus both doors refusing userinfo NAMED before any comparison, with controls proving the bracketed IPv6 rows, the foreign 403 and the lane ride untouched")
-        _sm31 = open(__file__, encoding="utf-8").read()
+        _sm31 = open(_SELF, encoding="utf-8").read()
         check("S31/keyable2: the KEYABLE sentence carries BOTH doors (A-F1: DV-fix20's own wording regression -- 'whose body could yield an affinity key' contradicted the commit's own feature table, and the live empty-body+header-pin trio rode affinity+placement all the way; interrogate every key-producing branch before adopting a discriminator, and now a LOCK does)",
               "KEYABLE has" in _rd and "TWO doors" in _rd
               and "KEYABLE with an empty body" in _rd,

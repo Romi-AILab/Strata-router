@@ -890,7 +890,7 @@ waits for the limiter.
 ## Tests
 
 ```powershell
-python smoke_test.py     # 648 checks (the run's footer prints the live count); needs loopback
+python smoke_test.py     # 650 checks (the run's footer prints the live count); needs loopback
 ```
 
 A naming house-rule, so labels and versions don't drift: `DV-RNN` names
