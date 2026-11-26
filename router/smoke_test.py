@@ -3745,7 +3745,7 @@ def main():
         _ver = subprocess.run([sys.executable, ROUTER, "--version"], capture_output=True,
                               text=True, timeout=30).stdout.strip()
         check("S9: --version speaks the shipped release (the bump is the release note's first line)",
-              _ver == "1.0.0", _ver)
+              _ver == "1.0.1", _ver)
         _TERMS = ("sticky_hits", "new_placements", "migrations", "pinned", "last_resort",
                   "overflow_placements", "overflow_rollbacks", "overflow_fizzles",
                   "overflow_evictions", "operator_cancelled", "passthrough_gets",

@@ -111,7 +111,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ROUTER_STARTED = int(time.time())   # process start epoch (stats started_at/uptime_s)
 LOG = logging.getLogger("strata-router")
 
