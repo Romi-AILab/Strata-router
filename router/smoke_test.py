@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import http.client
+import io
 import json
 import logging
 import os
@@ -8093,6 +8094,133 @@ def main():
               % ("THE PRICE OF A CLOSING DOOR" in _nsrc33,
                  "never enters _drain_body" in _nsrc33,
                  "EVERY door that closes pays ONE window" in _nsrc33))
+
+        # ---- S34: DV-fix27 -- the gh-70765-era stdlib (v3.13.10+ and
+        # v3.14.1+ -- one backport cycle cut 2025-12-02; v3.14.0 is the lone
+        # stable ON THE 3.14 LINE that missed it -- the whole 3.13.0..3.13.9
+        # line missed it too; the 3.8-3.12 lines never got it) answers a
+        # two-word GET with a PLAIN
+        # dict and never reads the header block; run #18's three red checks
+        # were one mechanism: this file's ONE Message-only call (get_all at
+        # the duplicate-CL door) hit that dict, the handler died mid-parse,
+        # and callers read ZERO bytes. The fix re-reads the skipped block at
+        # the ONE parse choke, inside the tee window, bounded by the house
+        # quiet window, fail-closed. Era-blind by construction: the base call
+        # either read the block (stdlib Message: gate false, provably zero
+        # change) or skipped it (dict: the re-read below). Locks here are the
+        # era table's rows -- including the gh-70765 probe shape itself, which
+        # had NO lock until the era table showed it crashing.
+        print("S34) DV-fix27: the two-word GET stops being stdlib-bound and is law-bound again -- the skipped header block re-reads at the ONE parse choke (bounded, fail-closed, tee-internal), the dict never lives past the parse, and the crash CLASS is banned by a stderr witness (DV-R26; the era is CI's interpreter, not the CI)")
+        _S34_RTR, _S34_BOX = 9127, 9  # 9 = discard port: never bound, refused instantly
+        with open("s34_cfg.json", "w") as _f34c:
+            json.dump({"listen": "127.0.0.1", "port": _S34_RTR,
+                       "backends": [{"id": "s34box", "url": "http://127.0.0.1:%d" % _S34_BOX}]},
+                      _f34c)
+        _err34 = "s34_err.txt"
+        with open(_err34, "wb") as _ef34:
+            _p34r = subprocess.Popen(
+                [sys.executable, ROUTER, "--config", "s34_cfg.json", "--log-level", "WARNING"],
+                stdout=_ef34, stderr=_ef34)
+            try:
+                _up34 = False
+                _t34u = time.monotonic()
+                while time.monotonic() - _t34u < 15:
+                    try:
+                        socket.create_connection(("127.0.0.1", _S34_RTR), timeout=1).close()
+                        _up34 = True
+                        break
+                    except OSError:
+                        time.sleep(0.2)
+
+                def _raw34(payload, fin=False, to=8.0):
+                    if not _up34:
+                        return b"", 99.0
+                    _t34w = time.monotonic()
+                    _b = b""
+                    try:
+                        _s34 = socket.create_connection(("127.0.0.1", _S34_RTR), timeout=to)
+                        _s34.sendall(payload)
+                        if fin:
+                            _s34.shutdown(socket.SHUT_WR)
+                        _s34.settimeout(to)
+                        try:
+                            while True:
+                                _g34 = _s34.recv(65536)
+                                if not _g34:
+                                    break
+                                _b += _g34
+                        except OSError:
+                            pass
+                        _s34.close()
+                    except OSError:
+                        pass
+                    return _b, time.monotonic() - _t34w
+
+                _L34 = b"GET /v1/models\r\n"
+                _H34 = b"Host: 127.0.0.1:%d\r\n" % _S34_RTR
+                _d34a, _t34a = _raw34(_L34 + _H34 + b"\r\n")
+                check("S34/A: a two-word GET + Host is READ as its Host on every stdlib -- the dead box answers it a framed 502 exactly like the explicit-0.9 control (the rebinding guard LET IT THROUGH: a Host the guard can see is a Host some stdlib must hand over; on the skip-era dict it was invisible AND the handler crashed, and the caller read b'' -- run #18's S21/S23 shape, era table row 1)",
+                      _d34a.startswith(b"HTTP/1.1 502") and b"rebinding" not in _d34a,
+                      "t=%.2fs first=%r" % (_t34a, _d34a.split(b"\r\n", 1)[0][:44]))
+                _d34b, _t34b = _raw34(_L34 + b"\r\n")
+                check("S34/B: the two-word GET with no Host still dies at the NAMED framed 403 -- fail-closed keeps its SENTENCE whatever the stdlib skipped (the dict crash made the absence answerless; run #18's S22 shape, era table row 2)",
+                      _d34b.startswith(b"HTTP/1.1 403") and b"missing Host" in _d34b
+                      and b"rebinding guard" in _d34b,
+                      repr(_d34b.split(b"\r\n", 1)[0][:44]))
+                _d34d, _t34d = _raw34(_L34, fin=True)
+                check("S34/D: the gh-70765 probe ITSELF -- two-word GET + FIN, no header block at all -- arrives FRAMED and BOUNDED (t<1.5s): pre-70765 it got the 403 instantly (EOF ends the stdlib's read), the skip-era dict crashed it (zero bytes, the WIDEST exposure of the round -- every pure 0.9 probe died), and the re-read pays NOTHING on EOF (parse_headers ends at FIN; the ONE quiet window is only for the silent case this shape does not have). The shape had NO lock until the era table made its crash visible",
+                      _d34d.startswith(b"HTTP/1.1 403") and b"missing Host" in _d34d
+                      and _t34d < 1.5,
+                      "t=%.2fs first=%r" % (_t34d, _d34d.split(b"\r\n", 1)[0][:44]))
+                _d34c, _t34c = _raw34(b"GET /v1/models HTTP/0.9\r\n" + _H34 + b"\r\n")
+                check("S34/C control: the explicit-0.9 THREE-word line -- same version, no skip (the stdlib parses when a version token exists) -- answered this framed 502 on BOTH eras (probe-measured era table row 3, and the pre-fix suite already ran it green on 3.13.17): the fix's gate rides the dict marker, NOT the version string, and this control's fate proves the gate reads what the stdlib actually did",
+                      _d34c.startswith(b"HTTP/1.1 502") and b"rebinding" not in _d34c,
+                      "t=%.2fs first=%r" % (_t34c, _d34c.split(b"\r\n", 1)[0][:44]))
+            finally:
+                _p34r.terminate()
+                try:
+                    _p34r.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    _p34r.kill()
+                    _p34r.wait()
+        with open(_err34, "rb") as _ef34:
+            _err34s = _ef34.read().decode("latin-1")
+        check("S34/witness: the 0.9 family drove this router with ZERO tracebacks in its stderr (DV-R26: the crash was INVISIBLE on the wire -- the caller read b'' and only the log knew; the DV-fix25 stderr-witness doctrine, and the ban is the CLASS 'Traceback', not the one string, because any handler death on these shapes is the same family; the pre-fix stderr witness r26/probe_31317.txt holds this exact crash -- the dict's AttributeError inside socketserver's dash box)",
+              "Traceback" not in _err34s,
+              repr(_err34s[:60]) + ("...|TB|" if "Traceback" in _err34s else ""))
+
+        class _Sock34:
+            def __init__(self):
+                self.timeouts = []
+            def gettimeout(self):
+                return None
+            def settimeout(self, t):
+                self.timeouts.append(t)
+
+        def _unit34(rest):
+            h = R.Handler.__new__(R.Handler)
+            h.raw_requestline = b"GET /v1/models\r\n"
+            h.rfile = io.BytesIO(rest)
+            h.wfile = io.BytesIO()
+            h.connection = _Sock34()
+            h.request = ("127.0.0.1", 1)
+            h.client_address = ("127.0.0.1", 1)
+            ok = h.parse_request()
+            return h, ok
+
+        _h34, _ok34 = _unit34(_H34 + b"\r\n")
+        check("S34/U1: at the choke itself the dict NEVER lives past the parse -- the +Host two-word GET lands an HTTPMessage whose Host is VISIBLE, and the tee captured the block as A2 evidence (raw_hdr_lines == [Host line, terminator]) on BOTH stdlib paths: whether the base call read it or this file re-read it, the malformed-header door and the duplicate-CL door downstream see the same Message -- the era-blind unit, no sockets",
+              _ok34 and isinstance(_h34.headers, http.client.HTTPMessage)
+              and _h34.headers.get("Host") == "127.0.0.1:%d" % _S34_RTR
+              and getattr(_h34, "_raw_hdr_lines", None) == [b"Host: 127.0.0.1:%d" % _S34_RTR, b""],
+              "ok=%s headers=%r raw=%r" % (_ok34, type(_h34.headers).__name__,
+                                           getattr(_h34, "_raw_hdr_lines", None)))
+        _h34e, _ok34e = _unit34(b"")
+        check("S34/U2: the EOF shape (two-word GET + FIN, unit side) lands an EMPTY Message with Host None -- parse_headers ends at EOF with no exception and no window on every era, so the guard downstream turns None into the named 403 that wire check S34/D heard; and the dict is STILL dead on arrival here (isinstance Message asserted)",
+              _ok34e and isinstance(_h34e.headers, http.client.HTTPMessage)
+              and _h34e.headers.get("Host") is None,
+              "ok=%s headers=%r host=%r" % (_ok34e, type(_h34e.headers).__name__,
+                                            _h34e.headers.get("Host")))
 
         # ---- A3: the Tests line, lexical (the footer IS the README's number)
         _ft25 = _rd.split("python smoke_test.py")[-1]

@@ -118,6 +118,16 @@ LOG = logging.getLogger("strata-router")
 # How often the per-request watchdog peeks at the caller's socket (mirrors
 # Strata's own client watch, which runs at the same interval).
 CLIENT_WATCH_S = 0.5
+
+# The ONE quiet window the router waits for the header block that a
+# post-gh-70765 stdlib (v3.13.10+ and v3.14.1+ -- v3.14.0 EXCEPTED, the lone
+# stable that missed it -- one backport cycle cut the same day, 2025-12-02;
+# never the 3.8-3.12 lines) SKIPS on a two-word GET:
+# long enough for a burst already in flight (loopback reality), short enough
+# that a pure-0.9 probe pays ONE window and then hears its named 403 -- never
+# the hang the stdlib fix was FOR. The wait lives INSIDE the read (DV-R10 law);
+# the re-read itself is Handler._read_09_block (DV-R26).
+_W09_WINDOW = 0.4
 # A box notices a dead PARKED stream only at its next keep-alive beat
 # (Strata: QUEUE_BEAT_S = 10 s). The router releases an aborted request the
 # moment its own watchdog fires, so until that beat lands, the box's own
@@ -2714,7 +2724,12 @@ class Handler(BaseHTTPRequestHandler):
         door then refuses NAMED -- flag first, bounded drain (the
         content-length that vanished may still have a declared body queued
         behind the block), _json's framed face -- because after the stdlib
-        parse the damage is invisible (see _hdr_shape_ok for the whole law)."""
+        parse the damage is invisible (see _hdr_shape_ok for the whole law).
+        Post-gh-70765 (v3.13.10+, v3.14.1+ -- cut 2025-12-02) the stdlib may
+        SKIP the block
+        outright on a two-word GET; the window then extends over this file's
+        own bounded re-read (_read_09_block) so the evidence exists whatever
+        the stdlib chose not to read."""
         raw_lines = []
         real_rfile = self.rfile
 
@@ -2738,6 +2753,20 @@ class Handler(BaseHTTPRequestHandler):
         self.rfile = _Tee()
         try:
             ok = BaseHTTPRequestHandler.parse_request(self)
+            if ok and isinstance(self.headers, dict):
+                # gh-70765 era (v3.13.10+ and v3.14.1+, one backport cycle
+                # cut 2025-12-02): a two-word GET makes
+                # the stdlib return EARLY with headers = a plain dict, and the
+                # block's bytes are still unread on the wire. Neither half of
+                # that may decide which law answers (DV-R26): the S21/S23
+                # VERBATIM relay law needs a Host it can SEE, and the guard's
+                # named 403 needs to see its ABSENCE -- on the 3.13.17-era stdlib
+                # neither was possible and the handler died here at the dict's
+                # missing get_all (the one Message-only call in this file), so
+                # callers read ZERO bytes. Re-read the block at this ONE choke,
+                # INSIDE the tee window (the A2 evidence must exist for 0.9
+                # blocks too), bounded, fail-closed.
+                ok = self._read_09_block()
         finally:
             self.rfile = real_rfile
         # Strip ONE line terminator -- never rstrip(). A line like
@@ -2778,6 +2807,93 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True   # flag FIRST (family law)
                 self._quiet_finish()
                 self._json(400, {"error": {"message": "strata-router: duplicate content-length refused -- conflicting declared body lengths leave no winner to pick (RFC 7230 3.3.3)"}})
+                return False
+        return True
+
+    def _read_09_block(self):
+        """The pre-skip stdlib's OWN inline continuation, run here (DV-R26).
+
+        The gh-70765 rework answers a two-word GET with self.headers = {} and
+        never reads the block; the pre-rework stdlib ran exactly the lines
+        below inline the moment it assigned self.headers. Copying them -- same
+        parse_headers primitive, same two header-size doors (431), same
+        conntype/Expect tail -- makes the fix era-blind BY CONSTRUCTION:
+        after it, EVERY REQUEST THE PARSE LETS THROUGH lands on an HTTPMessage
+        on every stdlib (the two 431 doors answer with parse=False BEFORE any
+        re-assign: the skip era hands its dict to a door control-flow never
+        reaches, the pre-rework era never assigned headers at all -- the two
+        eras answer the oversized-line shape identically, council witness
+        DV-R26), and the only difference left is WHERE the bytes are waited
+        for: here, inside the house quiet window (DV-R10 -- the law lives
+        inside the read). FIN is free (parse_headers returns an empty Message
+        at EOF on every era, no exception, no wait); silence costs ONE window
+        and buys the caller a named, framed 403 -- and a block that arrives
+        LATE (after the window) gets that same named answer: bytes that miss
+        the window never re-open the answered request. Scope stated honest:
+        the pre-rework stdlib -- CONTENT-defined, not a range: the 3.8..3.12
+        line, 3.13.0..3.13.9, AND the lone stable v3.14.0 -- can still block
+        its own parse_headers on the silent shape (the gh-70765 pain) because
+        this fix cannot reach upstream of the base call; the bounded-answer
+        promise belongs to the post-rework era, and no suite check asks the
+        silent shape on the old era (a check that hangs the floor-version leg
+        is a blindfold with a green tick)."""
+        sock = self.connection
+        old_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(_W09_WINDOW)   # the wait lives INSIDE the read
+            try:
+                self.headers = http.client.parse_headers(
+                    self.rfile, _class=self.MessageClass)
+            except OSError:
+                # socket.timeout ⊂ OSError on every floor version; a dead
+                # socket lands in the same place: no block seen, fail-closed.
+                # The rebinding guard's named sentence speaks downstream --
+                # there is no Host for it to trust.
+                self.headers = self.MessageClass()
+            except http.client.LineTooLong as err:    # the stdlib's own doors,
+                self.send_error(                      # verbatim, era-identical
+                    http.HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE,
+                    "Line too long", str(err))
+                return False
+            except http.client.HTTPException as err:
+                self.send_error(
+                    http.HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE,
+                    "Too many headers", str(err))
+                return False
+        finally:
+            try:
+                sock.settimeout(old_timeout)
+            except (OSError, ValueError):
+                pass
+        # the stdlib's inline tail, verbatim. Expect stays inert on 0.9
+        # ("HTTP/0.9" < "HTTP/1.1"). The keep-alive cell is copied for
+        # construction-level identity -- and what it hands over is MEASURED
+        # stdlib law, not door-protection (DV-R26 faces + council, both
+        # eras, pre AND post fix): a refusal answered through send_error
+        # flags close and closes EVEN under a declared keep-alive (measured:
+        # 403 -> EOF; no every-door law -- a local refusal that answers
+        # through the CL-framed path honors the flip below: measured 503+KA
+        # served TWO answers on one socket), the relay's body path forces close
+        # for 0.9 at its else cell -- but an explicit Connection: keep-alive
+        # flips close=False HERE, through the stdlib's own tail, and a
+        # content-length-framed answer then holds the socket to its timeout
+        # (dead-box 502 + KA: framed answer at ~2s, socket then HELD, both
+        # eras, identical pre-fix on the old era). Inherited, era-invariant,
+        # framing honest (CL self-delimits); a bare 0.9 caller never declares
+        # keep-alive -- booked OBS, era-inherited. The N-2 law stands for the
+        # callers it names: without a keep-alive declaration, 0.9 answers
+        # arrive close-delimited.
+        conntype = self.headers.get("Connection", "")
+        if conntype.lower() == "close":
+            self.close_connection = True
+        elif (conntype.lower() == "keep-alive" and
+              self.protocol_version >= "HTTP/1.1"):
+            self.close_connection = False
+        expect = self.headers.get("Expect", "")
+        if (expect.lower() == "100-continue" and
+                self.protocol_version >= "HTTP/1.1" and
+                self.request_version >= "HTTP/1.1"):
+            if not self.handle_expect_100():
                 return False
         return True
 

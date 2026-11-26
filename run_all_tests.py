@@ -129,13 +129,33 @@ ENV["PYTHONIOENCODING"] = "utf-8:replace"
 FAILS = []
 
 
+def _stdlib_era(exe):
+    # DV-R26 law: a version NUMBER proves nothing about parse behavior -- CI
+    # ran "3.13.17" twice before anyone read what that number DOES, and run
+    # #17's era reds died unseen because of it. Stamp the interpreter from its
+    # OWN parse_request source: the one era evidence that cannot rot
+    # (bisect CONTENT, trust the SHIP).
+    try:
+        q = subprocess.run(
+            [exe, "-c", "import inspect,http.server;"
+                        "print('gh-70765-skip' if 'is_http_0_9' in inspect.getsource"
+                        "(http.server.BaseHTTPRequestHandler.parse_request)"
+                        "else 'pre-gh-70765')"],
+            capture_output=True, text=True, timeout=20)
+        s = q.stdout.strip()
+        return s if s in ("gh-70765-skip", "pre-gh-70765") else "?unreadable"
+    except Exception:
+        return "?unreadable"
+
+
 def run_suite(name, argv, cwd, pattern, floor, floor_word):
     path = os.path.join(cwd, argv[1])
     if not os.path.isfile(path):
         FAILS.append("%s: SUITE FILE MISSING: %s" % (name, path))
         print("  FAIL  %s -- suite file is gone (%s)" % (name, path))
         return
-    print("-- %s: %s" % (name, " ".join(argv)))
+    print("-- %s: %s [stdlib era: %s]"
+          % (name, " ".join(argv), _stdlib_era(argv[0])))
     sys.stdout.flush()   # child writes the fd directly; flush first or the
     r = subprocess.run(argv, cwd=cwd, capture_output=True, env=ENV)   # header lands after its output
     out = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
@@ -169,13 +189,15 @@ def run_suite(name, argv, cwd, pattern, floor, floor_word):
                           else len("FAIL:"):].strip()[:150] for e in evi[:8])
         FAILS.append("%s: exit %d (%s)" % (name, r.returncode, why or tail[:120]))
         print("  FAIL  %s -- exit %d (%d red line(s) surfaced)" % (name, r.returncode, len(evi)))
-        for e in evi[:8]:
+        # DV-R26 lesson, paid in full: run #17's era trio sat in THIS print's
+        # trimmed tail -- 8 of 14 shown, and the hidden reds slept through a
+        # fix round and an erratum. A count without names certifies nothing:
+        # print every red line (64 cap, and the cap itself speaks).
+        for e in evi[:64]:
             print("        " + e[:200])
-        if evi:
-            more = len(evi) - 8
-            if more > 0:
-                print("        ... %d more red line(s) above were trimmed" % more)
-        else:
+        if len(evi) > 64:
+            print("        ... %d more red line(s) beyond the 64-line cap" % (len(evi) - 64))
+        if not evi:
             print("        no FAILED/FAIL line parsed; tail:")
             print("\n".join(("        " + ln) for ln in lines[-12:]))
         return
