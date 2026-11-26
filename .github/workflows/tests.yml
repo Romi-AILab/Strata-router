@@ -8,6 +8,7 @@ name: tests
 on:
   push: { branches: [main] }
   pull_request:
+  workflow_dispatch:                 # manual door: push EVENTS are best-effort (2026-11-25 GitHub incident silently lost one -- run never created, no backfill); this re-fires CI on demand without touching history
 permissions: { contents: read }
 jobs:
   gate-and-all:                      # the repo's own one-command proof of OK
